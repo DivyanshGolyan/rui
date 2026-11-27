@@ -351,6 +351,8 @@ pub const Host = struct {
     slots_in_use: u64,
     /// The connection names the Host serves, from its reported capabilities.
     served: connection_names.NameSet = .{},
+    /// The served names at a usage limit when the Host was read (`connection_limits.zig`).
+    limited: connection_names.NameSet = .{},
 };
 
 pub const StopOutcome = union(enum) {

@@ -20,6 +20,8 @@ pub const Snapshot = struct {
     menu: ?*const picker.Menu = null,
     revision: u64 = 0,
     ready: bool = true,
+    /// The connections at a usage limit now: their rows say so and name another connection that serves the model.
+    limited: connection_names.NameSet = .{},
 };
 pub const Source = struct {
     context: *anyopaque,
@@ -292,12 +294,22 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const targets = try ctx.arena.alloc(Hover.Rect, shown.len);
     for (targets, 0..) |*target, y| target.* = .{ .row = @intCast(y), .width = size.width };
     self.hover.targets = targets;
+    const limited = if (self.source) |source| source.read(source.context).limited else connection_names.NameSet{};
     for (shown, 0..) |at, y| {
         const entry = self.menu.entries[at];
         const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, RowInset.bounds(size.width).end -| 3, self.props.unicode);
         const style = if (self.focus == .row and self.focus.row == at) self.props.selection else if (self.hover.contains(targets[y])) self.props.hover_style else self.props.ground;
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
-        paint(ctx, surface, line.text, @intCast(y), @min(3, RowInset.bounds(size.width).end), RowInset.bounds(size.width).end, style);
+        const inset = RowInset.bounds(size.width);
+        paint(ctx, surface, line.text, @intCast(y), @min(3, inset.end), inset.end, style);
+        var note_bytes: [picker.max_limit_note]u8 = undefined;
+        if (picker.limitNote(&note_bytes, entry.providers, self.provider, limited)) |note| {
+            var dim = style;
+            dim.dim = true;
+            const gap = 2;
+            const start = @min(3, inset.end) + ctx.stringWidth(line.text) + gap;
+            if (start < inset.end) paint(ctx, surface, note, @intCast(y), @intCast(start), inset.end, dim);
+        }
     }
     if (self.props.show_more and end < indices.items.len and size.height > 1) {
         const more = try std.fmt.allocPrint(ctx.arena, "{s} {d} more", .{ if (self.props.unicode) "↓" else "v", indices.items.len - end });
@@ -936,4 +948,40 @@ test "Model Tab includes its drawn filter and excludes clipped results" {
     resetDraw(&choice);
     try choice.widget().handleEvent(&ctx, tab);
     try std.testing.expectEqual(@as(usize, 0), choice.hits.len);
+}
+
+const Limits = struct {
+    menu: *const picker.Menu,
+    limited: connection_names.NameSet,
+    fn read(raw: *anyopaque) Snapshot {
+        const self: *Limits = @ptrCast(@alignCast(raw));
+        return .{ .menu = self.menu, .limited = self.limited };
+    }
+};
+
+test "SUI-184 a model on a limited connection says so and names another connection that serves it" {
+    const work = connection.Name.parse("work").?;
+    const home = connection.Name.parse("home").?;
+    const entries = [_]picker.Entry{
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{ work, home }) },
+        .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{work}) },
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ false, true }) |is_limited| {
+        var limits: Limits = .{ .menu = &menu, .limited = if (is_limited) connection_names.NameSet.of(&.{work}) else .{} };
+        var choice: Self = .{};
+        choice.openSource(.{ .context = &limits, .read = Limits.read }, work, "gpt-6.1-sol");
+        const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} });
+        var rows: [2][]const u8 = undefined;
+        for (&rows, 0..) |*row_text, y| {
+            var text: std.Io.Writer.Allocating = .init(arena.allocator());
+            for (0..drawn.size.width) |x| try text.writer.writeAll(drawn.readCell(@intCast(x), @intCast(y)).char.grapheme);
+            row_text.* = text.written();
+        }
+        try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[0], "limit reached on work · try home") != null);
+        try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[1], "limit reached on work") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows[1], "try") == null);
+    }
 }

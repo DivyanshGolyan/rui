@@ -158,6 +158,21 @@ pub const Query = struct {
     }
 };
 
+pub const max_limit_note = 2 * connection.max_name_bytes + 40;
+
+/// What a row says when the connection it lists for is at a usage limit: which one, and the first other
+/// connection that serves the model and is not limited. Null when `provider` is not limited.
+pub fn limitNote(buffer: *[max_limit_note]u8, serving: Providers, provider: connection.Name, limited: Providers) ?[]const u8 {
+    if (!limited.contains(provider)) return null;
+    const other = for (serving.slice()) |name| {
+        if (!name.eql(provider) and !limited.contains(name)) break name;
+    } else null;
+    var out: std.Io.Writer = .fixed(buffer);
+    out.print("limit reached on {s}", .{provider.slice()}) catch unreachable;
+    if (other) |name| out.print(" · try {s}", .{name.slice()}) catch unreachable;
+    return out.buffered();
+}
+
 /// The name a built-in provider shares its sign-in with, if any.
 fn sameAccount(name: *const connection.Name) ?connection.Name {
     const provider = provider_route.builtInOf(name.*) orelse return null;
@@ -513,4 +528,19 @@ test "model picker domain admits chat and unknown live IDs but not catalog-prove
     }
     try std.testing.expectEqual(catalog.shipped.len - facts.non_chat_ids.len, offered_chat);
     for (facts.non_chat_ids) |id| try std.testing.expect(Query.parse("").row(entryOf(&whole, id), .{}) == null);
+}
+
+test "SUI-184 a limited connection's row names it and the first other connection serving the model that is not limited" {
+    const work = connection.Name.parse("work").?;
+    const home = connection.Name.parse("home").?;
+    const lab = connection.Name.parse("lab").?;
+    var buffer: [max_limit_note]u8 = undefined;
+    const all = Providers.of(&.{ work, home, lab });
+    try std.testing.expectEqual(@as(?[]const u8, null), limitNote(&buffer, all, work, .{}));
+    try std.testing.expectEqualStrings("limit reached on work · try home", limitNote(&buffer, all, work, Providers.of(&.{work})).?);
+    try std.testing.expectEqualStrings("limit reached on work · try lab", limitNote(&buffer, all, work, Providers.of(&.{ work, home })).?);
+    try std.testing.expectEqualStrings("limit reached on work", limitNote(&buffer, all, work, all).?);
+    try std.testing.expectEqualStrings("limit reached on work", limitNote(&buffer, Providers.of(&.{work}), work, Providers.of(&.{work})).?);
+    const sixteen = connection.Name.parse("abcdefghijklmnop").?;
+    try std.testing.expect(limitNote(&buffer, Providers.of(&.{ sixteen, sixteen }), sixteen, Providers.of(&.{sixteen})).?.len <= max_limit_note);
 }
