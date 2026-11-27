@@ -178,8 +178,6 @@ fn tail(self: *Self, row: Row) ?[]const u8 {
 
 fn bind(self: *Self) void {
     _ = self.model_choice.validate();
-    self.model_choice.userdata = self;
-    self.model_choice.on_pick = pickModel;
     const custom_choice = if (self.model_choice.active) self.model_choice.field(@backingInt(Row.model)) else null;
     for (std.enums.values(Row)) |row| self.fields[@backingInt(row)] = .{
         .label = switch (row) {
@@ -199,14 +197,18 @@ fn bind(self: *Self) void {
         .visible = row != .memory,
     };
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
-    self.model_choice.unicode = caps.unicode;
     // Settings opens as a dialog, so it draws in the dialog's palette.
     const look: @import("Dialog.zig").Look = .of(caps);
-    self.model_choice.show_more = true;
-    self.model_choice.ground = look.ground;
-    self.model_choice.selection = look.selection;
-    self.model_choice.hover_style = look.hover;
-    self.model_choice.quiet = look.quiet;
+    self.model_choice.present(.{
+        .unicode = caps.unicode,
+        .show_more = true,
+        .userdata = self,
+        .on_pick = pickModel,
+        .ground = look.ground,
+        .selection = look.selection,
+        .hover_style = look.hover,
+        .quiet = look.quiet,
+    });
     self.panel.present(.{
         .title = "Rui",
         .top_rule = false,
@@ -894,7 +896,7 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             page.failures.set(.notifications, " · couldn't save");
             const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try Check.ascii(surface);
-            try std.testing.expect(!page.panel.props.unicode and !page.model_choice.unicode);
+            try std.testing.expect(!page.panel.props.unicode and !page.model_choice.props.unicode);
             const footer = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
             try Check.ascii(footer);
             try std.testing.expectEqualStrings("S", footer.readCell(1, 0).char.grapheme);
