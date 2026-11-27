@@ -55,40 +55,89 @@ fn fileAliasesTesting(ast: *const std.zig.Ast, items: *const Items.Items, functi
     return std.mem.eql(u8, ast.getNodeSource(alias.alias_of orelse return false), "std.testing");
 }
 
-/// By ItemId: whether the item is a function of test code.
+/// By ItemId: whether the item is a function of test code. Test evidence is a function that
+/// uses `std.testing`, and every name a `test` declaration spells; test code is what that
+/// evidence reaches by spelling names, minus what production code reaches. Production code is
+/// every function the evidence does not reach, and any function that a declaration other than a
+/// function names. So a group of helpers that name each other, or themselves, is decided as a
+/// whole: with a test caller and no production caller it is test code, and with no caller at all
+/// it stays production, because the lint cannot tell dead code from an entry point.
 fn mark(arena: Allocator, sources: *const Sources, items: *const Items.Items, bodies: *const Bodies) Allocator.Error![]bool {
-    const marked = try arena.alloc(bool, items.list.len);
-    @memset(marked, false);
-    for (items.list, marked, 0..) |item, *flag, index| {
+    const count = items.list.len;
+    const seeds = try arena.alloc(bool, count);
+    @memset(seeds, false);
+    for (items.list, seeds, 0..) |item, *flag, index| {
         if (item.kind != .function) continue;
         const ast = &sources.files[@backingInt(item.file)].ast;
         if (namesStdTesting(ast, items, bodies, item, @fromBackingInt(@intCast(index)))) flag.* = true;
     }
     const uses = try nameUses(arena, sources, items, bodies);
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (items.list, marked, 0..) |item, *flag, index| {
-            if (item.kind != .function or flag.*) continue;
-            const own: Items.ItemId = @fromBackingInt(@intCast(index));
-            var from_test = false;
-            var from_code = false;
-            const named = uses.get(item.name) orelse continue;
-            for (named.items) |held| {
-                const holder = held orelse {
-                    from_test = true;
-                    continue;
-                };
-                if (holder == own) continue;
-                if (marked[@backingInt(holder)]) from_test = true else from_code = true;
-            }
-            if (from_test and !from_code) {
-                flag.* = true;
-                changed = true;
-            }
+
+    // The names each item's own code spells, and the functions of each name.
+    const spelled = try arena.alloc(std.ArrayList([]const u8), count);
+    @memset(spelled, .empty);
+    var test_names: std.ArrayList([]const u8) = .empty;
+    var other_names: std.ArrayList([]const u8) = .empty;
+    var names = uses.iterator();
+    while (names.next()) |entry| {
+        for (entry.value_ptr.items) |held| {
+            const holder = held orelse {
+                try test_names.append(arena, entry.key_ptr.*);
+                continue;
+            };
+            try spelled[@backingInt(holder)].append(arena, entry.key_ptr.*);
+            if (items.get(holder).kind != .function) try other_names.append(arena, entry.key_ptr.*);
         }
     }
+    var named: std.StringHashMapUnmanaged(std.ArrayList(Items.ItemId)) = .empty;
+    for (items.list, 0..) |item, index| {
+        if (item.kind != .function) continue;
+        const slot = try named.getOrPutValue(arena, item.name, .empty);
+        try slot.value_ptr.append(arena, @fromBackingInt(@intCast(index)));
+    }
+
+    // Test evidence, and what it reaches.
+    const reached_by_tests = try arena.alloc(bool, count);
+    @memset(reached_by_tests, false);
+    var queue: std.ArrayList(Items.ItemId) = .empty;
+    try spread(arena, &named, test_names.items, seeds, reached_by_tests, &queue);
+    for (seeds, 0..) |seed, index| {
+        if (seed) try queue.append(arena, @fromBackingInt(@intCast(index)));
+    }
+    var next: usize = 0;
+    while (next < queue.items.len) : (next += 1) {
+        try spread(arena, &named, spelled[@backingInt(queue.items[next])].items, seeds, reached_by_tests, &queue);
+    }
+
+    // Production: everything the tests do not reach, and what it reaches.
+    const reached_by_code = try arena.alloc(bool, count);
+    @memset(reached_by_code, false);
+    queue.clearRetainingCapacity();
+    for (items.list, 0..) |item, index| {
+        if (item.kind != .function or seeds[index] or reached_by_tests[index]) continue;
+        reached_by_code[index] = true;
+        try queue.append(arena, @fromBackingInt(@intCast(index)));
+    }
+    try spread(arena, &named, other_names.items, seeds, reached_by_code, &queue);
+    next = 0;
+    while (next < queue.items.len) : (next += 1) {
+        try spread(arena, &named, spelled[@backingInt(queue.items[next])].items, seeds, reached_by_code, &queue);
+    }
+
+    const marked = try arena.alloc(bool, count);
+    for (items.list, marked, 0..) |item, *flag, index| flag.* = item.kind == .function and (seeds[index] or !reached_by_code[index]);
     return marked;
+}
+
+/// Marks the functions of every name in `spelled` that are not a seed and not yet marked, and queues them.
+fn spread(arena: Allocator, named: *const std.StringHashMapUnmanaged(std.ArrayList(Items.ItemId)), spelled: []const []const u8, seeds: []const bool, marks: []bool, queue: *std.ArrayList(Items.ItemId)) Allocator.Error!void {
+    for (spelled) |name| {
+        for ((named.get(name) orelse continue).items) |target| {
+            if (seeds[@backingInt(target)] or marks[@backingInt(target)]) continue;
+            marks[@backingInt(target)] = true;
+            try queue.append(arena, target);
+        }
+    }
 }
 
 const Uses = std.StringHashMapUnmanaged(std.ArrayList(?Items.ItemId));
@@ -177,6 +226,17 @@ test "a function only a test declaration calls is test code, and so is what it c
     const a = arena.allocator();
     try testing.expectEqual(@as(usize, 0), try leaks(a, header ++ "fn set(x: *q.Q) void {\n    x.items = 1;\n}\nfn outer(x: *q.Q) void {\n    set(x);\n}\ntest \"t\" {\n    var v: q.Q = undefined;\n    outer(&v);\n}\n"));
     try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ "fn set(x: *q.Q) void {\n    x.items = 1;\n}\npub fn run(x: *q.Q) void {\n    set(x);\n}\ntest \"t\" {\n    var v: q.Q = undefined;\n    set(&v);\n}\n"));
+}
+
+test "helpers that only name each other or themselves are decided as a group" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pair = "fn ping(x: *q.Q, n: u8) void {\n    x.items = n;\n    if (n > 0) pong(x, n - 1);\n}\nfn pong(x: *q.Q, n: u8) void {\n    if (n > 0) ping(x, n - 1);\n}\n";
+    try testing.expectEqual(@as(usize, 0), try leaks(a, header ++ pair ++ "test \"t\" {\n    var v: q.Q = undefined;\n    ping(&v, 2);\n}\n"));
+    try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ pair ++ "pub fn run(x: *q.Q) void {\n    pong(x, 1);\n}\ntest \"t\" {\n    var v: q.Q = undefined;\n    ping(&v, 2);\n}\n"));
+    try testing.expectEqual(@as(usize, 0), try leaks(a, header ++ "fn again(x: *q.Q, n: u8) void {\n    x.items = n;\n    if (n > 0) again(x, n - 1);\n}\ntest \"t\" {\n    var v: q.Q = undefined;\n    again(&v, 2);\n}\n"));
+    try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ pair));
 }
 
 test "a function a production function names through an unknown receiver stays production" {
