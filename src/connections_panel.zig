@@ -12,6 +12,7 @@ const max_line = 96;
 const lines_per_connection = 7;
 const max_lines = connection.max_served * lines_per_connection;
 const bar_cells = 10;
+const max_named_days = 999;
 const indent: [24]u8 = @splat(' ');
 
 pub const Rows = struct {
@@ -44,7 +45,7 @@ pub const Rows = struct {
             var age_bytes: [32]u8 = undefined;
             var age: std.Io.Writer = .fixed(&age_bytes);
             writeAge(&age, now -| reading.observed_at) catch {};
-            rows.add("", "  {s} · {s}", .{ fact.label.slice(), age.buffered() });
+            rows.add("", "  {s} {s} {s}", .{ fact.label.slice(), if (unicode) "·" else "-", age.buffered() });
             var widest: usize = 0;
             inline for (.{ reading.primary, reading.secondary }) |maybe| if (maybe) |window| {
                 widest = @max(widest, nameWidth(window.minutes));
@@ -67,9 +68,9 @@ pub const Rows = struct {
 };
 
 fn nameWidth(minutes: u64) usize {
-    var bytes: [24]u8 = undefined;
+    var bytes: [32]u8 = undefined;
     var out: std.Io.Writer = .fixed(&bytes);
-    writeName(&out, minutes) catch {};
+    writeName(&out, minutes) catch unreachable;
     return out.buffered().len;
 }
 
@@ -92,6 +93,8 @@ fn writeBar(out: *std.Io.Writer, window: protocol.UsageWindow, name_width: usize
 fn writeName(out: *std.Io.Writer, minutes: u64) std.Io.Writer.Error!void {
     if (minutes == 10080) return out.writeAll("weekly");
     if (minutes == 300) return out.writeAll("5-hour");
+    // The longest name a row has room for is `1438559-minute`; a longer window is named only by its order of magnitude.
+    if (minutes >= max_named_days * 1440) return out.writeAll("999+ day");
     if (minutes % 1440 == 0) return out.print("{d}-day", .{minutes / 1440});
     if (minutes % 60 == 0) return out.print("{d}-hour", .{minutes / 60});
     return out.print("{d}-minute", .{minutes});
@@ -168,15 +171,20 @@ test "SUI-183 every Connections row fits the narrowest dialog for the longest na
     // The narrowest settings dialog is 40 columns wide (a 46-column terminal); a row is its own text plus a one-column margin.
     const width = 40;
     const worst: protocol.UsageWindow = .{ .used_percent = 100, .minutes = 14 * 1440 + 60, .reset_at = now + 99 * 86400 + 23 * 3600 };
+    // The longest names the minutes domain can produce: the widest named length, the first unnamed one and the largest value.
+    const long_minutes: protocol.UsageWindow = .{ .used_percent = 100, .minutes = 999 * 1440 - 1, .reset_at = now + 99 * 86400 + 23 * 3600 };
+    const unnamed: protocol.UsageWindow = .{ .used_percent = 0, .minutes = std.math.maxInt(u64), .reset_at = null };
     const facts = [_]protocol.ConnectionFact{
         served("abcdefghijklmnop", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now - 400 * 86400, .primary = worst, .secondary = worst }),
         served("x", "ChatGPT", .chatgpt_plan, null),
+        served("long", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now, .primary = long_minutes, .secondary = unnamed }),
     };
     var rows: Rows = .{};
-    for (rows.build(&facts, now, true)) |field| {
+    for ([_]bool{ true, false }) |unicode| for (rows.build(&facts, now, unicode)) |field| {
         var cells: usize = 0;
         var each = std.unicode.Utf8View.initUnchecked(field.value).iterator();
         while (each.nextCodepoint()) |_| cells += 1;
+        if (!unicode) for (field.value) |byte| try std.testing.expect(byte < 0x80);
         try std.testing.expect(1 + field.label.len + (if (field.label.len > 0 and field.value.len > 0) @as(usize, 3) else 0) + cells <= width);
     }
 }
