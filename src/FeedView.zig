@@ -1122,7 +1122,15 @@ test "FeedView open tool heading keeps its selection background under the pointe
     }
 }
 
-test "FeedView Message summaries and wrapped peer links hover without making aggregate or prose actionable" {
+test "SUI-182 FeedView underlines a complete visible Session link" {
+    try feedHoverWitness(.peer);
+}
+
+test "SUI-185 FeedView hovers actionable Message summaries" {
+    try feedHoverWitness(.summary);
+}
+
+fn feedHoverWitness(comptime kind: enum { peer, summary }) !void {
     const Actions = struct {
         messages: usize = 0,
         opened: usize = 0,
@@ -1151,35 +1159,69 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u16{ 14, 80 }) |width| {
-        _ = try testFrame(&view, arena.allocator(), width, 12);
-        var links: usize = 0;
-        var summaries: usize = 0;
-        for (view.hover.targets) |rect| {
-            const position = view.rowPosition(@intCast(rect.row)).?;
-            const is_summary = prepared.collapsed(0, prepared.lineEnd(0)).last != null and position.offset == 0;
-            if (is_summary) {
-                summaries += 1;
-            } else {
-                links += 1;
-                try std.testing.expect(rect.width > 1);
+        const initial = try testFrame(&view, arena.allocator(), width, 12);
+        var label: [2]Hover.Rect = undefined;
+        var label_count: usize = 0;
+        var aggregate: ?Hover.Rect = null;
+        var prose: ?Hover.Rect = null;
+        for (0..initial.size.height) |row| {
+            const position = view.rowPosition(@intCast(row)) orelse continue;
+            if (position.offset == prepared.lineEnd(0) + 1) aggregate = .{ .row = @intCast(row), .width = width };
+            for (0..width) |col| {
+                const glyph = initial.readCell(col, row).char.grapheme;
+                const fragment: []const u8 = if (std.mem.eql(u8, glyph, "R"))
+                    (if (width == 14) "Review " else "Review this plan")
+                else if (width == 14 and col == 0 and std.mem.eql(u8, glyph, "t"))
+                    "this plan"
+                else
+                    continue;
+                try std.testing.expect(col + fragment.len <= width);
+                for (fragment, 0..) |_, index| try std.testing.expectEqualStrings(fragment[index..][0..1], initial.readCell(col + index, row).char.grapheme);
+                try std.testing.expect(label_count < label.len);
+                label[label_count] = .{ .row = @intCast(row), .col = @intCast(col), .width = @intCast(fragment.len) };
+                label_count += 1;
+                if (fragment[0] == 'R') prose = .{ .row = @intCast(row), .width = @intCast(col) };
             }
-            try view.widget().handleEvent(&ctx, .mouse_enter);
-            try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(rect.row), .col = @intCast(rect.col), .button = .none, .mods = .{}, .type = .motion } });
-            const hovered = try testFrame(&view, arena.allocator(), width, 12);
-            if (is_summary) {
-                try std.testing.expectEqual(view.hover_style.bg, hovered.readCell(0, @intCast(rect.row)).style.bg);
-            } else {
-                var underlined: usize = 0;
-                for (hovered.buffer) |cell| if (cell.style.ul_style == .single) {
-                    underlined += 1;
-                };
-                try std.testing.expectEqual(@as(usize, "Review this plan".len), underlined);
-            }
-            try std.testing.expect(view.selection == null and actions.messages == 0 and actions.opened == 0);
-            try view.widget().handleEvent(&ctx, .mouse_leave);
         }
-        try std.testing.expect(summaries > 0 and links > 0);
-        if (width == 14) try std.testing.expect(links > 1);
+        try std.testing.expectEqual(@as(usize, if (width == 14) 2 else 1), label_count);
+        if (kind == .summary) {
+            var summary: ?Hover.Rect = null;
+            for (view.hover.targets) |rect| if (view.rowPosition(@intCast(rect.row)).?.offset == 0) {
+                try std.testing.expect(summary == null);
+                summary = rect;
+            };
+            const target = summary orelse return error.MissingMessageSummary;
+            for ([_]Hover.Rect{ target, aggregate orelse return error.MissingAggregateSummary, prose orelse return error.MissingProse }, 0..) |rect, index| {
+                try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(rect.row), .col = @intCast(rect.col), .button = .none, .mods = .{}, .type = .motion } });
+                const hovered = try testFrame(&view, arena.allocator(), width, 12);
+                for (0..width) |col| try std.testing.expectEqual(if (index == 0) view.hover_style.bg else initial.readCell(col, @intCast(rect.row)).style.bg, hovered.readCell(col, @intCast(rect.row)).style.bg);
+                try std.testing.expectEqual(index == 0, view.hover.pointing);
+                try std.testing.expect(view.selection == null and actions.messages == 0 and actions.opened == 0);
+            }
+        } else {
+            for (label[0..label_count]) |rect| {
+                try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(rect.row), .col = @intCast(rect.col), .button = .none, .mods = .{}, .type = .motion } });
+                const hovered = try testFrame(&view, arena.allocator(), width, 12);
+                for (hovered.buffer, 0..) |cell, index| {
+                    const col: i17 = @intCast(index % width);
+                    const row: i17 = @intCast(index / width);
+                    const expected = for (label[0..label_count]) |fragment| {
+                        if (fragment.contains(col, row)) break true;
+                    } else false;
+                    try std.testing.expectEqual(expected, cell.style.ul_style == .single);
+                }
+                try std.testing.expect(view.hover.pointing and view.selection == null and actions.messages == 0 and actions.opened == 0);
+            }
+            try retryMouse(&view, &ctx, .{ .row = label[0].row, .col = label[0].col }, .press);
+            try retryMouse(&view, &ctx, .{ .row = label[0].row, .col = label[0].col }, .release);
+            try std.testing.expectEqual(@as(usize, 1), actions.opened);
+            try std.testing.expectEqual(@as(usize, 0), actions.messages);
+            actions.opened = 0;
+        }
+        try view.widget().handleEvent(&ctx, .mouse_leave);
+        try std.testing.expect(!view.hover.pointing);
+        const left = try testFrame(&view, arena.allocator(), width, 12);
+        for (initial.buffer, left.buffer) |before, after| try std.testing.expectEqual(before.style, after.style);
     }
 }
 
