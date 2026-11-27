@@ -94,7 +94,7 @@ DIAGNOSTIC = """pub const Lint = enum {
 
 
 class NewLintTest(unittest.TestCase):
-    """A lint the merge base does not have starts from a baseline; one it has may not grow."""
+    """CI-103: a lint the merge base does not have starts from a baseline; one it has may not grow."""
 
     def test_lint_names_reads_the_enum_members(self):
         self.assertEqual(allowance.lint_names(DIAGNOSTIC), {"module-cycle", "tangle", "field-leak", "shallow-module"})

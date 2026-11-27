@@ -1,4 +1,4 @@
-//! Tests for `hand-set-flag`: one fixture per case, expected values written by hand.
+//! Tests for `hand-set-flag`, the owner of catalog invariant CI-102: one fixture per case, expected values written by hand.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
