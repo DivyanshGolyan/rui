@@ -2868,7 +2868,7 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(run, rejected, answered.retention("response_metadata_exhausted", null, http_status));
-        answered.fail("response_metadata_exhausted", "", .ordinary);
+        answered.fail("response_metadata_exhausted", .empty, .ordinary);
         return .cleanup;
     };
     defer metadata.deinit();
@@ -2947,7 +2947,7 @@ noinline fn rejectOutputSchema(
     var detail: [512]u8 = undefined;
     const diagnostic = rejection.format(&detail);
     retainFailedResponse(run, rejected, answered.retention(rejection.code, diagnostic, http_status));
-    answered.reject(rejection.code, diagnostic, "", .ordinary);
+    answered.reject(rejection.code, diagnostic, .empty, .ordinary);
 }
 
 noinline fn rejectContradictoryOutput(
@@ -3071,7 +3071,7 @@ const AnsweredAttempt = struct {
     }
 
     fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: failure_report.Report) store_module.ModelFailure {
-        return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id, .report = .ofMessage(report) } };
+        return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id, .report = report } };
     }
 
     fn retention(self: *const AnsweredAttempt, code: []const u8, diagnostic: ?[]const u8, http_status: u16) failed_responses.Failure {
