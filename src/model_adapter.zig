@@ -6053,6 +6053,8 @@ test "CM-66 request preparation streams shared and built-in instructions across 
         try std.testing.expectEqualStrings(expected, instructions);
         const guidance = "When useful, link to a Session with `[label](rui-session:EXACT_ID)` using its exact ID known from Rui tools or context in the same Store. Never invent a Session ID.";
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, guidance));
+        const tool_description_guidance = "When a tool's schema exposes a `description` field, fill it in on every call, including each call in a parallel batch. Use a short, user-facing phrase that describes the action and its scope.";
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, tool_description_guidance));
         if (body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, body));
         try std.testing.expectEqual(@as(u64, result.bytes.len), result.length);
         try std.testing.expectEqual(protocol.contentDigest(result.bytes), result.digest);
@@ -6072,6 +6074,7 @@ test "CM-66 request preparation streams shared and built-in instructions across 
         defer compact_parsed.deinit();
         try std.testing.expectEqualStrings(expected, requestSystemPrompt(compact_parsed.value));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, requestSystemPrompt(compact_parsed.value), guidance));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, requestSystemPrompt(compact_parsed.value), tool_description_guidance));
     };
 }
 
@@ -6097,10 +6100,10 @@ test "CM-47 a prepared request's bytes stay as pinned over pages, tool results, 
     const Scenario = enum { pages, tool_results, bounds, peer };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "540bbba6c67f86483dc8edec2a5bfdf9b5469b0e776f4b02ac6ca2d21450a3b4",
-            .tool_results = "c6ba490b3df4642da86184ffcedeb71c2628eb7d9ad36167b1018683c11e8c0c",
-            .bounds = "946f86577efb35437726b002e56565b7ef95aa4e21194c04e5f464ef26e386f7",
-            .peer = "2eaa4dfad16e53fef92dd8e5cf4ecc4369f29712a0a39a9baabc96aaf6eaf1e3",
+            .pages = "8405b3a1825cdcd5b966a0fc003eb918b819b40ef721a8bf31f797802d4c7811",
+            .tool_results = "7f1c71edadc6f65782600514decd53ca82cb8ea3c78ee48ebb8aed93543647e5",
+            .bounds = "19d1dede0be24c16cbef791b6213e98dc0afa3eb14c3d7877503509270fde221",
+            .peer = "eb3b58ed9d4d187c44516807b0e0c8eff1f9ebdcce3ffc2c29e798d635dd575e",
         });
     };
     const testing = store.testing;
