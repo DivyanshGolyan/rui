@@ -4258,6 +4258,75 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     }
 }
 
+test "SUI-183 SessionFrontend drag endpoint witness compares plain and Alt release after last motion" {
+    try dragEndpointWitness(.inside);
+}
+
+test "SessionFrontend drag endpoint witness compares plain and Alt after leaving and returning" {
+    try dragEndpointWitness(.leave_and_return);
+}
+
+fn dragEndpointWitness(path: enum { inside, leave_and_return }) !void {
+    const Pointer = @import("testing/app_events.zig");
+    const Reports = struct {
+        fn send(ctx: *vxfw.EventContext, frame: vxfw.Surface, code: u8, point: ScreenPoint, suffix: u8) !void {
+            var buffer: [32]u8 = undefined;
+            const bytes = try std.fmt.bufPrint(&buffer, "\x1b[<{d};{d};{d}{c}", .{ code, point.col + 1, point.row + 1, suffix });
+            var parser: vaxis.Parser = .{};
+            const parsed = try parser.parse(bytes, null);
+            try std.testing.expectEqual(bytes.len, parsed.n);
+            try Pointer.mouse(ctx, frame, parsed.event.?.mouse);
+        }
+    };
+    for ([_]bool{ false, true }) |alt| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = 140, .height = 25 };
+        try seedFeed(held.screen, TerminalText.body_on ++ "abcdef\n" ++ TerminalText.body_off);
+        _ = held.self.input.append("leftRIGHT");
+        held.self.input.editors[held.self.input.active].setCursor(4);
+        const frame = try held.root.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+        const start = screenTextPoint(frame, "abcdef", 0, 0) orelse return error.MissingDragText;
+        const last_motion: ScreenPoint = .{ .row = start.row, .col = start.col + 2 };
+        const release: ScreenPoint = .{ .row = start.row, .col = start.col + 4 };
+        var ctx = held.context();
+
+        try Reports.send(&ctx, frame, if (alt) 8 else 0, start, 'M');
+        try std.testing.expect(held.self.feedState().selection_held);
+        try std.testing.expect(!held.self.app_content.dragging());
+        try Reports.send(&ctx, frame, 32, last_motion, 'M');
+        try std.testing.expect(held.self.feedState().selection_held);
+        try std.testing.expect(held.self.app_content.dragging());
+        try std.testing.expectEqualStrings("leftRIGHT", held.self.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, 0), clipboardCount(&ctx));
+
+        if (path == .leave_and_return) {
+            // The hit-test helper does not synthesize the vxfw hover transition.
+            try held.self.app_content.widget().handleEvent(&ctx, .mouse_leave);
+            try Reports.send(&ctx, frame, 32, .{ .row = start.row, .col = Root.list_width }, 'M');
+            try std.testing.expectEqual(!alt, held.self.app_content.dragging());
+            try Reports.send(&ctx, frame, 32, last_motion, 'M');
+            try std.testing.expectEqual(!alt, held.self.app_content.dragging());
+            try std.testing.expectEqual(!alt, held.self.feedState().selection_held);
+        }
+
+        try Reports.send(&ctx, frame, 0, release, 'm');
+        try std.testing.expect(!held.self.feedState().selection_held);
+        try std.testing.expect(!held.self.app_content.dragging());
+        try std.testing.expectEqual(@as(usize, if (alt) 0 else 1), clipboardCount(&ctx));
+        if (!alt) try std.testing.expectEqualStrings("abcde", lastClipboard(&ctx).?);
+        const expected_draft = if (alt and path == .inside) "left\n> abcde\nRIGHT" else "leftRIGHT";
+        try std.testing.expectEqualStrings(expected_draft, held.self.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, if (alt and path == .inside) "left\n> abcde\n".len else 4), held.self.input.composition().cursor);
+        try std.testing.expectEqual(null, held.self.input.submitted);
+        try std.testing.expectEqual(null, held.self.submission.intent);
+
+        try Reports.send(&ctx, frame, 0, release, 'm');
+        try std.testing.expectEqual(@as(usize, if (alt) 0 else 1), clipboardCount(&ctx));
+        try std.testing.expectEqualStrings(expected_draft, held.self.input.composition().bytes);
+    }
+}
+
 test "SUI-144 SessionFrontend cancels copy selection when its feed context is covered" {
     const Pointer = @import("testing/app_events.zig");
     const Context = enum { consent, info, standalone, settings, message, paste, focus, resize, leaving };
