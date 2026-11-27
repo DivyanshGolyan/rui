@@ -705,7 +705,7 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
                     .code = "unsupported_provider_output",
                     .diagnostic = "{\"reason\":\"UnsupportedMessagePhase\"}",
                     .request_id = .{},
-                    .report = "",
+                    .report = .empty,
                 } }, .ordinary, .{});
                 const healthy = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initMany(&.{ .user, .assistant }) });
                 try std.testing.expectEqual(@as(usize, 1), healthy.count);

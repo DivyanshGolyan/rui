@@ -2883,7 +2883,7 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         }
         stderr.print("rui: response data acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(run, rejected, answered.retention("response_data_exhausted", null, http_status));
-        answered.fail("response_data_exhausted", "", .ordinary);
+        answered.fail("response_data_exhausted", .empty, .ordinary);
         return .cleanup;
     };
     defer event_data.deinit();
