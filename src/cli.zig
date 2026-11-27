@@ -321,7 +321,13 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
                 store_schema.mysql_schema;
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
-        .store_check => try checkStore(init, parsed.get("store")),
+        .store_check => if (parsed.get("engine")) |engine| {
+            if (!std.mem.eql(u8, engine, "mysql")) return error.InvalidArguments;
+            var buffer: [4096]u8 = undefined;
+            var out = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+            try @import("store.zig").check_run.writeStatements(.mysql, &out.interface);
+            try out.interface.flush();
+        } else try checkStore(init, parsed.get("store")),
         .host_start, .host_pause, .host_reload_tools, .host_status => try host(init, command, parsed),
         .host_restart => try @import("host_coordinator.zig").restartAll(init),
         .host_serve => unreachable,
@@ -4695,7 +4701,7 @@ fn checkStore(init: std.process.Init, store: ?[]const u8) !void {
 fn runStoreCheck(io: std.Io, selected: []const u8, out: *std.Io.Writer, refusal: *std.Io.Writer) !caller_exit.Status {
     const paths = try platform.resolveClientPaths(io, selected);
     if (paths.kind == .mysql) {
-        try refusal.writeAll("rui: store check does not support a MySQL Store yet\n");
+        try refusal.writeAll("rui: store check does not connect to a MySQL Store; run rui store check --engine mysql and run its statements through your own client\n");
         return .environment;
     }
     var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;

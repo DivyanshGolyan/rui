@@ -55,6 +55,12 @@ pub fn checkSqlite(database_path: [:0]const u8, out: *std.Io.Writer, refusal: *s
     return .{ .checked = result };
 }
 
+/// Every check statement of `dialect`, each under a `-- name` comment line, for a database team to run read-only through
+/// its own client: the Host never connects to a MySQL Store for the check.
+pub fn writeStatements(comptime dialect: @import("rsql.zig").Dialect, out: *std.Io.Writer) error{WriteFailed}!void {
+    for (comptime store_check.checks(dialect)) |check| try out.print("-- {s}\n{s};\n", .{ check.name, check.sql });
+}
+
 pub const broken_row_lines = "content_part.ordinal\t1\ncontent_part#0\t1\ncontent_part(content_id)->content\t1\ncontent_part(part_content_id)->content\t1\n";
 const test_broken_row = "PRAGMA ignore_check_constraints=ON;PRAGMA foreign_keys=OFF;INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(5,-1,5)";
 
@@ -109,4 +115,23 @@ test "SH-185 store check on a SQLite file reports each broken rule, refuses anot
     try std.testing.expect(std.mem.indexOf(u8, refusal.buffered(), "format") != null);
 
     try std.testing.expectEqual(Outcome.open_failed, try checkSqlite("/nonexistent/dir/none.sqlite3", &out, &refusal));
+}
+
+test "SH-187 store check for MySQL prints every statement under its rule's name and opens nothing" {
+    var buffer: [512 * 1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try writeStatements(.mysql, &out);
+    const text = out.buffered();
+    const all = comptime store_check.checks(.mysql);
+    var position: usize = 0;
+    for (all) |check| {
+        const header = std.mem.indexOfPos(u8, text, position, "-- ") orelse return error.TestUnexpectedResult;
+        const line_end = std.mem.indexOfScalarPos(u8, text, header, '\n').?;
+        try std.testing.expectEqualStrings(check.name, text[header + 3 .. line_end]);
+        const statement_end = line_end + 1 + check.sql.len;
+        try std.testing.expectEqualStrings(check.sql, text[line_end + 1 .. statement_end]);
+        try std.testing.expectEqual(@as(u8, ';'), text[statement_end]);
+        position = statement_end + 2;
+    }
+    try std.testing.expectEqual(text.len, position);
 }
