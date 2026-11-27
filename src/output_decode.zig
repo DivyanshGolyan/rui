@@ -2,65 +2,30 @@ const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
+const failure_report = @import("failure_report.zig");
 const json = @import("codecs/json.zig");
 const named_scratch = @import("named_scratch.zig");
+const outcome_code = @import("outcome_code.zig");
 const output_format = @import("output_format.zig");
 const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const transport_policy = @import("transport_policy.zig");
-const utf8_validation = @import("utf8_validation.zig");
 
 pub const Decode = struct {
     classify: codecs.ClassifyScratch,
     found: codec_abi.ErrorBody,
-    code: ReportPart,
-    message: ReportPart,
 };
-
-pub const Report = protocol.Bounded(protocol.max_report_bytes);
-pub const max_part_bytes = 256;
-const shortened_mark = "…";
-comptime {
-    std.debug.assert(protocol.max_report_bytes == 2 * max_part_bytes + ": ".len + 2 * shortened_mark.len);
-}
 
 pub const ProviderFailure = struct {
     refusal: ?transport_policy.Refusal,
-    report: Report,
+    report: failure_report.Report,
 
     pub fn clear(self: *ProviderFailure) void {
         self.refusal = null;
-        self.report.len = 0;
+        self.report.clear();
     }
 };
-
-pub const ReportPart = struct {
-    text: protocol.Bounded(max_part_bytes),
-    shortened: bool,
-
-    pub fn shorten(self: *ReportPart) void {
-        self.text.len = utf8_validation.validPrefix(self.text.slice()).len;
-        self.shortened = true;
-    }
-};
-
-pub fn writeReport(report: *Report, code: *const ReportPart, message: *const ReportPart) void {
-    const mark = struct {
-        fn of(part: *const ReportPart) []const u8 {
-            return if (part.shortened) shortened_mark else "";
-        }
-    }.of;
-    report.len = 0;
-    const separator: []const u8 = if (code.text.len != 0 and message.text.len != 0) ": " else "";
-    for ([_][]const u8{ code.text.slice(), mark(code), separator, message.text.slice(), mark(message) }) |part| {
-        @memcpy(report.bytes[report.len..][0..part.len], part);
-        report.len += part.len;
-    }
-    for (report.bytes[0..report.len]) |*byte| if (byte.* < 0x20 or byte.* == 0x7f) {
-        byte.* = ' ';
-    };
-}
 
 pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, body: std.Io.File, length: u64, status: u16, failure: *ProviderFailure) execution.ErrorResponse {
     failure.clear();
@@ -72,12 +37,7 @@ pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, bod
     defer pages.unmapReadOnly(bytes);
     const found = &decode.found;
     codecs.classify(codec, &decode.classify, bytes, found);
-    for ([_]*ReportPart{ &decode.code, &decode.message }, [_]?codec_abi.ReportRange{ found.report.code, found.report.message }) |part, report| {
-        part.text.len = 0;
-        part.shortened = false;
-        if (report) |range| readPart(bytes[@intCast(range.start)..][0..@intCast(range.length)], range.escape, part);
-    }
-    writeReport(&failure.report, &decode.code, &decode.message);
+    readReport(&failure.report, bytes, found.report);
     failure.refusal = found.refusal;
     if (codecs.effortChangeRefused(codec, &decode.classify, status, bytes)) return .effort_change_refused;
     if (status == 429) if (found.refusal) |refusal| if (transport_policy.Quota.admits(refusal)) {
@@ -87,15 +47,20 @@ pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, bod
     return if (failure.refusal) |refusal| .{ .refusal = refusal } else .ordinary;
 }
 
-fn readPart(bytes: []const u8, escape: codec_abi.Escape, part: *ReportPart) void {
-    var source: SliceSource = .{ .bytes = bytes };
-    decodeInto(&source, escape, part) catch {
-        part.text.len = 0;
-        part.shortened = false;
-    };
+fn readReport(report: *failure_report.Report, bytes: []const u8, ranges: anytype) void {
+    for ([_]*failure_report.Part{ &report.code, &report.message }, [_]?codec_abi.ReportRange{ ranges.code, ranges.message }) |part, range| {
+        part.clear();
+        if (range) |found| readPart(bytes[@intCast(found.start)..][0..@intCast(found.length)], found.escape, part);
+    }
 }
 
-fn decodeInto(source: *SliceSource, escape: codec_abi.Escape, part: *ReportPart) !void {
+fn readPart(bytes: []const u8, escape: codec_abi.Escape, part: *failure_report.Part) void {
+    var source: SliceSource = .{ .bytes = bytes };
+    decodeInto(&source, escape, part) catch part.clear();
+    part.finish();
+}
+
+fn decodeInto(source: *SliceSource, escape: codec_abi.Escape, part: *failure_report.Part) !void {
     const text = &part.text;
     while (!source.done()) {
         var scalar: [4]u8 = undefined;
@@ -110,11 +75,10 @@ fn decodeInto(source: *SliceSource, escape: codec_abi.Escape, part: *ReportPart)
         @memcpy(text.bytes[text.len..][0..kept], scalar[0..kept]);
         text.len += kept;
         if (kept < count) {
-            part.shorten();
+            part.cutShort();
             return;
         }
     }
-    if (!std.unicode.utf8ValidateSlice(text.slice())) text.len = 0;
 }
 
 const SliceSource = struct {
@@ -631,8 +595,6 @@ const Grammar = struct {
     bag: Bag,
     part_bag: Bag,
     text_hash: Sha256,
-    code: ReportPart,
-    message: ReportPart,
 
     fn begin(self: *Grammar, codec: protocol.Codec, metadata: *output_format.OutputMetadataWriter, operation: output_format.ModelOperationKind, rejection: *Rejection, provider_failure: *ProviderFailure, evidence: *Evidence) void {
         self.codec = codec;
@@ -819,14 +781,7 @@ const Grammar = struct {
     }
 
     noinline fn fail(self: *Grammar, data: []const u8, failed: *const codec_abi.Failed) anyerror {
-        if (failed.report.code != null or failed.report.message != null) {
-            for ([_]*ReportPart{ &self.code, &self.message }, [_]?codec_abi.ReportRange{ failed.report.code, failed.report.message }) |part, report| {
-                part.text.len = 0;
-                part.shortened = false;
-                if (report) |range| readPart(data[@intCast(range.start)..][0..@intCast(range.length)], range.escape, part);
-            }
-            writeReport(&self.provider_failure.report, &self.code, &self.message);
-        }
+        if (failed.report.code != null or failed.report.message != null) readReport(&self.provider_failure.report, data, failed.report);
         if (failed.reason != .reported_provider_failure) return reasonError(failed.reason);
         self.provider_failure.refusal = failed.refusal;
         return if (self.provider_failure.refusal != null) error.PermanentProviderFailure else error.TemporaryProviderFailure;
@@ -881,7 +836,7 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
         try classifyForTesting(&tmp, pinned, case.body, case.body.len, case.status, &classified);
         try std.testing.expectEqual(case.refusal, classified.failure.refusal);
         if (case.refusal) |refusal| try std.testing.expectEqual(execution.ErrorResponse{ .refusal = refusal }, classified.response);
-        try std.testing.expectEqualStrings(case.report, classified.failure.report.slice());
+        try expectReport(case.report, &classified.failure.report);
     }
     const ordered = [_]struct { body: []const u8, status: u16, kind: std.meta.Tag(execution.ErrorResponse), report: []const u8 }{
         .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 429, .kind = .quota, .report = "insufficient_quota: Out." },
@@ -895,7 +850,7 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
     for (ordered) |case| {
         try classifyForTesting(&tmp, pinned, case.body, case.body.len, case.status, &classified);
         try std.testing.expectEqual(case.kind, std.meta.activeTag(classified.response));
-        try std.testing.expectEqualStrings(case.report, classified.failure.report.slice());
+        try expectReport(case.report, &classified.failure.report);
     }
 }
 
@@ -933,7 +888,7 @@ test "a malformed number makes a body not JSON, which narrows nothing" {
         try classifyForTesting(&tmp, pinned, case.body, case.body.len, case.status, &classified);
         try std.testing.expectEqual(execution.ErrorResponse.ordinary, classified.response);
         try std.testing.expectEqual(@as(?transport_policy.Refusal, null), classified.failure.refusal);
-        try std.testing.expectEqual(@as(usize, 0), classified.failure.report.len);
+        try std.testing.expect(classified.failure.report.isEmpty());
         const disposition: transport_policy.Disposition = if (case.status == 429) .temporary_http else .permanent_http;
         const failure = execution.transferDecision(.{ .transport_finished = .{ .disposition = disposition, .http_status = case.status, .retry_after_ms = 9_000 } }, classified.response).fail;
         try std.testing.expectEqual(if (case.status == 429) execution.FailureKind.temporary else .permanent, failure.kind);
@@ -957,7 +912,7 @@ test "a large error body classifies as its small twin does" {
     try classifyForTesting(&tmp, pinned, body.items, body.items.len, 429, &large);
     try std.testing.expectEqual(expected.response, large.response);
     try std.testing.expectEqual(expected.failure.refusal, large.failure.refusal);
-    try std.testing.expectEqualStrings(expected.failure.report.slice(), large.failure.report.slice());
+    try std.testing.expectEqualDeep(expected.failure.report, large.failure.report);
 }
 
 var testing_interpret: Interpret = undefined;
@@ -971,6 +926,11 @@ pub fn testingInterpret() *Interpret {
 pub fn testingProviderFailure() *ProviderFailure {
     comptime std.debug.assert(@import("builtin").is_test);
     return &testing_provider_failure;
+}
+
+fn expectReport(expected: []const u8, report: *const failure_report.Report) !void {
+    var out: [outcome_code.max_report_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, report.joined(&out));
 }
 
 const testing_item_event = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":";
@@ -1350,8 +1310,7 @@ test "a provider error event keeps its refusal and the provider's own words" {
         defer std.testing.allocator.free(sse);
         try std.testing.expectError(case.err, validateTestingSse(&tmp, sse, 4096));
         try std.testing.expectEqual(case.refusal, testingProviderFailure().refusal);
-        try std.testing.expectEqualStrings(case.report, testingProviderFailure().report.slice());
-        try std.testing.expect(testingProviderFailure().report.len <= protocol.max_report_bytes);
+        try expectReport(case.report, &testingProviderFailure().report);
     }
 }
 
@@ -2059,7 +2018,7 @@ test "MSG-3 a redacted thinking block is copied whole, and a refusal names its c
         "{\"type\":\"message_stop\"}",
     }), 64 * 1024, .assistant_response));
     try std.testing.expectEqual(@as(?transport_policy.Refusal, .policy), testingProviderFailure().refusal);
-    try std.testing.expectEqualStrings("cyber: no", testingProviderFailure().report.slice());
+    try expectReport("cyber: no", &testingProviderFailure().report);
 }
 
 test "MSG-4 the stop reasons that end without an answer name their failure" {
@@ -2182,10 +2141,10 @@ test "anthropic-messages/1 an error inside an open block is classified as betwee
     const open_block = comptime messagesData(messages_start) ++ messagesData(messages_text_start) ++ messagesData("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}");
     const single = comptime open_block ++ messagesData("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}");
     try std.testing.expectError(error.TemporaryProviderFailure, validateTestingWire(&tmp, messages_codec, single, 64 * 1024, .assistant_response));
-    try std.testing.expectEqualStrings("overloaded_error: Overloaded", testingProviderFailure().report.slice());
+    try expectReport("overloaded_error: Overloaded", &testingProviderFailure().report);
     const multi = comptime open_block ++ "data: {\"type\":\"error\",\n" ++ "data: \"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
     try std.testing.expectError(error.TemporaryProviderFailure, validateTestingWire(&tmp, messages_codec, multi, 64 * 1024, .assistant_response));
-    try std.testing.expectEqualStrings("overloaded_error: Overloaded", testingProviderFailure().report.slice());
+    try expectReport("overloaded_error: Overloaded", &testingProviderFailure().report);
     // A multi-line order violation inside the block drops the staged data with the block, and keeps its reason.
     const staged_violation = comptime open_block ++ "data: {\"type\":\"content_block_delta\",\"index\":1,\n" ++ "data: \"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n";
     try std.testing.expectError(error.InvalidProviderIndex, validateTestingWire(&tmp, messages_codec, staged_violation, 64 * 1024, .assistant_response));

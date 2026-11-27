@@ -11,7 +11,6 @@ const tool_proposal = @import("../tool_proposal.zig");
 const workspace_path = @import("../workspace_path.zig");
 const store_path = @import("../store_path.zig");
 const provider_route = @import("../provider_route.zig");
-const outcome_code = @import("../outcome_code.zig");
 const content_string = @import("../content_string.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");
@@ -1855,8 +1854,6 @@ pub const Store = struct {
         if (failure.diagnostic()) |detail| {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
-        const report = failure.report();
-        std.debug.assert(report.len <= outcome_code.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const entry = try enter(self, .fromControl(faults.control_trace));
         defer entry.release();
         var settlement: model_settlement_domain.SettleFailure = .{ .input = .{ .entry = &entry, .floor = self.reportScratch(@import("domain/history_floor.zig").FloorSearch), .prepared = prepared, .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition } };

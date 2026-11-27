@@ -3,6 +3,8 @@ const model_attempt = @import("model_attempt.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const FieldCertificate = @import("../../activity_read.zig").FieldCertificate;
 const content_string = @import("../../content_string.zig");
+const failure_report = @import("../../failure_report.zig");
+const outcome_code = @import("../../outcome_code.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_defs = @import("../../call_classification.zig");
@@ -66,14 +68,14 @@ pub const ModelFailure = union(enum) {
     pub const Correlated = struct {
         code: []const u8,
         request_id: Bounded(256),
-        report: []const u8,
+        report: failure_report.Report,
     };
 
     pub const Rejected = struct {
         code: []const u8,
         diagnostic: []const u8,
         request_id: Bounded(256),
-        report: []const u8,
+        report: failure_report.Report,
     };
 
     pub fn code(self: *const ModelFailure) []const u8 {
@@ -91,11 +93,11 @@ pub const ModelFailure = union(enum) {
         };
     }
 
-    pub fn report(self: *const ModelFailure) []const u8 {
+    pub fn report(self: *const ModelFailure) *const failure_report.Report {
         return switch (self.*) {
-            .uncorrelated => "",
-            .correlated => |value| value.report,
-            .rejected => |value| value.report,
+            .uncorrelated => &failure_report.Report.empty,
+            .correlated => |*value| &value.report,
+            .rejected => |*value| &value.report,
         };
     }
 
@@ -341,7 +343,8 @@ const FailureContent = struct {
     pair: content_domain.Pair = undefined,
 
     fn of(failure: *const ModelFailure) FailureContent {
-        const report = failure.report();
+        var out: [outcome_code.max_report_bytes]u8 = undefined;
+        const report = failure.report().joined(&out);
         return .{
             .diagnostic = if (failure.diagnostic()) |detail| .ofBytes(detail, false) else null,
             .report = if (report.len == 0) null else .ofBytes(report, false),
@@ -367,7 +370,8 @@ const FailureContent = struct {
 
     fn importReport(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
         const value = if (content.report) |*value| value else return null;
-        return try content_domain.importBytes(a, value, failure.report());
+        var out: [outcome_code.max_report_bytes]u8 = undefined;
+        return try content_domain.importBytes(a, value, failure.report().joined(&out));
     }
 };
 
@@ -419,7 +423,8 @@ pub const SettleFailure = struct {
                     t.exhausted_refusal = revision;
                     return t.queueFacts(r);
                 }
-                try queueEffortRefusal(r, row.session, revision, binding.operation_id, failure.report());
+                var out: [outcome_code.max_report_bytes]u8 = undefined;
+                try queueEffortRefusal(r, row.session, revision, binding.operation_id, failure.report().joined(&out));
                 schedule_retry.queue(r, .{
                     .operation_id = binding.operation_id,
                     .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(t.input.io))),
@@ -544,7 +549,10 @@ pub const SettleFailure = struct {
                 },
             },
         }
-        if (t.exhausted_refusal) |revision| try queueEffortRefusal(r, session, revision, binding.operation_id, failure.report());
+        if (t.exhausted_refusal) |revision| {
+            var out: [outcome_code.max_report_bytes]u8 = undefined;
+            try queueEffortRefusal(r, session, revision, binding.operation_id, failure.report().joined(&out));
+        }
         if (faults.before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
