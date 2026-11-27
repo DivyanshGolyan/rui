@@ -8,6 +8,7 @@ const Items = @import("Items.zig");
 const Diagnostic = @import("Diagnostic.zig");
 const FieldLeak = @import("FieldLeak.zig");
 const Graph = @import("Graph.zig");
+const HandSetFlag = @import("HandSetFlag.zig");
 const ModuleCycle = @import("ModuleCycle.zig");
 const References = @import("References.zig");
 const Shallow = @import("Shallow.zig");
@@ -24,6 +25,7 @@ pub fn run(arena: Allocator, sources: *const Sources, items: *const Items.Items,
     try found.appendSlice(arena, try ModuleCycle.check(arena, sources, items, refs, scope));
     try found.appendSlice(arena, try Tangle.check(arena, sources, items, refs, &graph, scope));
     try found.appendSlice(arena, try FieldLeak.check(arena, sources, items, refs, &graph, scope));
+    try found.appendSlice(arena, try HandSetFlag.check(arena, sources, items, refs, scope));
     try found.appendSlice(arena, try Shallow.check(arena, sources, items, refs, &graph, &wrappers, scope));
     return sorted(arena, found.items);
 }

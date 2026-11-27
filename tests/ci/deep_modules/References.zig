@@ -27,6 +27,7 @@ pub const classify = Places.classify;
 pub const Place = Places.Place;
 pub const placeOf = Places.placeOf;
 pub const suffixBase = Places.suffixBase;
+pub const placeStep = Places.placeStep;
 const isStructInit = Places.isStructInit;
 
 pub const Reference = struct {
@@ -40,6 +41,8 @@ pub const Reference = struct {
     access: Access,
     /// A field called through (`access == .call`): the method called on it, when it resolves.
     callee: ?ItemId = null,
+    /// A field assigned a fixed value, whatever it held: `x.f = true` or `x.f |= bits`.
+    sets: bool = false,
 };
 
 /// What `collectWithStats` met: production receivers (values whose field or method is
@@ -311,6 +314,8 @@ const Pass = struct {
     access: std.AutoHashMapUnmanaged(Ast.Node.Index, Access) = .empty,
     /// The call that a field of a place is called through, at any depth of the place.
     called: std.AutoHashMapUnmanaged(Ast.Node.Index, Ast.Node.Index) = .empty,
+    /// The fields that a context sets to a fixed value: the whole place of `x.f = true` or `x.f |= bits`.
+    sets: std.AutoHashMapUnmanaged(Ast.Node.Index, void) = .empty,
     expected: std.AutoHashMapUnmanaged(Ast.Node.Index, TypeRef) = .empty,
 
     fn run(self: *Pass, refs: *std.ArrayList(Reference)) Allocator.Error!void {
@@ -330,9 +335,13 @@ const Pass = struct {
         for (0..self.ast.nodes.len) |i| {
             var buffer: [1]Ast.Node.Index = undefined;
             const place = placeOf(self.ast, nodeAt(i), &buffer) orelse continue;
+            if (place.access == .assign and setsFixed(self.ast, nodeAt(i))) {
+                const root = place.roots[0];
+                if (self.ast.nodeTag(root) == .field_access) try self.sets.put(self.arena, root, {});
+            }
             for (place.roots) |root| {
                 var cur: ?Ast.Node.Index = root;
-                while (cur) |node| : (cur = suffixBase(self.ast, node)) {
+                while (cur) |node| : (cur = placeStep(self.ast, place.access, node)) {
                     if (self.ast.nodeTag(node) != .field_access) continue;
                     try self.access.put(self.arena, node, place.access);
                     if (place.access == .call) try self.called.put(self.arena, node, nodeAt(i));
@@ -485,7 +494,7 @@ const Pass = struct {
             .field => {
                 self.stats.found += 1;
                 const access = self.access.get(node) orelse .copy;
-                try self.addCalled(refs, at, member, name, access, if (access == .call) self.calleeAt(at, node) else null);
+                try self.addCalled(refs, at, member, name, access, if (access == .call) self.calleeAt(at, node) else null, self.sets.contains(node));
             },
             .function => {
                 self.stats.found += 1;
@@ -496,11 +505,11 @@ const Pass = struct {
     }
 
     fn add(self: *Pass, refs: *std.ArrayList(Reference), at: Here, item: ItemId, token: Ast.TokenIndex, access: Access) Allocator.Error!void {
-        try self.addCalled(refs, at, item, token, access, null);
+        try self.addCalled(refs, at, item, token, access, null, false);
     }
 
-    fn addCalled(self: *Pass, refs: *std.ArrayList(Reference), at: Here, item: ItemId, token: Ast.TokenIndex, access: Access, callee: ?ItemId) Allocator.Error!void {
-        try refs.append(self.arena, .{ .from = self.from, .holder = at.holder, .item = item, .file = self.file, .token = token, .access = access, .callee = callee });
+    fn addCalled(self: *Pass, refs: *std.ArrayList(Reference), at: Here, item: ItemId, token: Ast.TokenIndex, access: Access, callee: ?ItemId, sets: bool) Allocator.Error!void {
+        try refs.append(self.arena, .{ .from = self.from, .holder = at.holder, .item = item, .file = self.file, .token = token, .access = access, .callee = callee, .sets = sets });
     }
 
     /// The method called on the value `receiver` names, when that call resolves.
@@ -511,6 +520,19 @@ const Pass = struct {
         return Infer.calleeOf(at.locals, self.items, self.sources, at.scope, self.file, call.ast.fn_expr, self.resultOf(call_node));
     }
 };
+
+/// Whether the assignment `node` gives its place a fixed value, whatever the place held:
+/// `= true`, or `|=` of anything.
+fn setsFixed(ast: *const Ast, node: Ast.Node.Index) bool {
+    return switch (ast.nodeTag(node)) {
+        .assign_bit_or => true,
+        .assign => blk: {
+            const value = ast.nodeData(node).node_and_node[1];
+            break :blk ast.nodeTag(value) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(value)), "true");
+        },
+        else => false,
+    };
+}
 
 /// The type of parameter `index` of `function`, in the function's container scope; null
 /// when the parameter has no type expression (anytype) or `function` is not a function.

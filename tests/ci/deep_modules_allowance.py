@@ -10,9 +10,12 @@ judged here, by size, against the merge base with origin/main:
 - for the circle lints (module-cycle, tangle), the total member count may not exceed the
   trusted file's total.
 
-When the allow file is absent at the merge base, this is the bootstrap run and there is
+A lint whose name is absent from the merge base's `Diagnostic.zig` is new: its first entries
+are a baseline, not growth, and from the next merge base on it is held to its count like any
+other. When the allow file is absent at the merge base, this is the bootstrap run and there is
 nothing to compare against.
 """
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +24,7 @@ from caller_errors import git
 
 ROOT = Path(__file__).resolve().parents[2]
 ALLOWANCE = "tests/ci/deep_modules.allow"
+DIAGNOSTIC = "tests/ci/deep_modules/Diagnostic.zig"
 CIRCLES = ("tangle", "module-cycle")
 
 
@@ -50,13 +54,26 @@ def sizes(text):
     return totals
 
 
-def growth(trusted, current):
-    """Messages for each lint that grew past the trusted allow file; none when there is no trusted file."""
+def lint_names(source):
+    """The names of the lints in a `Diagnostic.zig`: the members of its `Lint` enum, or None when it has none."""
+    match = re.search(r"pub const Lint = enum \{(.*?)\n\s*(?:///|pub fn|\};)", source, re.S)
+    if match is None:
+        return None
+    return {quoted or bare for quoted, bare in re.findall(r'^\s*(?:@"([^"]+)"|([A-Za-z_]\w*)),\s*$', match.group(1), re.M)}
+
+
+def growth(trusted, current, known=None):
+    """Messages for each lint that grew past the trusted allow file; none when there is no trusted file.
+
+    A lint outside `known` (the lints of the merge base) is new, and its entries are a baseline.
+    """
     if trusted is None:
         return []
     before, after = sizes(trusted), sizes(current)
     failures = []
     for lint, (count, members) in sorted(after.items()):
+        if known is not None and lint not in known:
+            continue
         base_count, base_members = before.get(lint, (0, 0))
         grew = []
         if lint not in CIRCLES and count > base_count:
@@ -77,12 +94,19 @@ def trusted_text(root, base):
     return git(root, "show", f"{base}:{ALLOWANCE}")
 
 
+def known_lints(root, base):
+    """The lints the merge base has, or None when its `Diagnostic.zig` is absent or names none."""
+    if not git(root, "ls-tree", "--name-only", base, "--", DIAGNOSTIC):
+        return None
+    return lint_names(git(root, "show", f"{base}:{DIAGNOSTIC}"))
+
+
 def check(root=ROOT, base=None):
     """The merge base compared with, the trusted allow file there (None when absent), and the growth messages."""
     if base is None:
         base = git(root, "merge-base", "HEAD", "origin/main")
     trusted = trusted_text(root, base)
-    return base, trusted, growth(trusted, (root / ALLOWANCE).read_text())
+    return base, trusted, growth(trusted, (root / ALLOWANCE).read_text(), known_lints(root, base))
 
 
 def main():
