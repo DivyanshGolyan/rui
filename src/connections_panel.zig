@@ -141,6 +141,6 @@ test "SUI-182 every Connections row fits the narrowest dialog for the longest na
     };
     var rows: Rows = .{};
     for (rows.build(&facts, now)) |field| {
-        try std.testing.expect(1 + field.label.len + 3 * @intFromBool(field.label.len > 0 and field.value.len > 0) + field.value.len <= width);
+        try std.testing.expect(1 + field.label.len + (if (field.label.len > 0 and field.value.len > 0) @as(usize, 3) else 0) + field.value.len <= width);
     }
 }
