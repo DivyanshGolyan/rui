@@ -157,10 +157,11 @@ fn behind(arena: Allocator, wrappers: *const WrapperMap, reference: References.R
 }
 
 /// Whether a reference only reads what it reaches: a copy of a field, a borrow of plain
-/// data, or a method call on a number. A call of an accessor that lends to read counts
+/// data, a method call on a number, or a call of a method that takes its receiver by value or
+/// by const pointer. A call of an accessor that lends to read counts
 /// what it lends, directly or through forwarders.
 fn copiesOf(items: *const Items.Items, wrappers: *const WrapperMap, reference: References.Reference) bool {
-    if (items.get(reference.item).kind == .field) return onlyReads(items, reference.access, &.{reference.item});
+    if (items.get(reference.item).kind == .field) return onlyReads(items, reference.access, &.{reference.item}, reference.callee);
     var called = reference.item;
     for (0..max_hops) |_| {
         const wrapper = wrappers.get(called) orelse break;
@@ -171,19 +172,19 @@ fn copiesOf(items: *const Items.Items, wrappers: *const WrapperMap, reference: R
     }
     const wrapper = wrappers.get(called) orelse return false;
     return switch (wrapper) {
-        .accessor => |access| access.to_read and access.lent.len > 0 and onlyReads(items, reference.access, access.lent),
+        .accessor => |access| access.to_read and access.lent.len > 0 and onlyReads(items, reference.access, access.lent, null),
         .forwarder => false,
     };
 }
 
-fn onlyReads(items: *const Items.Items, access: References.Access, fields: []const ItemId) bool {
+fn onlyReads(items: *const Items.Items, access: References.Access, fields: []const ItemId, callee: ?ItemId) bool {
     if (access == .reach) return false;
     for (fields) |field| {
         const plain = items.get(field).plain;
         const reads = switch (access) {
             .copy => true,
             .borrow => plain != .no,
-            .call => plain == .scalar,
+            .call => plain == .scalar or (callee != null and items.get(callee.?).readsReceiver()),
             .reach => false,
         };
         if (!reads) return false;

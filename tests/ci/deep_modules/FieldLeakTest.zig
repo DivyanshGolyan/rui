@@ -215,3 +215,46 @@ test "the report of a field two modules write, with its arms and the fields it k
     ;
     try testing.expectEqualStrings(want, out.written());
 }
+
+const inner_text = "pub const Inner = struct {\n    n: u8,\n    pub fn peek(self: *const Inner) u8 {\n        return self.n;\n    }\n    pub fn value(self: Inner) u8 {\n        return self.n;\n    }\n    pub fn bump(self: *Inner) void {\n        self.n += 1;\n    }\n};\npub const Outer = struct {\n    inner: Inner,\n};\npub const Q = struct {\n    inner: Inner,\n    maybe: ?Inner,\n    ptr: *Inner,\n    outer: Outer,\n    head: u8,\n    pub fn full(self: *Q) u8 {\n        self.head += 1;\n        return self.head;\n    }\n};\n";
+
+/// How each receiver path reaches a method of Inner, and which field of Q the call is a use of.
+const Path = struct { text: []const u8, field: []const u8 };
+const paths = [_]Path{
+    .{ .text = "x.inner", .field = "q.Q.inner" },
+    .{ .text = "x.maybe.?", .field = "q.Q.maybe" },
+    .{ .text = "x.ptr.*", .field = "q.Q.ptr" },
+    .{ .text = "x.outer.inner", .field = "q.Q.outer" },
+};
+
+fn callKeys(arena: Allocator, receiver: []const u8, method: []const u8) ![]const []const u8 {
+    const body = try std.fmt.allocPrint(arena, "const q = @import(\"q.zig\");\npub fn use(x: *q.Q) void {{\n    _ = {s}.{s}();\n}}\n", .{ receiver, method });
+    return keysOf(arena, &.{
+        .{ .path = "src/main.zig", .text = main_text },
+        .{ .path = "src/q.zig", .text = inner_text },
+        .{ .path = "src/user.zig", .text = body },
+    });
+}
+
+test "a call through a direct, optional, dereferenced or nested receiver is a read for a by-value or const method and a leak for a pointer method" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (paths) |path| {
+        errdefer std.debug.print("path: {s}\n", .{path.text});
+        try testing.expectEqual(@as(usize, 0), (try callKeys(a, path.text, "peek")).len);
+        try testing.expectEqual(@as(usize, 0), (try callKeys(a, path.text, "value")).len);
+        try expectKeys(&.{path.field}, try callKeys(a, path.text, "bump"));
+    }
+}
+
+test "a call of a method the lint cannot resolve is a leak as before" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const keys = try keysOf(arena.allocator(), &.{
+        .{ .path = "src/main.zig", .text = main_text },
+        .{ .path = "src/q.zig", .text = "pub const Q = struct {\n    items: std.ArrayList(u8),\n    head: u8,\n    pub fn full(self: *Q) u8 {\n        self.head += 1;\n        return self.head;\n    }\n};\nconst std = @import(\"std\");\n" },
+        .{ .path = "src/user.zig", .text = "const q = @import(\"q.zig\");\npub fn look(x: *q.Q) usize {\n    return x.items.getLastOrNull().?;\n}\n" },
+    });
+    try expectKeys(&.{"q.Q.items"}, keys);
+}
