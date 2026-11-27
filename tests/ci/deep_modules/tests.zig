@@ -9,6 +9,7 @@ test {
     _ = @import("FieldLeak.zig");
     _ = @import("FieldLeakTest.zig");
     _ = @import("Graph.zig");
+    _ = @import("TestCode.zig");
     _ = @import("Imports.zig");
     _ = @import("ItemSyntax.zig");
     _ = @import("Items.zig");

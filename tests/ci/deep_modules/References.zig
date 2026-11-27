@@ -1,7 +1,8 @@
 //! The uses of items in production code (deep-modules U9): each name, path, field and
 //! literal in a non-test declaration that resolves to an item gives one Reference. A field
 //! reached through a value is classified by the expression that uses the place (`classify`).
-//! A receiver of unknown type records nothing, so no reference is a guess.
+//! A receiver of unknown type records nothing, so no reference is a guess. `TestCode` then
+//! drops the references held by helpers that only tests run.
 
 const References = @This();
 
