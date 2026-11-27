@@ -12,11 +12,12 @@ const ModuleCycle = @import("ModuleCycle.zig");
 const References = @import("References.zig");
 const Shallow = @import("Shallow.zig");
 const Tangle = @import("Tangle.zig");
+const TestCode = @import("TestCode.zig");
 const Wrappers = @import("Wrappers.zig");
 
 /// Every lint's findings over `sources`, limited to `scope` when it is set, sorted by lint and then by key.
 pub fn run(arena: Allocator, sources: *const Sources, items: *const Items.Items, scope: ?Sources.NodeId) Allocator.Error![]Diagnostic.Diagnostic {
-    const refs = try References.collect(arena, sources, items);
+    const refs = try TestCode.production(arena, sources, items, try References.collect(arena, sources, items));
     var wrappers = try Wrappers.find(arena, items, sources, refs);
     const graph = try Graph.build(arena, items, refs, &wrappers);
     var found: std.ArrayList(Diagnostic.Diagnostic) = .empty;
