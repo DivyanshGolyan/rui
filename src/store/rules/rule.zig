@@ -35,7 +35,40 @@ pub const Expr = union(enum) {
 
     pub const Between = struct { value: *const Expr, low: *const Expr, high: *const Expr };
     pub const InList = struct { value: *const Expr, items: []const Expr };
-    pub const Call = struct { name: []const u8, args: []const Expr };
+    pub const Call = struct {
+        name: Name,
+        args: []const Expr,
+
+        /// The functions and rsql macros a rule may call. The renderer spells each and the evaluator answers each, both by switching
+        /// on this enum, so a call one of them lacks does not compile.
+        pub const Name = enum {
+            length,
+            octets,
+            same,
+            distinct,
+            initial,
+            charset,
+
+            pub fn spelling(self: Name) []const u8 {
+                return switch (self) {
+                    .length => "length",
+                    .octets => "@octets",
+                    .same => "@same",
+                    .distinct => "@distinct",
+                    .initial => "@initial",
+                    .charset => "@charset",
+                };
+            }
+
+            /// How many arguments the call takes; the evaluator and the renderer both refuse another count.
+            pub fn arity(self: Name) usize {
+                return switch (self) {
+                    .length, .octets => 1,
+                    .same, .distinct, .initial, .charset => 2,
+                };
+            }
+        };
+    };
     pub const Col = struct { alias: []const u8, name: []const u8 };
     /// `ne` and `bang_ne` mean the same; both exist so the DDL text a Store already carries renders unchanged (one goes at the v1 rebaseline).
     pub const Op = enum { eq, ne, bang_ne, lt, le, gt, ge };
@@ -122,7 +155,8 @@ pub fn inList(comptime value: Expr, comptime items: []const Expr) Expr {
 pub fn group(comptime inner: Expr) Expr {
     return .{ .group = &inner };
 }
-pub fn call(comptime name: []const u8, comptime args: []const Expr) Expr {
+pub fn call(comptime name: Expr.Call.Name, comptime args: []const Expr) Expr {
+    comptime if (args.len != name.arity()) @compileError("rule: " ++ name.spelling() ++ " takes a different number of arguments");
     return .{ .call = .{ .name = name, .args = args } };
 }
 pub fn exists(comptime query: Select) Expr {
@@ -171,7 +205,7 @@ pub fn render(comptime expr: Expr) []const u8 {
             .between => |b| operand(b.value.*) ++ " BETWEEN " ++ operand(b.low.*) ++ " AND " ++ operand(b.high.*),
             .in_list => |l| operand(l.value.*) ++ " IN (" ++ joinedPlain(l.items, ",") ++ ")",
             .group => |inner| "(" ++ render(inner.*) ++ ")",
-            .call => |c| c.name ++ "(" ++ joinedPlain(c.args, ",") ++ ")",
+            .call => |c| c.name.spelling() ++ "(" ++ joinedPlain(c.args, ",") ++ ")",
             .exists => |query| "EXISTS(" ++ selectText("1", query.*) ++ ")",
             .not_exists => |query| "NOT EXISTS(" ++ selectText("1", query.*) ++ ")",
             .count => |query| "(" ++ selectText("count(*)", query.*) ++ ")",
@@ -283,5 +317,14 @@ test "SH-181 a BETWEEN or an IN list used as an operand is parenthesised, a call
     const x = comptime col("t", "a");
     try std.testing.expectEqualStrings("(t.a BETWEEN 1 AND 3)=1", comptime render(eq(between(x, int(1), int(3)), int(1))));
     try std.testing.expectEqualStrings("(t.a IN (1,2)) IS NULL", comptime render(isNull(inList(x, &.{ int(1), int(2) }))));
-    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(eq(call("length", &.{x}), int(2))));
+    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(eq(call(.length, &.{x}), int(2))));
+}
+
+test "SH-181 a conjunction inside a disjunction needs a group to keep its parentheses, and a call spells as its rsql macro" {
+    const x = comptime col("t", "a");
+    const both = comptime all(&.{ eq(x, int(1)), eq(x, int(2)) });
+    try std.testing.expectEqualStrings("t.a=1 AND t.a=2 OR t.a=3", comptime render(any(&.{ both, eq(x, int(3)) })));
+    try std.testing.expectEqualStrings("(t.a=1 AND t.a=2) OR t.a=3", comptime render(any(&.{ group(both), eq(x, int(3)) })));
+    try std.testing.expectEqualStrings("@same(t.a,'x')", comptime render(call(.same, &.{ x, text("x") })));
+    try std.testing.expectEqualStrings("@initial(t.a,'a-z')", comptime render(call(.initial, &.{ x, text("a-z") })));
 }

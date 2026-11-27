@@ -122,7 +122,7 @@ pub fn references(comptime column: []const u8, comptime table: []const u8, compt
     return .{ .columns = &.{column}, .references = table, .referenced = referenced };
 }
 
-const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = r.all(&.{ r.call("@initial", &.{ r.field("provider"), r.text("a-z") }), r.call("@charset", &.{ r.field("provider"), r.text("a-z0-9_-") }) }) };
+const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = r.all(&.{ r.call(.initial, &.{ r.field("provider"), r.text("a-z") }), r.call(.charset, &.{ r.field("provider"), r.text("a-z0-9_-") }) }) };
 /// The wire grammar a revision's bags were written by (codec_abi.Dialect's codecs); each revision freezes its own.
 const codec_column: Column = .{ .name = "codec", .type = .{ .text = .{ .min = 3, .max = 40 } } };
 const codec_options_column: Column = .{ .name = "codec_options", .type = .{ .bytes = .{ .min = 1, .max = 512 } }, .nullable = true };
@@ -170,7 +170,7 @@ pub const tables = blk: {
                 .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
                 .{ .name = "byte_length", .type = .int, .check = r.all(&.{ r.ge(r.field("byte_length"), r.int(0)), r.le(r.field("byte_length"), r.int(1073737728)) }) },
                 .{ .name = "private", .type = .flag },
-                .{ .name = "payload", .type = .{ .bytes = null }, .check = r.eq(r.call("length", &.{r.field("payload")}), r.field("byte_length")), .engines = .sqlite },
+                .{ .name = "payload", .type = .{ .bytes = null }, .check = r.eq(r.call(.length, &.{r.field("payload")}), r.field("byte_length")), .engines = .sqlite },
                 .{ .name = "form", .type = .int, .default = "0", .check = r.all(&.{ r.inList(r.field("form"), &.{ r.int(0), r.int(1) }), r.any(&.{ r.eq(r.field("form"), r.int(0)), r.eq(r.field("private"), r.int(0)) }) }), .sqlite_added = true },
             },
             .primary_key = &.{"content_id"},
@@ -211,7 +211,7 @@ pub const tables = blk: {
                 .{
                     .name = "server",
                     .type = .{ .text = .{ .min = 0, .max = tool_defs.max_server_bytes } },
-                    .check = r.all(&.{ r.call("@charset", &.{ r.field("server"), r.text("A-Za-z0-9_-") }), r.any(&.{ r.all(&.{ r.eq(r.field("owner"), r.text("mcp")), r.gt(r.call("@octets", &.{r.field("server")}), r.int(0)) }), r.all(&.{ r.ne(r.field("owner"), r.text("mcp")), r.eq(r.call("@octets", &.{r.field("server")}), r.int(0)) }) }) }),
+                    .check = r.all(&.{ r.call(.charset, &.{ r.field("server"), r.text("A-Za-z0-9_-") }), r.any(&.{ r.all(&.{ r.eq(r.field("owner"), r.text("mcp")), r.gt(r.call(.octets, &.{r.field("server")}), r.int(0)) }), r.all(&.{ r.ne(r.field("owner"), r.text("mcp")), r.eq(r.call(.octets, &.{r.field("server")}), r.int(0)) }) }) }),
                 },
                 // App policy: the zero policy ('' and 0) on every other owner, so their rows and digests are unchanged.
                 .{
@@ -327,7 +327,7 @@ pub const tables = blk: {
                 .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = r.any(&.{ r.isNull(r.field("creator_ref")), r.ne(r.field("creator_ref"), r.field("session_ref")) }) },
                 .{ .name = "archive_seq", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 1 } },
                 .{ .name = "app_tool_set_id", .type = .int, .nullable = true, .sqlite_added = true, .range = .{ .min = 1 } },
-                .{ .name = "app_lane", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = r.any(&.{ r.isNull(r.field("app_lane")), r.eq(r.call("@octets", &.{r.field("app_lane")}), r.int(6)) }) },
+                .{ .name = "app_lane", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = r.any(&.{ r.isNull(r.field("app_lane")), r.eq(r.call(.octets, &.{r.field("app_lane")}), r.int(6)) }) },
             },
             .primary_key = &.{"session_ref"},
             .uniques = &.{&.{"created_seq"}},
@@ -666,7 +666,7 @@ pub const tables = blk: {
                 r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("usage_uncached_tokens")), r.isNull(r.field("usage_cache_read_tokens")), r.isNull(r.field("usage_cache_write_tokens")), r.isNull(r.field("usage_output_tokens")) })), r.group(r.all(&.{ r.isNotNull(r.field("usage_uncached_tokens")), r.isNotNull(r.field("usage_cache_read_tokens")), r.isNotNull(r.field("usage_cache_write_tokens")), r.isNotNull(r.field("usage_output_tokens")) })) }),
                 r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("resolution_code")), r.isNotNull(r.field("retry_due_at_ms")) })), r.group(r.all(&.{ r.isNotNull(r.field("resolution_code")), r.isNull(r.field("retry_due_at_ms")) })) }),
                 r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("resolution_code")), r.eq(r.field("retry_due_at_ms"), r.int(0)), r.isNotNull(r.field("attempt_at")), r.isNull(r.field("retry_scheduled_at")), r.isNull(r.field("resolved_at")) })), r.group(r.all(&.{ r.isNull(r.field("resolution_code")), r.gt(r.field("retry_due_at_ms"), r.int(0)), r.isNull(r.field("attempt_at")), r.isNotNull(r.field("retry_scheduled_at")), r.isNull(r.field("resolved_at")) })), r.group(r.all(&.{ r.isNotNull(r.field("resolution_code")), r.isNull(r.field("attempt_at")), r.isNull(r.field("retry_scheduled_at")), r.isNotNull(r.field("resolved_at")) })) }),
-                r.any(&.{ r.group(r.all(&.{ r.call("@same", &.{ r.field("resolution_code"), r.text("interrupted") }), r.isNotNull(r.field("interrupted_by_command_key")) })), r.group(r.all(&.{ r.bangNe(r.call("coalesce", &.{ r.field("resolution_code"), r.text("") }), r.text("interrupted")), r.isNull(r.field("interrupted_by_command_key")) })) }),
+                r.any(&.{ r.group(r.all(&.{ r.call(.same, &.{ r.field("resolution_code"), r.text("interrupted") }), r.isNotNull(r.field("interrupted_by_command_key")) })), r.group(r.all(&.{ r.bangNe(r.coalesce(&.{ r.field("resolution_code"), r.text("") }), r.text("interrupted")), r.isNull(r.field("interrupted_by_command_key")) })) }),
                 r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("history_floor")), r.isNull(r.field("history_level")), r.isNull(r.field("history_dropped")) })), r.group(r.all(&.{ r.isNotNull(r.field("history_floor")), r.eq(r.field("purpose"), r.int(1)), r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("history_level")), r.isNull(r.field("history_dropped")) })), r.group(r.all(&.{ r.isNotNull(r.field("history_level")), r.isNotNull(r.field("history_dropped")) })) }) })) }),
             },
         },
@@ -839,7 +839,7 @@ pub const tables = blk: {
                 references("rejection_content_id", "content", content_reference),
             },
             .checks = &.{
-                r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("rejection_code")), r.isNull(r.field("rejection_content_id")), r.isNull(r.field("acceptance_position")), r.call("@same", &.{ r.field("action_kind"), r.int(1) }) })), r.group(r.all(&.{ r.isNotNull(r.field("rejection_code")), r.isNotNull(r.field("rejection_content_id")), r.isNotNull(r.field("acceptance_position")), r.isNull(r.field("action_kind")) })) }),
+                r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("rejection_code")), r.isNull(r.field("rejection_content_id")), r.isNull(r.field("acceptance_position")), r.call(.same, &.{ r.field("action_kind"), r.int(1) }) })), r.group(r.all(&.{ r.isNotNull(r.field("rejection_code")), r.isNotNull(r.field("rejection_content_id")), r.isNotNull(r.field("acceptance_position")), r.isNull(r.field("action_kind")) })) }),
             },
             .without_rowid = true,
         },
@@ -897,7 +897,7 @@ pub const tables = blk: {
                 .{ .columns = &.{ "session_ref", "permission_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
             },
             .checks = &.{
-                r.any(&.{ r.call("@distinct", &.{ r.field("resolution_code"), r.text("denied") }), r.group(r.all(&.{ r.eq(r.field("authorized"), r.int(0)), r.eq(r.field("attempt_ordinal"), r.int(0)) })) }),
+                r.any(&.{ r.call(.distinct, &.{ r.field("resolution_code"), r.text("denied") }), r.group(r.all(&.{ r.eq(r.field("authorized"), r.int(0)), r.eq(r.field("attempt_ordinal"), r.int(0)) })) }),
                 r.any(&.{ r.group(r.all(&.{ r.eq(r.field("attempt_ordinal"), r.int(0)), r.isNull(r.field("attempt_timeout_ms")) })), r.group(r.all(&.{ r.eq(r.field("attempt_ordinal"), r.int(1)), r.isNotNull(r.field("attempt_timeout_ms")) })) }),
                 r.any(&.{ r.group(r.all(&.{ r.isNull(r.field("resolution_code")), r.isNull(r.field("resolution_content_id")), r.isNull(r.field("acceptance_position")) })), r.group(r.all(&.{ r.isNotNull(r.field("resolution_code")), r.isNotNull(r.field("resolution_content_id")), r.isNotNull(r.field("acceptance_position")) })) }),
                 r.eq(r.eq(r.field("attempt_ordinal"), r.int(1)), r.isNotNull(r.field("attempt_at"))),

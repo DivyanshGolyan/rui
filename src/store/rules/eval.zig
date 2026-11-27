@@ -100,12 +100,12 @@ pub fn eval(expr: *const Expr, scope: Scope) Error!Value {
             return if (inner == .null) .null else Value.flag(!inner.isTrue());
         },
         .all => |parts| {
-            var unknown = false;
+            var answer = Value.flag(true);
             for (parts) |*part| {
-                const value = try eval(part, scope);
-                if (value == .null) unknown = true else if (!value.isTrue()) return Value.flag(false);
+                answer = conjunction(answer, try eval(part, scope));
+                if (answer == .int and !answer.isTrue()) return answer;
             }
-            return if (unknown) .null else Value.flag(true);
+            return answer;
         },
         .any => |parts| {
             var unknown = false;
@@ -157,31 +157,35 @@ fn conjunction(a: Value, b: Value) Value {
     return if (a == .null or b == .null) .null else Value.flag(true);
 }
 
-/// The functions and rsql macros a rule may call. `@same` and `@distinct` never answer unknown; the rest are unknown for NULL.
+/// A call answers as its rsql macro or function does. `same` and `distinct` never answer unknown; the rest are unknown for NULL.
+/// The arity and the argument kinds are checked before any argument is read, so a wrong call is an error whatever the row holds.
+/// `length` and `octets` count the bytes of the value, which is what the Store's byte columns and `@octets` mean.
 fn callValue(c: Expr.Call, scope: Scope) Error!Value {
-    const is = std.mem.eql;
-    if (is(u8, c.name, "@same") or is(u8, c.name, "@distinct")) {
-        if (c.args.len != 2) return error.BadCall;
-        const a = try eval(&c.args[0], scope);
-        const b = try eval(&c.args[1], scope);
-        const same = if (a == .null or b == .null) a == .null and b == .null else (try compare(.eq, a, b)).isTrue();
-        return Value.flag(same == is(u8, c.name, "@same"));
+    if (c.args.len != c.name.arity()) return error.BadCall;
+    switch (c.name) {
+        .same, .distinct => {
+            const a = try eval(&c.args[0], scope);
+            const b = try eval(&c.args[1], scope);
+            const same = if (a == .null or b == .null) a == .null and b == .null else (try compare(.eq, a, b)).isTrue();
+            return Value.flag(same == (c.name == .same));
+        },
+        .length, .octets => {
+            const subject = try eval(&c.args[0], scope);
+            if (subject == .null) return .null;
+            if (subject != .text) return error.BadCall;
+            return .{ .int = @intCast(subject.text.len) };
+        },
+        .initial, .charset => {
+            if (c.args[1] != .text) return error.BadCall;
+            const subject = try eval(&c.args[0], scope);
+            if (subject == .null) return .null;
+            if (subject != .text) return error.BadCall;
+            const set = c.args[1].text;
+            if (c.name == .initial) return Value.flag(subject.text.len != 0 and char_set.inSet(set, subject.text[0]));
+            for (subject.text) |byte| if (!char_set.inSet(set, byte)) return Value.flag(false);
+            return Value.flag(true);
+        },
     }
-    if (c.args.len == 0) return error.BadCall;
-    const subject = try eval(&c.args[0], scope);
-    if (subject == .null) return .null;
-    if (is(u8, c.name, "length") or is(u8, c.name, "@octets")) {
-        if (c.args.len != 1 or subject != .text) return error.BadCall;
-        return .{ .int = @intCast(subject.text.len) };
-    }
-    if (c.args.len != 2 or subject != .text or c.args[1] != .text) return error.BadCall;
-    const set = c.args[1].text;
-    if (is(u8, c.name, "@initial")) return Value.flag(subject.text.len != 0 and char_set.inSet(set, subject.text[0]));
-    if (is(u8, c.name, "@charset")) {
-        for (subject.text) |byte| if (!char_set.inSet(set, byte)) return Value.flag(false);
-        return Value.flag(true);
-    }
-    return error.BadCall;
 }
 
 fn compare(op: Expr.Op, left: Value, right: Value) Error!Value {
@@ -312,7 +316,7 @@ test "an unknown column or table is an error, never a quiet false" {
     try std.testing.expectError(error.UnknownTable, checks(comptime rule.exists(missing), &cols, &.{i(1)}));
 }
 
-test "between, in-list, length and the rsql macros follow SQL's answers for NULL" {
+test "SH-180 between, in-list, length and the rsql macros follow SQL's answers for NULL" {
     const cols = [_][]const u8{ "n", "s" };
     const in_range = comptime rule.between(rule.field("n"), int(1), int(3));
     const listed = comptime rule.inList(rule.field("n"), &.{ int(1), int(2), rule.null_value });
@@ -322,15 +326,15 @@ test "between, in-list, length and the rsql macros follow SQL's answers for NULL
     try std.testing.expectEqual(i(1), try evalRow(listed, &cols, &.{ i(2), n }));
     // 5 is in no member, and a NULL member makes that unknown rather than false.
     try std.testing.expectEqual(n, try evalRow(listed, &cols, &.{ i(5), n }));
-    const same = comptime rule.call("@same", &.{ rule.field("n"), rule.null_value });
-    const distinct = comptime rule.call("@distinct", &.{ rule.field("s"), rule.text("x") });
+    const same = comptime rule.call(.same, &.{ rule.field("n"), rule.null_value });
+    const distinct = comptime rule.call(.distinct, &.{ rule.field("s"), rule.text("x") });
     try std.testing.expectEqual(i(1), try evalRow(same, &cols, &.{ n, n }));
     try std.testing.expectEqual(i(0), try evalRow(same, &cols, &.{ i(1), n }));
     try std.testing.expectEqual(i(1), try evalRow(distinct, &cols, &.{ n, n }));
     try std.testing.expectEqual(i(0), try evalRow(distinct, &cols, &.{ n, .{ .text = "x" } }));
-    const octets = comptime rule.eq(rule.call("@octets", &.{rule.field("s")}), int(2));
+    const octets = comptime rule.eq(rule.call(.octets, &.{rule.field("s")}), int(2));
     try std.testing.expectEqual(i(1), try evalRow(octets, &cols, &.{ n, .{ .text = "\xc3\xa9" } }));
-    const shape = comptime rule.all(&.{ rule.call("@initial", &.{ rule.field("s"), rule.text("a-z") }), rule.call("@charset", &.{ rule.field("s"), rule.text("a-z0-9") }) });
+    const shape = comptime rule.all(&.{ rule.call(.initial, &.{ rule.field("s"), rule.text("a-z") }), rule.call(.charset, &.{ rule.field("s"), rule.text("a-z0-9") }) });
     try std.testing.expectEqual(i(1), try evalRow(shape, &cols, &.{ n, .{ .text = "ab1" } }));
     try std.testing.expectEqual(i(0), try evalRow(shape, &cols, &.{ n, .{ .text = "1ab" } }));
 }
