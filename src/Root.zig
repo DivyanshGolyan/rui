@@ -1545,7 +1545,9 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expect(root.session == null);
     try root.openSession(&ctx, empty.widget(), null);
     try root.openSettings(&ctx);
-    root.settings_page.panel.fields = &.{.{ .label = "Effort", .value = "high" }};
+    var effort_props = root.settings_page.panel.props;
+    effort_props.fields = &.{.{ .label = "Effort", .value = "high" }};
+    root.settings_page.panel.present(effort_props);
     root.settings_page.panel.selected = 0;
     root.settings_page.panel.openChoice(&.{ "low", "high" }, 1);
     try root.closeSession(&ctx);

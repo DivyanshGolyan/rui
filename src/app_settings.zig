@@ -57,7 +57,7 @@ reference_rows: usize = 0,
 reference_height: usize = 0,
 values: preferences.Values = .{},
 read_failed: bool = false,
-panel: Panel = .{ .title = "Rui", .top_rule = false, .natural_height = true },
+panel: Panel = .{},
 footer: Footer = .{ .left = "Settings", .right = "esc", .left_inset = 1 },
 model_choice: ModelChoice = .{},
 fields: [row_count]Panel.Field = undefined,
@@ -88,7 +88,6 @@ pub fn cancelChoice(self: *Self) void {
 fn cancelEdit(self: *Self) void {
     self.panel.closeChoice();
     self.model_choice.cancel();
-    self.panel.custom_choice = null;
 }
 
 pub fn takesKey(self: *const Self, key: vaxis.Key) bool {
@@ -110,7 +109,9 @@ pub fn upgradeTakesEscape(self: *const Self) bool {
 }
 
 pub fn select(self: *Self, row: Row) void {
-    self.panel.selected = @backingInt(row);
+    // Binding first gives the panel its fields, which selection reads.
+    self.bind();
+    self.panel.select(@backingInt(row));
 }
 
 const unavailable_rows = [_]Panel.Field{.{ .label = "", .value = "unavailable: the Host cannot be read" }};
@@ -176,13 +177,10 @@ fn tail(self: *Self, row: Row) ?[]const u8 {
 }
 
 fn bind(self: *Self) void {
-    self.panel.userdata = self;
-    self.panel.on_activate = activate;
-    self.panel.on_pick = pick;
     _ = self.model_choice.validate();
     self.model_choice.userdata = self;
     self.model_choice.on_pick = pickModel;
-    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(@backingInt(Row.model)) else null;
+    const custom_choice = if (self.model_choice.active) self.model_choice.field(@backingInt(Row.model)) else null;
     for (std.enums.values(Row)) |row| self.fields[@backingInt(row)] = .{
         .label = switch (row) {
             .model => "Model",
@@ -200,23 +198,34 @@ fn bind(self: *Self) void {
         .selectable = row != .memory,
         .visible = row != .memory,
     };
-    self.panel.fields = &self.fields;
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
-    self.panel.unicode = caps.unicode;
     self.model_choice.unicode = caps.unicode;
     // Settings opens as a dialog, so it draws in the dialog's palette.
     const look: @import("Dialog.zig").Look = .of(caps);
-    self.panel.ground = look.ground;
-    self.panel.selection = look.selection;
-    self.panel.hover_style = look.hover;
-    self.panel.title_style = look.title;
-    self.panel.quiet = look.quiet;
-    self.panel.rule = look.stitch(.horizontal);
     self.model_choice.show_more = true;
-    self.model_choice.ground = self.panel.ground;
-    self.model_choice.selection = self.panel.selection;
-    self.model_choice.hover_style = self.panel.hover_style;
-    self.model_choice.quiet = self.panel.quiet;
+    self.model_choice.ground = look.ground;
+    self.model_choice.selection = look.selection;
+    self.model_choice.hover_style = look.hover;
+    self.model_choice.quiet = look.quiet;
+    self.panel.present(.{
+        .title = "Rui",
+        .top_rule = false,
+        .natural_height = true,
+        .unicode = caps.unicode,
+        .fields = &self.fields,
+        .custom_choice = custom_choice,
+        .userdata = self,
+        .on_activate = activate,
+        .on_pick = pick,
+        .style = .{
+            .ground = look.ground,
+            .selection = look.selection,
+            .hover = look.hover,
+            .title = look.title,
+            .quiet = look.quiet,
+            .rule = look.stitch(.horizontal),
+        },
+    });
 }
 
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
@@ -308,7 +317,6 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
 
 fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    self.panel.custom_choice = null;
     try self.save(ctx, .model, .{
         .provider = .{ .set = self.model_choice.providerName() },
         .model = .{ .set = id },
@@ -343,7 +351,6 @@ fn poll(self: *Self) !void {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.model_choice.active and !self.model_choice.validate()) {
-        self.panel.custom_choice = null;
         ctx.consumeAndRedraw();
         return;
     }
@@ -399,12 +406,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         return surface;
     }
     self.bind();
-    self.panel.top_rule = false;
-    self.panel.natural_height = true;
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const memory = if (self.backend) |backend| (if (backend.memory) |read| read(backend.context) else null) else null;
-    const text = try @import("memory_text.zig").fit(ctx.arena, memory, self.panel.unicode, Panel.valueWidth(size.width));
+    const text = try @import("memory_text.zig").fit(ctx.arena, memory, self.panel.props.unicode, Panel.valueWidth(size.width));
     self.fields[@backingInt(Row.memory)].value = text;
     self.fields[@backingInt(Row.memory)].visible = text.len != 0;
     const surface = try self.panel.widget().draw(ctx);
@@ -889,7 +894,7 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             page.failures.set(.notifications, " · couldn't save");
             const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try Check.ascii(surface);
-            try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
+            try std.testing.expect(!page.panel.props.unicode and !page.model_choice.unicode);
             const footer = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
             try Check.ascii(footer);
             try std.testing.expectEqualStrings("S", footer.readCell(1, 0).char.grapheme);
@@ -943,13 +948,13 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         var mouse: vaxis.Mouse = .{ .col = 1, .row = permissions_row, .button = .none, .type = .motion, .mods = .{} };
         try page.widget().handleEvent(&events, .{ .mouse = mouse });
         var surface = try page.widget().draw(draw_ctx);
-        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
-        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, 1).style.bg);
+        try std.testing.expectEqual(page.panel.style().hover.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        try std.testing.expectEqual(page.panel.style().selection.bg, surface.children[0].surface.readCell(1, 1).style.bg);
         try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
         try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
         try page.widget().handleEvent(&events, .mouse_leave);
         surface = try page.widget().draw(draw_ctx);
-        try std.testing.expectEqual(page.panel.ground.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        try std.testing.expectEqual(page.panel.style().ground.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
         mouse.button = .left;
         mouse.type = .press;
         try page.widget().handleEvent(&events, .{ .mouse = mouse });
@@ -964,7 +969,7 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         try page.widget().handleEvent(&events, .mouse_enter);
         try page.widget().handleEvent(&events, .{ .mouse = mouse });
         surface = try page.widget().draw(draw_ctx);
-        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, choice_row).style.bg);
+        try std.testing.expectEqual(page.panel.style().hover.bg, surface.children[0].surface.readCell(1, choice_row).style.bg);
         try std.testing.expectEqual(selected, page.panel.choice.?.selected);
         mouse.button = .left;
         mouse.type = .press;
@@ -1095,7 +1100,7 @@ test "Tab wraps only drawn selectable targets and inline choices" {
         .{ .label = "fact", .value = "3", .selectable = false },
         .{ .label = "four", .value = "4" },
     };
-    var panel: Panel = .{ .title = "Settings", .fields = &fields, .actions = &.{"Done"} };
+    var panel: Panel = .{ .props = .{ .title = "Settings", .fields = &fields, .actions = &.{"Done"} } };
     const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
     _ = try panel.widget().draw(draw_ctx);
     try panel.traverse(&ctx, false, @import("app_input.zig").tabNextValue);
