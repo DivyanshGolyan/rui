@@ -101,6 +101,13 @@ pub fn openChoice(self: *Self, labels: []const []const u8, current: ?usize) void
     self.choice = .{ .field = self.selected, .labels = labels, .current = checked, .selected = checked orelse 0 };
 }
 
+/// Moves the highlight of the open choice to `index`; nothing when no choice is open or it has no such label.
+pub fn selectChoice(self: *Self, index: usize) void {
+    if (self.choice) |*choice| if (index < choice.labels.len) {
+        choice.selected = index;
+    };
+}
+
 pub fn closeChoice(self: *Self) void {
     self.choice = null;
 }
@@ -1229,7 +1236,7 @@ test "Panel hosted top rule option preserves title subtitle and bounded field ta
     try std.testing.expectEqualStrings("A", compact.readCell(3, 1).char.grapheme);
 }
 
-test "SUI-184 a Panel keeps its selection and open choice fitted to its inputs, and selects only a selectable row" {
+test "SUI-184 a Panel keeps its selection and open choice fitted to its inputs,, selects only a selectable row and highlights only a label of an open choice" {
     const fields = [_]Field{
         .{ .label = "a", .value = "1" },
         .{ .label = "b", .value = "2", .selectable = false },
@@ -1251,6 +1258,17 @@ test "SUI-184 a Panel keeps its selection and open choice fitted to its inputs, 
         panel.select(row.at);
         try std.testing.expectEqual(row.want, panel.selectedIndex());
     }
+
+    // Select choice: only an open choice's highlight moves, and only to one of its labels.
+    panel.selectChoice(1);
+    try std.testing.expect(panel.choice == null);
+    panel.select(3);
+    panel.openChoice(&.{ "x", "y" }, null);
+    panel.selectChoice(1);
+    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
+    panel.selectChoice(2);
+    try std.testing.expectEqual(@as(usize, 1), panel.choice.?.selected);
+    panel.closeChoice();
 
     // Present: the selection fits the new row count, to nothing for no inputs, and an open choice whose field is gone closes.
     panel.select(4);
