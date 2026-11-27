@@ -24,7 +24,6 @@ const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
 const cli_invocation = @import("cli_invocation.zig");
 const store_target = @import("store_target.zig");
-const check_run = @import("store/check_run.zig");
 const store_path = @import("store_path.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
@@ -4686,24 +4685,25 @@ fn checkStore(init: std.process.Init, store: ?[]const u8) !void {
     var out = std.Io.File.stdout().writerStreaming(init.io, &out_buffer);
     var refusal_buffer: [512]u8 = undefined;
     var refusal = std.Io.File.stderr().writerStreaming(init.io, &refusal_buffer);
-    const result = check_run.checkSqlite(path, &out.interface, &refusal.interface) catch |err| {
-        out.interface.flush() catch {};
-        switch (err) {
-            error.StoreFormatMismatch => {},
-            error.StoreOpenFailed => refusal.interface.writeAll("rui: store check could not open the Store's SQLite file read-only; stop the Host, and for a MySQL Store this check is not available yet\n") catch {},
-            error.CheckFailed => refusal.interface.writeAll("rui: store check could not run a statement; the Store file is damaged or not a Rui Store\n") catch {},
-            error.WriteFailed => {},
-        }
-        refusal.interface.flush() catch {};
-        recordExit(.environment);
-        return error.Reported;
-    };
+    const outcome = try @import("store.zig").check_run.checkSqlite(path, &out.interface, &refusal.interface);
     out.interface.flush() catch return error.Reported;
-    if (result.breaking != 0) {
-        refusal.interface.print("rui: store check: {d} of {d} rules and references are broken by {d} rows\n", .{ result.breaking, result.checked, result.rows }) catch {};
-        refusal.interface.flush() catch {};
-        recordExit(.refused);
-        return error.Reported;
+    switch (outcome) {
+        .checked => |result| if (result.breaking != 0) {
+            try refusal.interface.print("rui: store check: {d} of {d} rules and references are broken by {d} rows\n", .{ result.breaking, result.checked, result.rows });
+            try refusal.interface.flush();
+            recordExit(.refused);
+            return error.Reported;
+        },
+        .format_mismatch, .open_failed, .check_failed => {
+            switch (outcome) {
+                .open_failed => try refusal.interface.writeAll("rui: store check could not open the Store's SQLite file read-only; stop the Host, and for a MySQL Store this check is not available yet\n"),
+                .check_failed => try refusal.interface.writeAll("rui: store check could not run a statement; the Store file is damaged or not a Rui Store\n"),
+                else => {},
+            }
+            try refusal.interface.flush();
+            recordExit(.environment);
+            return error.Reported;
+        },
     }
 }
 
