@@ -55,9 +55,11 @@ pub fn checkSqlite(database_path: [:0]const u8, out: *std.Io.Writer, refusal: *s
     return .{ .checked = result };
 }
 
+pub const broken_row_lines = "content_part.ordinal\t1\ncontent_part#0\t1\ncontent_part(content_id)->content\t1\ncontent_part(part_content_id)->content\t1\n";
 const test_broken_row = "PRAGMA ignore_check_constraints=ON;PRAGMA foreign_keys=OFF;INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(5,-1,5)";
 
-fn builtStore(tmp: *std.testing.TmpDir, io: std.Io, format: u32, broken: bool) ![:0]u8 {
+/// A Store file of `format` in `tmp`, with the row the check's tests break four rules with when `broken`.
+pub fn storeFileForTesting(tmp: *std.testing.TmpDir, io: std.Io, format: u32, broken: bool) ![:0]u8 {
     var built = try history.build(io, .sqlite, tmp, &.{ .format = format, .baseline_rows = false });
     defer built.deinit();
     if (broken) try built.exec(test_broken_row);
@@ -73,7 +75,7 @@ test "SH-185 store check on a SQLite file reports each broken rule, refuses anot
 
     var clean_tmp = std.testing.tmpDir(.{});
     defer clean_tmp.cleanup();
-    const clean = try builtStore(&clean_tmp, io, schema.schema_version, false);
+    const clean = try storeFileForTesting(&clean_tmp, io, schema.schema_version, false);
     defer std.testing.allocator.free(clean);
     const none = (try checkSqlite(clean, &out, &refusal)).checked;
     try std.testing.expectEqual(comptime store_check.checks(.sqlite).len, none.checked);
@@ -82,16 +84,13 @@ test "SH-185 store check on a SQLite file reports each broken rule, refuses anot
 
     var broken_tmp = std.testing.tmpDir(.{});
     defer broken_tmp.cleanup();
-    const broken = try builtStore(&broken_tmp, io, schema.schema_version, true);
+    const broken = try storeFileForTesting(&broken_tmp, io, schema.schema_version, true);
     defer std.testing.allocator.free(broken);
     out = .fixed(&out_buffer);
     const found = (try checkSqlite(broken, &out, &refusal)).checked;
     try std.testing.expectEqual(@as(usize, 4), found.breaking);
     try std.testing.expectEqual(@as(u64, 4), found.rows);
-    try std.testing.expectEqualStrings(
-        "content_part.ordinal\t1\ncontent_part#0\t1\ncontent_part(content_id)->content\t1\ncontent_part(part_content_id)->content\t1\n",
-        out.buffered(),
-    );
+    try std.testing.expectEqualStrings(broken_row_lines, out.buffered());
     const before = try std.Io.Dir.cwd().readFileAlloc(io, broken, std.testing.allocator, .limited(64 * 1024 * 1024));
     defer std.testing.allocator.free(before);
     out = .fixed(&out_buffer);
@@ -102,7 +101,7 @@ test "SH-185 store check on a SQLite file reports each broken rule, refuses anot
 
     var older_tmp = std.testing.tmpDir(.{});
     defer older_tmp.cleanup();
-    const older = try builtStore(&older_tmp, io, schema.schema_version - 1, true);
+    const older = try storeFileForTesting(&older_tmp, io, schema.schema_version - 1, true);
     defer std.testing.allocator.free(older);
     out = .fixed(&out_buffer);
     try std.testing.expectEqual(Outcome.format_mismatch, try checkSqlite(older, &out, &refusal));

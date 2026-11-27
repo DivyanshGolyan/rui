@@ -4724,17 +4724,16 @@ test "SH-186 store check reads the Store its saved placement names, reports a br
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
     const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &memory, .gpa = gpa, .io = io, .environ_map = &environment, .preopens = .empty };
-    const history = @import("store/history.zig");
+    const check_run = @import("store.zig").check_run;
     var clean_tmp = std.testing.tmpDir(.{});
     defer clean_tmp.cleanup();
-    var clean_built = try history.build(io, .sqlite, &clean_tmp, &.{ .format = @import("store/schema.zig").schema_version, .baseline_rows = false });
-    defer clean_built.deinit();
+    const clean_file = try check_run.storeFileForTesting(&clean_tmp, io, @import("store/schema.zig").schema_version, false);
+    defer gpa.free(clean_file);
     var broken_tmp = std.testing.tmpDir(.{});
     defer broken_tmp.cleanup();
-    var broken_built = try history.build(io, .sqlite, &broken_tmp, &.{ .format = @import("store/schema.zig").schema_version, .baseline_rows = false });
-    defer broken_built.deinit();
-    try broken_built.exec("PRAGMA ignore_check_constraints=ON;PRAGMA foreign_keys=OFF;INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(5,-1,5)");
-    const broken_lines = "content_part.ordinal\t1\ncontent_part#0\t1\ncontent_part(content_id)->content\t1\ncontent_part(part_content_id)->content\t1\n";
+    const broken_file = try check_run.storeFileForTesting(&broken_tmp, io, @import("store/schema.zig").schema_version, true);
+    defer gpa.free(broken_file);
+    const broken_lines = check_run.broken_row_lines;
     for ([_][]const u8{ "default", "moved", "mysql" }) |kind| {
         errdefer std.debug.print("placement {s}\n", .{kind});
         const dir = try std.fs.path.join(arena, &.{ tmp.root[0..tmp.root_len], kind });
@@ -4747,8 +4746,8 @@ test "SH-186 store check reads the Store its saved placement names, reports a br
         if (moved) (try std.Io.Dir.cwd().createDirPathOpen(io, data, .{ .permissions = .fromMode(0o700) })).close(io);
         // The Host directory always holds a broken decoy, so a check that ignored placement would report it.
         const decoy = try std.fs.path.join(arena, &.{ dir, "rui.sqlite3" });
-        if (!std.mem.eql(u8, kind, "mysql")) try std.Io.Dir.copyFileAbsolute(broken_built.path(), decoy, io, .{});
-        if (moved) try std.Io.Dir.copyFileAbsolute(clean_built.path(), try std.fs.path.join(arena, &.{ data, "rui.sqlite3" }), io, .{});
+        if (!std.mem.eql(u8, kind, "mysql")) try std.Io.Dir.copyFileAbsolute(broken_file, decoy, io, .{});
+        if (moved) try std.Io.Dir.copyFileAbsolute(clean_file, try std.fs.path.join(arena, &.{ data, "rui.sqlite3" }), io, .{});
         var out_buffer: [1024]u8 = undefined;
         var refusal_buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&out_buffer);
