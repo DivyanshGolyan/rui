@@ -668,7 +668,7 @@ test "Session approval target belongs to Session inputs through continuation ter
     try std.testing.expectError(error.CorruptStore, derive(.{ .created_at = 1, .now_ms = 0, .first_action = 41 }));
 }
 
-test "attention and standing match base client classification across work states" {
+test "SUI-182 attention and standing follow the work state alone across every state kind and optional ID" {
     // Expectations transcribed from attention.Attention.of and overview_view.orderClass
     // at 3e389620a3a6b83e314e02657c9e6a95e67488e8, with no viewer open stop.
     const Case = struct { state: WorkState, attention_kind: ?@FieldType(Attention, "kind"), standing: Standing };
