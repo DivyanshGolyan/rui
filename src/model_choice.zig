@@ -980,6 +980,7 @@ test "SUI-184 a model on a limited connection says so and names another connecti
             for (0..drawn.size.width) |x| try text.writer.writeAll(drawn.readCell(@intCast(x), @intCast(y)).char.grapheme);
             row_text.* = text.written();
         }
+        std.debug.print("ROWS {any}\n|{s}|\n|{s}|\n", .{ is_limited, rows[0], rows[1] });
         try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[0], "limit reached on work · try home") != null);
         try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[1], "limit reached on work") != null);
         try std.testing.expect(std.mem.indexOf(u8, rows[1], "try") == null);
