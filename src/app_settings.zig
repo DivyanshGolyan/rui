@@ -395,7 +395,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (self.reference == .connections) {
             reference.single_column = true;
             reference.fields = if (self.connection_facts) |snapshot|
-                self.connection_rows.build(snapshot.facts.slice(), snapshot.now)
+                self.connection_rows.build(snapshot.facts.slice(), snapshot.now, caps.unicode)
             else
                 &unavailable_rows;
         }
