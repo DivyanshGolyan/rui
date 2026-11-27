@@ -24,7 +24,6 @@ const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
 const cli_invocation = @import("cli_invocation.zig");
 const store_target = @import("store_target.zig");
-const store_path = @import("store_path.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
