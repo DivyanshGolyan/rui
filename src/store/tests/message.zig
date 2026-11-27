@@ -885,8 +885,9 @@ test "INS-12 every public reader projects parts with their owner" {
             }
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             {
-                const page = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
-                try std.testing.expectEqualDeep(parts_value, page.items[0].content);
+                const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.user) });
+                try std.testing.expectEqual(@as(usize, 1), page.count);
+                try std.testing.expectEqualDeep(parts_value, page.items[0].value.user.content);
                 try std.testing.expectError(error.ContentIsParts, storage.openPublicConversationContent(&.{ .session = session, .position = page.items[0].position, .ordinal = 0 }));
             }
             var historical: store_testing.TestingPage = undefined;
