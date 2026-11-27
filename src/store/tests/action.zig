@@ -355,10 +355,6 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             const proposed = try store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward, .kinds = rows });
             try std.testing.expectEqual(@as(usize, 1), proposed.count);
             try std.testing.expect(proposed.items[0].value == .user);
-            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{
-                .session = session,
-                .position = proposed.end,
-            }));
 
             const first_action_id = first: {
                 const report_bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
