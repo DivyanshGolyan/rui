@@ -558,8 +558,7 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
         var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
         choice.open(&menu, provider_route.nameOf(.codex), if (count == 0) "" else entries[if (last) count - 1 else 0].id);
         const fields = [_]Panel.Field{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" }, .{ .label = "Three", .value = "3" }, .{ .label = "Four", .value = "4" }, .{ .label = "Model", .value = "saved model" }, .{ .label = "After", .value = "next" } };
-        var panel: Panel = .{ .title = "Title", .fields = &fields, .selected = 4 };
-        if (choice.active) panel.custom_choice = choice.field(4);
+        var panel: Panel = .{ .props = .{ .title = "Title", .fields = &fields, .custom_choice = if (choice.active) choice.field(4) else null }, .selected = 4 };
         const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
         const drawn = try panel.widget().draw(draw_ctx);
         for (drawn.children) |child| {
@@ -611,7 +610,9 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
         try panel.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 0, .col = 10 } });
         try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
         choice.cancel();
-        panel.custom_choice = null;
+        var closed_props = panel.props;
+        closed_props.custom_choice = null;
+        panel.present(closed_props);
         try std.testing.expect((try panel.widget().draw(draw_ctx)).cursor == null);
     };
 }
@@ -759,14 +760,16 @@ test "Model choice hover and click follow full-width Panel matches without selec
         var fixture: Fixture = .{};
         var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 3 } } };
         choice.open(&menu, provider_route.nameOf(.codex), "model-0");
-        var panel: Panel = .{ .title = "Title", .fields = &.{.{ .label = "Model", .value = "model-0" }} };
+        var panel: Panel = .{ .props = .{ .title = "Title", .fields = &.{.{ .label = "Model", .value = "model-0" }} } };
         const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
         _ = try panel.widget().draw(draw_ctx);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try panel.widget().handleEvent(&events, .mouse_enter);
         try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
         try std.testing.expect(panel.hover.pointing);
-        panel.custom_choice = choice.field(0);
+        var custom_props = panel.props;
+        custom_props.custom_choice = choice.field(0);
+        panel.present(custom_props);
         _ = try panel.widget().draw(draw_ctx);
         var mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(panel.custom_origin + 1), .button = .none, .type = .motion, .mods = .{} };
         for (0..2) |_| {
