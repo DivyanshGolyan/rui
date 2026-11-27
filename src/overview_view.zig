@@ -505,7 +505,8 @@ pub const Carry = struct {
 
 pub const max_unconfirmed_line_bytes = 80;
 
-pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes]u8) ?[]const u8 {
+/// The newest send whose outcome is unknown, as the words that name its recovery; the sign is written where it is drawn.
+pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes]u8) ?state_marks.Say {
     var configure = false;
     var at = state.request_count;
     while (at > 0) {
@@ -514,23 +515,35 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
         if (request.status != .unknown) continue;
         if (request.kind == .configure) configure = true;
         if (request.kind != .send) continue;
-        return switch (request.sent) {
-            .saved => |saved| std.fmt.bufPrint(buffer, state_marks.attention_sign ++ "Not confirmed · rui request recover {s}", .{&saved.original.key}),
-            else => std.fmt.bufPrint(buffer, state_marks.attention_sign ++ "{s}: send not confirmed; details on exit", .{&request.session.?}),
-        } catch unreachable;
+        return .attention(switch (request.sent) {
+            .saved => |saved| std.fmt.bufPrint(buffer, "Not confirmed · rui request recover {s}", .{&saved.original.key}),
+            else => std.fmt.bufPrint(buffer, "{s}: send not confirmed; details on exit", .{&request.session.?}),
+        } catch unreachable);
     }
     // A Send's recovery key is the actionable line; a Configure's Store and intent are printed on departure.
-    return if (configure) std.fmt.bufPrint(buffer, "! Config unconfirmed · exit for Store and intent", .{}) catch unreachable else null;
+    return if (configure) .attention("Config unconfirmed · exit for Store and intent") else null;
 }
 
 pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_line_bytes)]u8;
 
-pub const StatusLine = struct { text: []const u8, colour: Colour };
+/// What the status rows above the footer say: the words and tone (the sign is written where drawn), and the colour they take.
+/// The Upgrade that holds draws in the attention colour without a sign, so colour and sign are separate facts.
+pub const StatusLine = struct {
+    say: state_marks.Say,
+    colour: Colour,
+
+    /// The line as drawn: the sign for attention, then the words.
+    fn drawn(self: StatusLine, buffer: *[max_status_bytes]u8) []const u8 {
+        return std.fmt.bufPrint(buffer, "{s}{s}", .{ self.say.sign(), self.say.words }) catch unreachable;
+    }
+};
+
+const max_status_bytes = state_marks.attention_sign.len + @typeInfo(StatusBuffer).array.len;
 
 pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?StatusLine {
     if (statusSaid(state, caps, buffer[0..upgrade_status.max_line_bytes])) |line| return line;
     const unconfirmed = unconfirmedLine(state, buffer[0..max_unconfirmed_line_bytes]) orelse return null;
-    return .{ .text = unconfirmed, .colour = .attention };
+    return .{ .say = unconfirmed, .colour = .attention };
 }
 
 pub const max_notice_rows = 2;
@@ -570,12 +583,13 @@ fn wrapAt(caps: Caps, glyphs: Glyphs, line: []const u8, room: usize) ?usize {
 pub fn noticeSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const Segment {
     var buffer: StatusBuffer = undefined;
     const line = statusLine(state, caps, &buffer) orelse return null;
+    var drawn: [max_status_bytes]u8 = undefined;
     var rows: [max_notice_rows][]const u8 = undefined;
     var built: Spans = .of(arena, caps, width);
     const newline: []const Segment = &.{.{ .text = "\n", .style = .{} }};
     var parts: [2 * max_notice_rows][]const Segment = undefined;
     var count: usize = 0;
-    for (noticeRows(line.text, width, caps, &rows), 0..) |row, at| {
+    for (noticeRows(line.drawn(&drawn), width, caps, &rows), 0..) |row, at| {
         if (at != 0) {
             parts[count] = newline;
             count += 1;
@@ -821,9 +835,9 @@ pub fn conversation(state: *const State, ref: Reference, can_stop: bool) Said {
 
 fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) ?StatusLine {
     const upgrade: ?upgrade_status.Line = if (state.upgrade.run) |run| upgrade_status.line(run, buffer, if (caps.unicode) .unicode else .ascii) else null;
-    if (upgrade) |line| if (line.lasts == .until_done) return .{ .text = line.text, .colour = .normal };
+    if (upgrade) |line| if (line.lasts == .until_done) return .{ .say = .quiet(line.text), .colour = .normal };
     if (upgrade) |line| if (line.lasts == .persistent)
-        return .{ .text = line.text, .colour = if (line.tone == .attention) .attention else .normal };
+        return .{ .say = .quiet(line.text), .colour = if (line.tone == .attention) .attention else .normal };
     return null;
 }
 
@@ -3415,8 +3429,9 @@ pub fn layout(state: *const State) Layout {
 fn statusRows(state: *const State) u16 {
     var buffer: StatusBuffer = undefined;
     const line = statusLine(state, .{}, &buffer) orelse return 0;
+    var drawn: [max_status_bytes]u8 = undefined;
     var rows: [max_notice_rows][]const u8 = undefined;
-    return @intCast(noticeRows(line.text, state.size.width, .{}, &rows).len);
+    return @intCast(noticeRows(line.drawn(&drawn), state.size.width, .{}, &rows).len);
 }
 
 fn topRows(state: *const State) usize {
@@ -5595,9 +5610,9 @@ test "SUI-135 an unknown Send's key outranks a newer unconfirmed Configure on th
     state.requests[1] = .{ .kind = .configure, .session = ref, .status = .unknown };
     state.request_count = 2;
     var line: [max_unconfirmed_line_bytes]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, unconfirmedLine(&state, &line).?, "send not confirmed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unconfirmedLine(&state, &line).?.words, "send not confirmed") != null);
     state.requests[0].status = .done;
-    try std.testing.expect(std.mem.indexOf(u8, unconfirmedLine(&state, &line).?, "Config unconfirmed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unconfirmedLine(&state, &line).?.words, "Config unconfirmed") != null);
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {
@@ -5611,12 +5626,12 @@ test "an original Esc left unconfirmed is named at once and recovered on departu
     const reserved_key: [36]u8 = "fedcba98-7654-4321-8fed-cba987654321".*;
     try std.testing.expectEqual(null, unconfirmedLine(&state, &line));
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .decision, .key = saved_key }, .rejected = false } } } }));
-    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
+    try say_text.expect("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
     try std.testing.expectEqual(null, state.notice);
     _ = try press(&state, .next);
-    try std.testing.expectEqualStrings("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
+    try say_text.expect("! Not confirmed · rui request recover " ++ saved_key, unconfirmedLine(&state, &line).?);
     try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[1], .recovery = .{ .uncertain = reserved_key } } }));
-    try std.testing.expectEqualStrings("! r4t9vw: send not confirmed; details on exit", unconfirmedLine(&state, &line).?);
+    try say_text.expect("! r4t9vw: send not confirmed; details on exit", unconfirmedLine(&state, &line).?);
     while (canHoldSend(&state)) try expectEffects(&.{}, try step(&state, .{ .unconfirmed = .{ .reference = refs[0], .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = saved_key }, .rejected = false } } } }));
     try std.testing.expectEqual(@as(usize, max_requests), state.request_count);
     var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -6434,7 +6449,26 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     _ = try press(&state, .next);
     try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
     var ascii: StatusBuffer = undefined;
-    try std.testing.expectEqualStrings("Rui 0.61.0 installed - restart rui to continue - your draft is kept until you leave", statusLine(&state, .{ .unicode = false }, &ascii).?.text);
+    try std.testing.expectEqualStrings("Rui 0.61.0 installed - restart rui to continue - your draft is kept until you leave", statusLine(&state, .{ .unicode = false }, &ascii).?.say.words);
+}
+
+test "SUI-172 the status rows write the sign from the line's tone: an unconfirmed send carries it in no words, the Upgrade that holds draws none" {
+    var state = try opened(&.{session("k7m2qx", .{ .working = ago(10) }, .{})});
+    defer state.deinit();
+    const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
+    _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
+    var buffer: StatusBuffer = undefined;
+    const unconfirmed = statusLine(&state, .{}, &buffer).?;
+    try std.testing.expect(unconfirmed.say.tone == .attention);
+    try std.testing.expect(!std.mem.startsWith(u8, unconfirmed.say.words, "!"));
+    var drawn: [max_status_bytes]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, unconfirmed.drawn(&drawn), state_marks.attention_sign));
+    _ = try step(&state, .start_upgrade);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
+    const holding = statusLine(&state, .{}, &buffer).?;
+    try std.testing.expect(holding.say.tone == .quiet and holding.colour == .attention);
+    try std.testing.expect(std.mem.startsWith(u8, holding.drawn(&drawn), "Rui 0.61.0"));
 }
 
 test "the status rows above the Footer say the status bar's line" {
@@ -6455,7 +6489,8 @@ test "the status rows above the Footer say the status bar's line" {
 fn expectStatus(state: *const State, text: []const u8, colour: Colour) !void {
     var buffer: StatusBuffer = undefined;
     const line = statusLine(state, .{}, &buffer).?;
-    try std.testing.expectEqualStrings(text, line.text);
+    var drawn: [max_status_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(text, line.drawn(&drawn));
     try std.testing.expectEqual(colour, line.colour);
 }
 
