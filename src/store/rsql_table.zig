@@ -3,7 +3,7 @@
 //! its signature and `inputs` match, so a stale line costs compile time, never a different render.
 const rsql = @import("rsql.zig");
 
-pub const inputs = "4f0bcdda984b491946d35634287c3686";
+pub const inputs = "e897233a5f7eb17793afeec7694ab8ba";
 
 pub const entries = struct {
     pub const @"INSERT INTO action_control_command(command_key,action_id,selected_action_id,selection,selection_position) VALUES(?1,?2,?3,?4,?5)": rsql.TableEntry = .{ .variants = &.{.{ .signature = "w0:.....", .sqlite = "INSERT INTO action_control_command(command_key,action_id,selected_action_id,selection,selection_position) VALUES(?1,?2,?3,?4,?5)" }}, .mysql = .{ .parts = &.{ "INSERT INTO action_control_command(command_key,action_id,selected_action_id,selection,selection_position) VALUES(", ",", ",", ",", ",", ")" }, .slots = &.{ .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 2 }, .{ .argument = 3 }, .{ .argument = 4 } } }, .facts = .{ .uses_now = false, .shape = .insert_row, .single_row = false, .bound = &.{ .{ .arg = 1, .table = "action_control_command", .column = "command_key" }, .{ .arg = 2, .table = "action_control_command", .column = "action_id" }, .{ .arg = 3, .table = "action_control_command", .column = "selected_action_id" }, .{ .arg = 4, .table = "action_control_command", .column = "selection" }, .{ .arg = 5, .table = "action_control_command", .column = "selection_position" } } } };
