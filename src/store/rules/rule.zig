@@ -24,9 +24,54 @@ pub const Expr = union(enum) {
     exists: *const Select,
     not_exists: *const Select,
     count: *const Select,
+    /// `value BETWEEN low AND high`.
+    between: Between,
+    /// `value IN (items)`: any number of members, written as the list, unlike `one_of`.
+    in_list: InList,
+    /// An explicit parenthesis around `inner`, for a text that groups where precedence alone would not.
+    group: *const Expr,
+    /// A function or rsql macro call: `length(x)`, `@octets(x)`, `@same(a,1)`, `@initial(x,'a-z')`.
+    call: Call,
 
+    pub const Between = struct { value: *const Expr, low: *const Expr, high: *const Expr };
+    pub const InList = struct { value: *const Expr, items: []const Expr };
+    pub const Call = struct {
+        name: Name,
+        args: []const Expr,
+
+        /// The functions and rsql macros a rule may call. The renderer spells each and the evaluator answers each, both by switching
+        /// on this enum, so a call one of them lacks does not compile.
+        pub const Name = enum {
+            length,
+            octets,
+            same,
+            distinct,
+            initial,
+            charset,
+
+            pub fn spelling(self: Name) []const u8 {
+                return switch (self) {
+                    .length => "length",
+                    .octets => "@octets",
+                    .same => "@same",
+                    .distinct => "@distinct",
+                    .initial => "@initial",
+                    .charset => "@charset",
+                };
+            }
+
+            /// How many arguments the call takes; the evaluator and the renderer both refuse another count.
+            pub fn arity(self: Name) usize {
+                return switch (self) {
+                    .length, .octets => 1,
+                    .same, .distinct, .initial, .charset => 2,
+                };
+            }
+        };
+    };
     pub const Col = struct { alias: []const u8, name: []const u8 };
-    pub const Op = enum { eq, ne, lt, le, gt, ge };
+    /// `ne` and `bang_ne` mean the same; both exist so the DDL text a Store already carries renders unchanged (one goes at the v1 rebaseline).
+    pub const Op = enum { eq, ne, bang_ne, lt, le, gt, ge };
     pub const Cmp = struct { op: Op, left: *const Expr, right: *const Expr };
     pub const OneOf = struct { value: *const Expr, set: []const []const u8 };
 };
@@ -44,6 +89,10 @@ pub const Select = struct {
 pub fn col(comptime alias: []const u8, comptime name: []const u8) Expr {
     return .{ .col = .{ .alias = alias, .name = name } };
 }
+/// A column of the row a rule is checked against, named without an alias.
+pub fn field(comptime name: []const u8) Expr {
+    return col("", name);
+}
 pub fn int(comptime value: i64) Expr {
     return .{ .int = value };
 }
@@ -52,26 +101,9 @@ pub fn text(comptime value: []const u8) Expr {
 }
 pub const null_value: Expr = .null_value;
 
-fn compare(comptime op: Expr.Op, comptime left: Expr, comptime right: Expr) Expr {
+/// `left op right`: every comparison, with the operator named, so there is one constructor and one place that builds it.
+pub fn compare(comptime op: Expr.Op, comptime left: Expr, comptime right: Expr) Expr {
     return .{ .cmp = .{ .op = op, .left = &left, .right = &right } };
-}
-pub fn eq(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.eq, left, right);
-}
-pub fn ne(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.ne, left, right);
-}
-pub fn lt(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.lt, left, right);
-}
-pub fn le(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.le, left, right);
-}
-pub fn gt(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.gt, left, right);
-}
-pub fn ge(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.ge, left, right);
 }
 pub fn isNull(comptime value: Expr) Expr {
     return .{ .is_null = &value };
@@ -94,6 +126,19 @@ pub fn oneOf(comptime value: Expr, comptime set: []const []const u8) Expr {
 pub fn coalesce(comptime parts: []const Expr) Expr {
     return .{ .coalesce = parts };
 }
+pub fn between(comptime value: Expr, comptime low: Expr, comptime high: Expr) Expr {
+    return .{ .between = .{ .value = &value, .low = &low, .high = &high } };
+}
+pub fn inList(comptime value: Expr, comptime items: []const Expr) Expr {
+    return .{ .in_list = .{ .value = &value, .items = items } };
+}
+pub fn group(comptime inner: Expr) Expr {
+    return .{ .group = &inner };
+}
+pub fn call(comptime name: Expr.Call.Name, comptime args: []const Expr) Expr {
+    comptime if (args.len != name.arity()) @compileError("rule: " ++ name.spelling() ++ " takes a different number of arguments");
+    return .{ .call = .{ .name = name, .args = args } };
+}
 pub fn exists(comptime query: Select) Expr {
     return .{ .exists = &query };
 }
@@ -108,6 +153,7 @@ fn symbol(op: Expr.Op) []const u8 {
     return switch (op) {
         .eq => "=",
         .ne => "<>",
+        .bang_ne => "!=",
         .lt => "<",
         .le => "<=",
         .gt => ">",
@@ -116,12 +162,12 @@ fn symbol(op: Expr.Op) []const u8 {
 }
 
 /// The Rui SQL of a rule, with one canonical spacing: single spaces around keywords, none around operators.
-/// A conjunction or disjunction nested in another list is parenthesised, so the text reads back as the value does.
+/// A disjunction inside a conjunction is parenthesised, so the text reads back as the value does; AND binds tighter than OR.
 pub fn render(comptime expr: Expr) []const u8 {
     comptime {
         @setEvalBranchQuota(1_000_000);
         return switch (expr) {
-            .col => |c| c.alias ++ "." ++ c.name,
+            .col => |c| if (c.alias.len == 0) c.name else c.alias ++ "." ++ c.name,
             .int => |value| std.fmt.comptimePrint("{d}", .{value}),
             .text => |value| blk: {
                 literalOk(value);
@@ -136,6 +182,10 @@ pub fn render(comptime expr: Expr) []const u8 {
             .any => |parts| joined(parts, " OR "),
             .one_of => |s| oneOfText(s),
             .coalesce => |parts| "coalesce(" ++ joinedPlain(parts, ",") ++ ")",
+            .between => |b| operand(b.value.*) ++ " BETWEEN " ++ operand(b.low.*) ++ " AND " ++ operand(b.high.*),
+            .in_list => |l| operand(l.value.*) ++ " IN (" ++ joinedPlain(l.items, ",") ++ ")",
+            .group => |inner| "(" ++ render(inner.*) ++ ")",
+            .call => |c| c.name.spelling() ++ "(" ++ joinedPlain(c.args, ",") ++ ")",
             .exists => |query| "EXISTS(" ++ selectText("1", query.*) ++ ")",
             .not_exists => |query| "NOT EXISTS(" ++ selectText("1", query.*) ++ ")",
             .count => |query| "(" ++ selectText("count(*)", query.*) ++ ")",
@@ -147,8 +197,8 @@ pub fn render(comptime expr: Expr) []const u8 {
 /// atom is parenthesised, so the text reads back with the structure the value has. This is the only place that decides it.
 fn operand(comptime expr: Expr) []const u8 {
     return switch (expr) {
-        .col, .int, .text, .null_value, .coalesce, .count, .exists => render(expr),
-        .all, .any, .not, .cmp, .is_null, .is_not_null, .one_of, .not_exists => "(" ++ render(expr) ++ ")",
+        .col, .int, .text, .null_value, .coalesce, .count, .exists, .call, .group => render(expr),
+        .all, .any, .not, .cmp, .is_null, .is_not_null, .one_of, .not_exists, .between, .in_list => "(" ++ render(expr) ++ ")",
     };
 }
 
@@ -157,11 +207,7 @@ fn joined(comptime parts: []const Expr, comptime separator: []const u8) []const 
         if (parts.len == 0) @compileError("rule: a conjunction or disjunction needs a member");
         var out: []const u8 = "";
         for (parts, 0..) |part, index| {
-            const nested = switch (part) {
-                .any => std.mem.eql(u8, separator, " AND "),
-                .all => std.mem.eql(u8, separator, " OR "),
-                else => false,
-            };
+            const nested = part == .any and std.mem.eql(u8, separator, " AND ");
             out = out ++ (if (index == 0) "" else separator) ++ (if (nested) "(" ++ render(part) ++ ")" else render(part));
         }
         return out;
@@ -170,7 +216,7 @@ fn joined(comptime parts: []const Expr, comptime separator: []const u8) []const 
 
 fn joinedPlain(comptime parts: []const Expr, comptime separator: []const u8) []const u8 {
     comptime {
-        if (parts.len == 0) @compileError("rule: a coalesce needs a member");
+        if (parts.len == 0) @compileError("rule: a call, coalesce or IN list needs a member");
         var out: []const u8 = "";
         for (parts, 0..) |part, index| out = out ++ (if (index == 0) "" else separator) ++ render(part);
         return out;
@@ -218,7 +264,7 @@ fn selectText(comptime projection: []const u8, comptime query: Select) []const u
 
 test "a comparison, a null test and a set render as portable Rui SQL" {
     try std.testing.expectEqualStrings("t.a=1 AND t.b IS NULL AND t.c IN ('x','y')", comptime render(all(&.{
-        eq(col("t", "a"), int(1)),
+        compare(.eq, col("t", "a"), int(1)),
         isNull(col("t", "b")),
         oneOf(col("t", "c"), &.{ "x", "y" }),
     })));
@@ -227,22 +273,38 @@ test "a comparison, a null test and a set render as portable Rui SQL" {
 
 test "SH-181 a disjunction inside a conjunction keeps its parentheses, and a negation binds its whole operand" {
     try std.testing.expectEqualStrings("t.a=1 AND (t.b=2 OR t.c=3)", comptime render(all(&.{
-        eq(col("t", "a"), int(1)),
-        any(&.{ eq(col("t", "b"), int(2)), eq(col("t", "c"), int(3)) }),
+        compare(.eq, col("t", "a"), int(1)),
+        any(&.{ compare(.eq, col("t", "b"), int(2)), compare(.eq, col("t", "c"), int(3)) }),
     })));
-    try std.testing.expectEqualStrings("NOT (t.a=1 AND t.b=2)", comptime render(not(all(&.{ eq(col("t", "a"), int(1)), eq(col("t", "b"), int(2)) }))));
+    try std.testing.expectEqualStrings("NOT (t.a=1 AND t.b=2)", comptime render(not(all(&.{ compare(.eq, col("t", "a"), int(1)), compare(.eq, col("t", "b"), int(2)) }))));
 }
 
 test "a boolean comparison renders both sides in parentheses" {
-    try std.testing.expectEqualStrings("(t.a IS NULL)=(t.b IS NULL)", comptime render(eq(isNull(col("t", "a")), isNull(col("t", "b")))));
+    try std.testing.expectEqualStrings("(t.a IS NULL)=(t.b IS NULL)", comptime render(compare(.eq, isNull(col("t", "a")), isNull(col("t", "b")))));
 }
 
 test "SH-181 every node kind used as an operand keeps its own structure" {
-    const q = comptime Select{ .table = "c", .alias = "c", .where = eq(col("c", "p"), col("p", "id")) };
+    const q = comptime Select{ .table = "c", .alias = "c", .where = compare(.eq, col("c", "p"), col("p", "id")) };
     const x = comptime col("t", "a");
-    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id))=1", comptime render(eq(notExists(q), int(1))));
+    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id))=1", comptime render(compare(.eq, notExists(q), int(1))));
     try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id)) IS NULL", comptime render(isNull(notExists(q))));
     try std.testing.expectEqualStrings("(t.a IS NULL) IN ('x')", comptime render(oneOf(isNull(x), &.{"x"})));
-    try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ eq(x, int(1)), eq(x, int(2)) }), &.{ "x", "y", "z" })));
-    try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(eq(eq(x, int(1)), eq(x, int(2)))));
+    try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ compare(.eq, x, int(1)), compare(.eq, x, int(2)) }), &.{ "x", "y", "z" })));
+    try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(compare(.eq, compare(.eq, x, int(1)), compare(.eq, x, int(2)))));
+}
+
+test "SH-181 a BETWEEN or an IN list used as an operand is parenthesised, a call and a group are not" {
+    const x = comptime col("t", "a");
+    try std.testing.expectEqualStrings("(t.a BETWEEN 1 AND 3)=1", comptime render(compare(.eq, between(x, int(1), int(3)), int(1))));
+    try std.testing.expectEqualStrings("(t.a IN (1,2)) IS NULL", comptime render(isNull(inList(x, &.{ int(1), int(2) }))));
+    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(compare(.eq, call(.length, &.{x}), int(2))));
+}
+
+test "SH-181 a conjunction inside a disjunction needs a group to keep its parentheses, and a call spells as its rsql macro" {
+    const x = comptime col("t", "a");
+    const both = comptime all(&.{ compare(.eq, x, int(1)), compare(.eq, x, int(2)) });
+    try std.testing.expectEqualStrings("t.a=1 AND t.a=2 OR t.a=3", comptime render(any(&.{ both, compare(.eq, x, int(3)) })));
+    try std.testing.expectEqualStrings("(t.a=1 AND t.a=2) OR t.a=3", comptime render(any(&.{ group(both), compare(.eq, x, int(3)) })));
+    try std.testing.expectEqualStrings("@same(t.a,'x')", comptime render(call(.same, &.{ x, text("x") })));
+    try std.testing.expectEqualStrings("@initial(t.a,'a-z')", comptime render(call(.initial, &.{ x, text("a-z") })));
 }

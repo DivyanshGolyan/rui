@@ -3,6 +3,9 @@ const schema = @import("schema.zig");
 const rsql = @import("rsql.zig");
 const engine = @import("engine.zig");
 const column_rules = @import("column_rules.zig");
+const char_set = @import("rules/char_set.zig");
+const rules = @import("rules/rule.zig");
+const evaluator = @import("rules/eval.zig");
 const Value = column_rules.Value;
 const accepts = column_rules.accepts;
 const admit = engine.admit;
@@ -131,6 +134,159 @@ test "SH-178 a column's own rules are held by the Host as SQLite's CHECK holds t
     try std.testing.expect(checked > 1000);
 }
 
+fn wordByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+
+/// Whether `name` appears in `text` as a whole word.
+fn mentions(comptime text: []const u8, comptime name: []const u8) bool {
+    comptime {
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, text, at, name)) |found| : (at = found + 1) {
+            const end = found + name.len;
+            if ((found == 0 or !wordByte(text[found - 1])) and (end == text.len or !wordByte(text[end]))) return true;
+        }
+        return false;
+    }
+}
+
+/// The columns of `table` a rule's text reads.
+fn readBy(comptime table: schema.Table, comptime text: []const u8) []const schema.Column {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        var out: []const schema.Column = &.{};
+        for (table.columns) |column| if (mentions(text, column.name)) {
+            out = out ++ &[_]schema.Column{column};
+        };
+        return out;
+    }
+}
+
+/// Small values for one column: NULL, the edges, and every literal the rule names.
+fn smallDomain(comptime column: schema.Column, comptime text: []const u8) []const evaluator.Value {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        var out: []const evaluator.Value = &.{.null};
+        switch (column.type) {
+            .int, .flag => out = out ++ &[_]evaluator.Value{ .{ .int = 0 }, .{ .int = 1 }, .{ .int = 2 } },
+            .text, .tag, .bytes => {
+                out = out ++ &[_]evaluator.Value{ .{ .text = "" }, .{ .text = "x" }, .{ .text = "a" }, .{ .text = "-" } };
+                var open: ?usize = null;
+                for (text, 0..) |byte, at| if (byte == '\'') {
+                    if (open) |start| {
+                        out = out ++ &[_]evaluator.Value{.{ .text = text[start + 1 .. at] }};
+                        open = null;
+                    } else open = at;
+                };
+            },
+        }
+        return out;
+    }
+}
+
+fn bindValue(statement: *c.sqlite3_stmt, index: c_int, column: schema.Column, value: evaluator.Value) !void {
+    switch (value) {
+        .null => _ = c.sqlite3_bind_null(statement, index),
+        .int => |number| try sqlite.bindI64(statement, index, number),
+        .text => |bytes| if (column.type == .bytes) try sqlite.bindBlob(statement, index, bytes) else try sqlite.bindText(statement, index, bytes),
+    }
+}
+
+/// Every row over the small domains of the columns `rule` reads: the evaluator never errors and answers what SQLite answers.
+fn agreeWithSqlite(database: *c.sqlite3, comptime table: schema.Table, comptime rule: rules.Expr, checked: *usize) !void {
+    const text = comptime rules.render(rule);
+    const read = comptime readBy(table, text);
+    const create = comptime blk: {
+        var out: []const u8 = "CREATE TABLE probe(";
+        for (table.columns, 0..) |column, at| out = out ++ (if (at == 0) "" else ",") ++ column.name ++ " " ++ sqliteType(column);
+        break :blk out ++ ")";
+    };
+    const insert = comptime blk: {
+        if (read.len == 0) break :blk "INSERT INTO probe DEFAULT VALUES";
+        var names: []const u8 = "";
+        var marks: []const u8 = "";
+        for (read, 0..) |column, at| {
+            names = names ++ (if (at == 0) "" else ",") ++ column.name;
+            marks = marks ++ (if (at == 0) "" else ",") ++ std.fmt.comptimePrint("?{d}", .{at + 1});
+        }
+        break :blk "INSERT INTO probe(" ++ names ++ ") VALUES(" ++ marks ++ ")";
+    };
+    const select = comptime "SELECT " ++ rsql.render(.sqlite, "(" ++ text ++ ")") ++ " FROM probe";
+    const names = comptime blk: {
+        var out: [read.len][]const u8 = undefined;
+        for (read, 0..) |column, at| out[at] = column.name;
+        break :blk out;
+    };
+    const domains = comptime blk: {
+        var out: [read.len][]const evaluator.Value = undefined;
+        for (read, 0..) |column, at| out[at] = smallDomain(column, text);
+        break :blk out;
+    };
+    try sqlite.exec(database, "DROP TABLE IF EXISTS probe");
+    try sqlite.exec(database, create);
+    var index: [read.len]usize = @splat(0);
+    while (true) {
+        var row: [read.len]evaluator.Value = undefined;
+        inline for (domains, 0..) |domain, at| row[at] = domain[index[at]];
+        try sqlite.exec(database, "DELETE FROM probe");
+        {
+            const statement = try sqlite.prepare(database, insert);
+            defer _ = c.sqlite3_finalize(statement);
+            inline for (read, 0..) |column, at| try bindValue(statement, @intCast(at + 1), column, row[at]);
+            try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
+        }
+        const statement = try sqlite.prepare(database, select);
+        defer _ = c.sqlite3_finalize(statement);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+        const expected: evaluator.Value = if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) .null else .{ .int = @intFromBool(c.sqlite3_column_int64(statement, 0) != 0) };
+        const got = try evaluator.eval(&rule, evaluator.Scope.ofRow(.{}, "", &names, &row));
+        const normal: evaluator.Value = if (got == .int) .{ .int = @intFromBool(got.int != 0) } else got;
+        std.testing.expectEqualDeep(expected, normal) catch |failure| {
+            std.debug.print("rule {s} disagrees with SQLite on row {any}\n", .{ text, row });
+            return failure;
+        };
+        checked.* += 1;
+        var at: usize = read.len;
+        while (at > 0) {
+            at -= 1;
+            index[at] += 1;
+            if (index[at] < domains[at].len) break;
+            index[at] = 0;
+        } else break;
+    }
+}
+
+test "SH-180 every CHECK rule value answers over a row as SQLite does, and never errors" {
+    var database: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &database));
+    defer _ = c.sqlite3_close(database);
+    var checked: usize = 0;
+    var rules_seen: usize = 0;
+    inline for (schema.tables) |table| {
+        if (comptime !table.engines.on(.sqlite)) continue;
+        inline for (table.columns) |column| if (comptime column.check) |rule| {
+            try agreeWithSqlite(database.?, table, rule, &checked);
+            rules_seen += 1;
+        };
+        inline for (table.checks) |rule| {
+            try agreeWithSqlite(database.?, table, rule, &checked);
+            rules_seen += 1;
+        }
+    }
+    try std.testing.expect(rules_seen > 60);
+    try std.testing.expect(checked > 1000);
+}
+
+test "SH-180 a call with the wrong shape is an error whatever the row holds" {
+    const n: evaluator.Value = .null;
+    const bad_arity = comptime rules.Expr{ .call = .{ .name = .initial, .args = &.{rules.field("s")} } };
+    try std.testing.expectError(error.BadCall, evaluator.eval(&bad_arity, evaluator.Scope.ofRow(.{}, "", &.{"s"}, &.{n})));
+    const not_a_set = comptime rules.call(.charset, &.{ rules.field("s"), rules.field("s") });
+    try std.testing.expectError(error.BadCall, evaluator.eval(&not_a_set, evaluator.Scope.ofRow(.{}, "", &.{"s"}, &.{n})));
+    const length_of_int = comptime rules.call(.length, &.{rules.field("s")});
+    try std.testing.expectError(error.BadCall, evaluator.eval(&length_of_int, evaluator.Scope.ofRow(.{}, "", &.{"s"}, &.{.{ .int = 1 }})));
+}
+
 const key_fits: [128]u8 = @splat('k');
 const key_long: [129]u8 = @splat('k');
 
@@ -237,7 +393,16 @@ test "SH-178 a column's own rules are held by the Host as MySQL's CHECK holds th
 }
 
 test "SH-178 a set of ranges and literals holds the bytes it names, and its neighbours are outside it" {
-    try std.testing.expect(column_rules.inSet("a-z0-9_-", 'a') and column_rules.inSet("a-z0-9_-", 'z') and column_rules.inSet("a-z0-9_-", '0') and column_rules.inSet("a-z0-9_-", '9'));
-    try std.testing.expect(column_rules.inSet("a-z0-9_-", '_') and column_rules.inSet("a-z0-9_-", '-'));
-    for ("`{A/:@[ ") |outside| try std.testing.expect(!column_rules.inSet("a-z0-9_-", outside));
+    try std.testing.expect(char_set.inSet("a-z0-9_-", 'a') and char_set.inSet("a-z0-9_-", 'z') and char_set.inSet("a-z0-9_-", '0') and char_set.inSet("a-z0-9_-", '9'));
+    try std.testing.expect(char_set.inSet("a-z0-9_-", '_') and char_set.inSet("a-z0-9_-", '-'));
+    for ("`{A/:@[ ") |outside| try std.testing.expect(!char_set.inSet("a-z0-9_-", outside));
+}
+
+test "SH-178 a byte set holds its ranges and literals, a leading or trailing dash, and nothing for an empty set or subject" {
+    try std.testing.expect(char_set.inSet("-a-c", '-'));
+    try std.testing.expect(char_set.inSet("-a-c", 'b'));
+    try std.testing.expect(!char_set.inSet("-a-c", 'd'));
+    try std.testing.expect(char_set.inSet("a-c-", '-'));
+    try std.testing.expect(char_set.inSet("0-9", '0') and char_set.inSet("0-9", '9') and !char_set.inSet("0-9", ':'));
+    try std.testing.expect(!char_set.inSet("", 'a'));
 }

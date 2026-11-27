@@ -191,6 +191,7 @@ const cores = .{
     .{ "store/page_slots.zig", @import("store/page_slots.zig") },
     .{ "store/pass_plan.zig", @import("store/pass_plan.zig") },
     .{ "store/round_order.zig", @import("store/round_order.zig") },
+    .{ "store/rules/char_set.zig", @import("store/rules/char_set.zig") },
     .{ "store/rules/eval.zig", @import("store/rules/eval.zig") },
     .{ "store/rules/rule.zig", @import("store/rules/rule.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
