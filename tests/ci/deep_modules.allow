@@ -179,7 +179,6 @@ field-leak model_choice.model_choice.unicode
 field-leak model_choice.model_choice.userdata
 field-leak model_picker.Menu.entries
 field-leak mysql_url.mysql_url.database
-field-leak output_decode.ProviderFailure.report
 field-leak output_format.OutputMetadataReader.length
 field-leak output_format.OutputMetadataReader.offset
 field-leak output_format.OutputMetadataWriter.fail_writes

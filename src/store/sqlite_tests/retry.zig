@@ -135,7 +135,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     const request_ids = [_][]const u8{ "attempt-1", "", "attempt-3", "attempt-\"4\"" };
     for (request_ids, 1..) |request_id, ordinal| {
         try std.testing.expectEqual(@as(u64, ordinal), binding.attempt_ordinal);
-        var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{}, .report = "" } };
+        var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{}, .report = .empty } };
         try failure.correlated.request_id.set(request_id);
         try storage.settleModelAttemptFailure(binding, failure, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
         var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -161,7 +161,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
 
     try submitTestMessage(&storage, &tmp, "correlated-input", "correlated-message", session.slice(), "fail with correlation");
     const correlated = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    var ordinary: ModelFailure = .{ .correlated = .{ .code = "provider_http_403", .request_id = .{}, .report = "" } };
+    var ordinary: ModelFailure = .{ .correlated = .{ .code = "provider_http_403", .request_id = .{}, .report = .empty } };
     try ordinary.correlated.request_id.set("terminal-\"request\"-é");
     try storage.settleModelAttemptFailure(correlated, ordinary, .ordinary, .{});
     {
@@ -176,7 +176,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
 
     try submitTestMessage(&storage, &tmp, "uncorrelated-input", "uncorrelated-message", session.slice(), "fail");
     const terminal = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = "" } }, .ordinary, .{});
+    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = .empty } }, .ordinary, .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE request_id IS NULL AND resolution_code='provider_http_401'", .{}));
 }
 
@@ -498,7 +498,7 @@ test "retry due index excludes future population and preserves age ordering" {
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.operation_id);
 }
 
-const testing_401: ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = "" } };
+const testing_401: ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .report = .empty } };
 
 fn settleTransientForTesting(storage: *Store, binding: AttemptBinding) !AttemptBinding {
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_503" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
@@ -710,7 +710,7 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
     const session = try configureTestSession(&storage, "diagnostic-bytes");
     try submitTestMessage(&storage, &tmp, "diagnostic-bytes-input", "diagnostic-bytes-message", session.slice(), "q");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":5}", .request_id = .{}, .report = "" } }, .ordinary, .{});
+    try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":5}", .request_id = .{}, .report = .empty } }, .ordinary, .{});
     try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(X'FF'||substr(payload,2) AS BLOB) WHERE payload=CAST('{\"refusal\":\"quota\",\"resets_at\":5}' AS BLOB)");
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT changes()", .{}));
     var request: protocol.ActivityPage = .{};
