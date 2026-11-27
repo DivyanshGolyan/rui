@@ -73,7 +73,7 @@ hover: Hover = .{},
 pub fn present(self: *Self, props: Props) void {
     self.props = props;
     const count = props.fields.len + props.actions.len;
-    if (count > 0) self.selected = @min(self.selected, count - 1);
+    self.selected = @min(self.selected, count -| 1);
     if (self.choice) |choice| if (choice.field >= props.fields.len) {
         self.choice = null;
     };
@@ -1229,26 +1229,39 @@ test "Panel hosted top rule option preserves title subtitle and bounded field ta
     try std.testing.expectEqualStrings("A", compact.readCell(3, 1).char.grapheme);
 }
 
-test "Panel present stores the inputs and fits the kept state to them" {
+test "SUI-184 a Panel keeps its selection and open choice fitted to its inputs, and selects only a selectable row" {
     const fields = [_]Field{
         .{ .label = "a", .value = "1" },
         .{ .label = "b", .value = "2", .selectable = false },
-        .{ .label = "c", .value = "3" },
+        .{ .label = "c", .value = "3", .visible = false },
+        .{ .label = "d", .value = "4" },
     };
     var panel: Self = .{};
+
+    // Select: a selectable field or an action, never a read-only or hidden field or a row past the end.
     panel.present(.{ .fields = &fields, .actions = &.{"Save"} });
-    try std.testing.expectEqual(@as(usize, 3), panel.props.fields.len);
+    for ([_]struct { at: usize, want: usize }{
+        .{ .at = 3, .want = 3 },
+        .{ .at = 1, .want = 3 },
+        .{ .at = 2, .want = 3 },
+        .{ .at = 4, .want = 4 },
+        .{ .at = 5, .want = 4 },
+        .{ .at = 0, .want = 0 },
+    }) |row| {
+        panel.select(row.at);
+        try std.testing.expectEqual(row.want, panel.selectedIndex());
+    }
 
-    panel.select(1);
-    try std.testing.expectEqual(@as(usize, 0), panel.selectedIndex());
-    panel.select(2);
-    try std.testing.expectEqual(@as(usize, 2), panel.selectedIndex());
-
-    panel.choice = .{ .field = 2, .labels = &.{ "x", "y" }, .current = null, .selected = 0 };
-    panel.present(.{ .fields = fields[0..2], .actions = &.{"Save"} });
+    // Present: the selection fits the new row count, to nothing for no inputs, and an open choice whose field is gone closes.
+    panel.select(4);
+    panel.choice = .{ .field = 3, .labels = &.{ "x", "y" }, .current = null, .selected = 0 };
+    panel.present(.{ .fields = fields[0..4], .actions = &.{"Save"} });
+    try std.testing.expect(panel.choice != null);
+    try std.testing.expectEqual(@as(usize, 4), panel.selectedIndex());
+    panel.present(.{ .fields = fields[0..3] });
     try std.testing.expect(panel.choice == null);
     try std.testing.expectEqual(@as(usize, 2), panel.selectedIndex());
-
-    panel.present(.{ .fields = fields[0..1] });
+    panel.present(.{});
     try std.testing.expectEqual(@as(usize, 0), panel.selectedIndex());
+    try std.testing.expectEqual(@as(usize, 0), panel.props.fields.len);
 }
