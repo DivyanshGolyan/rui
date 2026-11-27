@@ -1376,8 +1376,15 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
+        fn connections(raw: *anyopaque) ?@import("app_settings.zig").ConnectionsSnapshot {
+            const self_ = owner(raw);
+            return switch (client.hostStatus(self_.init.io, self_.options.store)) {
+                .ready => |host| .{ .facts = host.capabilities.connections, .now = @intCast(@max(std.Io.Clock.real.now(self_.init.io).toSeconds(), 0)) },
+                else => null,
+            };
+        }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue, .connections = Callbacks.connections };
 }
 
 fn destroy(self: *Self) void {
@@ -4619,7 +4626,7 @@ fn sui4NestedKeys() !void {
         try overview.root.openSettings(&ctx);
         overview.root.settings_page.select(.keys);
         try overview.root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-        try std.testing.expect(overview.root.settings_page.keys_open);
+        try std.testing.expect(overview.root.settings_page.reference_open);
         var shown = try rig.shown(width, 24);
         defer shown.deinit();
         const text = try shown.text();
@@ -4628,7 +4635,7 @@ fn sui4NestedKeys() !void {
         try std.testing.expect(std.mem.indexOf(u8, text, "/help") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Ctrl-X twice") == null);
         try std.testing.expect(try rig.press("\x1b") == null);
-        try std.testing.expect(!overview.root.settings_page.keys_open);
+        try std.testing.expect(!overview.root.settings_page.reference_open);
         try std.testing.expect(overview.root.input.layer.settingsOpen());
         try std.testing.expect(overview.root.session == null);
         try std.testing.expect(try rig.press("\x1b") == null);
