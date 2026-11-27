@@ -14,6 +14,7 @@ const Diagnostic = @import("Diagnostic.zig");
 const Items = @import("Items.zig");
 const References = @import("References.zig");
 const Sources = @import("Sources.zig");
+const Types = @import("Types.zig");
 const ItemId = Items.ItemId;
 const NodeId = Sources.NodeId;
 
@@ -68,13 +69,13 @@ pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Item
     // A function whose whole body sets one field is a setter of it, not a writer.
     var setter_of: std.AutoHashMapUnmanaged(ItemId, ItemId) = .empty;
     for (refs) |reference| {
-        if (reference.sets != kind.sets() or !isTarget(items, branched, kind, reference.item)) continue;
+        if (reference.sets != kind.sets() or !isTarget(sources, items, branched, kind, reference.item)) continue;
         if (wholeBody(sources, items, reference.holder)) try setter_of.put(arena, reference.holder, reference.item);
     }
 
     var writers: std.AutoArrayHashMapUnmanaged(ItemId, Setters) = .empty;
     for (refs, 0..) |reference, index| {
-        const field: ItemId = if (reference.sets == kind.sets() and isTarget(items, branched, kind, reference.item)) blk: {
+        const field: ItemId = if (reference.sets == kind.sets() and isTarget(sources, items, branched, kind, reference.item)) blk: {
             if (setter_of.contains(reference.holder)) continue;
             break :blk reference.item;
         } else if (setter_of.get(reference.item)) |field| blk: {
@@ -106,8 +107,38 @@ fn isCall(sources: *const Sources, reference: References.Reference) bool {
 
 /// Whether `field` is a flag or state of `kind`: a flag is any field that holds something, a
 /// state one that its own file branches on.
-fn isTarget(items: *const Items.Items, branched: std.AutoHashMapUnmanaged(ItemId, void), kind: Kind, field: ItemId) bool {
-    return isFlag(items, field) and (kind == .flag or branched.contains(field));
+fn isTarget(sources: *const Sources, items: *const Items.Items, branched: std.AutoHashMapUnmanaged(ItemId, void), kind: Kind, field: ItemId) bool {
+    return isFlag(items, field) and (kind == .flag or (branched.contains(field) and isStateType(sources, items, field)));
+}
+
+/// Whether the declared type of `field` is an enum or a union, or an optional of one: an
+/// initializer such as `.{ .a = 1 }` also builds a plain struct, so the type decides.
+fn isStateType(sources: *const Sources, items: *const Items.Items, field: ItemId) bool {
+    const item = items.get(field);
+    const ast = &sources.files[@backingInt(item.file)].ast;
+    var node = item.type_expr orelse return false;
+    while (ast.nodeTag(node) == .optional_type) node = ast.nodeData(node).node;
+    if (isEnumOrUnion(ast, node)) return true;
+    const t = Types.fieldType(items, sources, field);
+    for (t.layers.slice()) |layer| {
+        if (layer != .optional) return false;
+    }
+    const container = items.get(t.container orelse return false);
+    if (container.kind != .type) return false;
+    const container_ast = &sources.files[@backingInt(container.file)].ast;
+    const decl = container_ast.fullVarDecl(container.decl) orelse return false;
+    return isEnumOrUnion(container_ast, decl.ast.init_node.unwrap() orelse return false);
+}
+
+fn isEnumOrUnion(ast: *const std.zig.Ast, node: std.zig.Ast.Node.Index) bool {
+    return switch (ast.nodeTag(node)) {
+        .tagged_union, .tagged_union_trailing, .tagged_union_two, .tagged_union_two_trailing, .tagged_union_enum_tag, .tagged_union_enum_tag_trailing => true,
+        .container_decl, .container_decl_trailing, .container_decl_two, .container_decl_two_trailing, .container_decl_arg, .container_decl_arg_trailing => switch (ast.tokenTag(ast.nodeMainToken(node))) {
+            .keyword_enum, .keyword_union => true,
+            else => false,
+        },
+        else => false,
+    };
 }
 
 /// Whether `field` is a field of a type that holds something.

@@ -267,13 +267,10 @@ scattered-transition BashLifecycle.BashLifecycle.capture_failure
 scattered-transition BashLifecycle.BashLifecycle.process
 scattered-transition ConversationViewport.Sized.link
 scattered-transition InputCapture.InputCapture.state
-scattered-transition Overview.Overview.app_session
 scattered-transition Overview.Overview.defaults_save
 scattered-transition Overview.Overview.host_launch
 scattered-transition Overview.Overview.host_observation
 scattered-transition SessionFrontend.SessionFrontend.leaving
-scattered-transition SessionInput.SessionInput.submitted
-scattered-transition SessionScreen.SessionScreen.action_view
 scattered-transition SessionScreen.SessionScreen.view
 scattered-transition SessionSubmission.SessionSubmission.publication
 scattered-transition SessionSubmission.SessionSubmission.state
@@ -315,8 +312,6 @@ scattered-transition output_retention.Spill.state
 scattered-transition overview_view.State.menu_read
 scattered-transition overview_view.State.presentation
 scattered-transition overview_view.State.selected
-scattered-transition protocol_reply.CommandObservation.binding
-scattered-transition protocol_reply.CommandObservation.result
 scattered-transition schema_json.Encoder.fragment
 scattered-transition server.Intake.Exchange.state
 scattered-transition server.Intake.Worker.state
@@ -331,7 +326,6 @@ scattered-transition store/Store.Store.scratch_use
 scattered-transition store/Store.Survey.kept
 scattered-transition store/access.Access.phase
 scattered-transition store/domain/command.SubmitMessage.pending
-scattered-transition store/domain/content.Import.found
 scattered-transition store/domain/content_parts.Cursor.pending
 scattered-transition store/domain/content_parts.Saving.stage
 scattered-transition store/domain/historical.RequestPage.read_ahead
@@ -342,10 +336,6 @@ scattered-transition store/engine/Mysql.State.begin
 scattered-transition store/engine/Mysql.State.inline_commit
 scattered-transition store/engine/Mysql.State.replacement
 scattered-transition store/wire/mysql.Client.state
-scattered-transition upgrade_run.Facts.census
-scattered-transition upgrade_run.Facts.hosts
-scattered-transition upgrade_run.Facts.release
-scattered-transition upgrade_run.Facts.selection
 scattered-transition widgets/Feed.Feed.anchor
 scattered-transition wire_request.Ingress.content_state
 shallow-module BashLifecycle

@@ -86,6 +86,16 @@ test "a tagged union literal is a transition, and a copied or computed value is 
     }
 }
 
+test "a plain struct or an optional record is no state, whatever literal it is assigned" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const record = "    const Rec = struct { n: u8 = 0 };\n    sent: ?Rec = null,\n    pub fn done(self: Q) bool {\n        return self.sent == null;\n    }\n";
+    try testing.expectEqual(@as(usize, 0), try count(a, try fixture(a, record, "x.sent = .{ .n = 1 };", 3, "")));
+    const named = "    const Kind = enum { open, closed };\n    kind: ?Kind = null,\n    pub fn done(self: Q) bool {\n        return self.kind == null;\n    }\n";
+    try testing.expectEqual(@as(usize, 1), try count(a, try fixture(a, named, "x.kind = .closed;", 2, "")));
+}
+
 test "a function that only assigns the state is no writer: its callers are" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
