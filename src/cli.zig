@@ -4675,12 +4675,53 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
     }
 }
 
+/// The SQLite file the selected Host directory's Store keeps (saved placement decides it), or null for a MySQL Store.
+fn checkedDatabase(io: std.Io, selected: []const u8, buffer: *[platform.max_database_path_bytes + 1:0]u8) !?[:0]const u8 {
+    const paths = try platform.resolveClientPaths(io, selected);
+    if (paths.kind == .mysql) return null;
+    return std.fmt.bufPrintSentinel(buffer, "{s}", .{paths.database.slice()}, 0) catch error.InvalidArguments;
+}
+
+test "store check finds the database through saved placement and refuses a MySQL Store" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var memory: std.heap.ArenaAllocator = .init(gpa);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &memory, .gpa = gpa, .io = io, .environ_map = &environment, .preopens = .empty };
+    for ([_][]const u8{ "default", "moved", "mysql" }) |kind| {
+        errdefer std.debug.print("placement {s}\n", .{kind});
+        const dir = try std.fs.path.join(arena, &.{ tmp.root[0..tmp.root_len], kind });
+        const data = try std.fs.path.join(arena, &.{ dir, "data" });
+        var failure: start_report.Failure = undefined;
+        try host_start.savedEdit(init, dir, "providers", "{}", &failure);
+        if (std.mem.eql(u8, kind, "moved")) try host_start.savedEdit(init, dir, "store.sqlite.dir", data, &failure);
+        if (std.mem.eql(u8, kind, "mysql")) try host_start.savedEdit(init, dir, "store.mysql.url", "env:PR5B_NEVER_RESOLVE_LOGIN", &failure);
+        var buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+        const found = try checkedDatabase(io, dir, &buffer);
+        if (std.mem.eql(u8, kind, "mysql")) {
+            try std.testing.expect(found == null);
+        } else {
+            const expected = try std.fmt.allocPrint(arena, "{s}{s}", .{ if (std.mem.eql(u8, kind, "moved")) data else dir, store_path.database_suffix });
+            try std.testing.expectEqualStrings(expected, found.?);
+        }
+    }
+}
+
 /// `rui store check`: the one line per broken rule goes to stdout, the reason a check could not run to stderr.
 fn checkStore(init: std.process.Init, store: ?[]const u8) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, store, &selected_buffer);
-    var path_buffer: [store_path.max_database_path_bytes + 1:0]u8 = undefined;
-    const path = std.fmt.bufPrintSentinel(&path_buffer, "{s}{s}", .{ selected, store_path.database_suffix }, 0) catch return error.InvalidArguments;
+    var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    const path = (try checkedDatabase(init.io, selected, &path_buffer)) orelse {
+        try std.Io.File.stderr().writeStreamingAll(init.io, "rui: store check does not support a MySQL Store yet\n");
+        recordExit(.environment);
+        return error.Reported;
+    };
     var out_buffer: [4096]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(init.io, &out_buffer);
     var refusal_buffer: [512]u8 = undefined;
