@@ -302,8 +302,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
         const inset = RowInset.bounds(size.width);
         paint(ctx, surface, line.text, @intCast(y), @min(3, inset.end), inset.end, style);
-        var note_bytes: [picker.max_limit_note]u8 = undefined;
-        if (picker.limitNote(&note_bytes, entry.providers, self.provider, limited)) |note| {
+        // The drawn cells point at their bytes, so the note lives in the frame's arena.
+        const note_bytes = try ctx.arena.alloc(u8, picker.max_limit_note);
+        if (picker.limitNote(note_bytes[0..picker.max_limit_note], entry.providers, self.provider, limited)) |note| {
             var dim = style;
             dim.dim = true;
             const gap = 2;
@@ -980,7 +981,6 @@ test "SUI-184 a model on a limited connection says so and names another connecti
             for (0..drawn.size.width) |x| try text.writer.writeAll(drawn.readCell(@intCast(x), @intCast(y)).char.grapheme);
             row_text.* = text.written();
         }
-        std.debug.print("ROWS {any}\n|{s}|\n|{s}|\n", .{ is_limited, rows[0], rows[1] });
         try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[0], "limit reached on work · try home") != null);
         try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[1], "limit reached on work") != null);
         try std.testing.expect(std.mem.indexOf(u8, rows[1], "try") == null);
