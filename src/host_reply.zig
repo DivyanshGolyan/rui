@@ -504,6 +504,14 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     with_connections.connections = &full;
     try host_info.render(renderHostInfo, .{with_connections});
     try std.testing.expect(host_info.len <= protocol.max_host_info_response_bytes);
+    // Every connection also reports two windows at their largest values.
+    const widest: protocol.UsageWindow = .{ .used_percent = protocol.max_usage_percent * 2, .minutes = max, .reset_at = max };
+    const worst_reading: ?protocol.UsageReading = .{ .observed_at = max, .primary = widest, .secondary = widest };
+    const worst_readings: [provider_route.max_served]?protocol.UsageReading = @splat(worst_reading);
+    with_connections.usage = &worst_readings;
+    host_info.len = 0;
+    try host_info.render(renderHostInfo, .{with_connections});
+    try std.testing.expect(host_info.len <= protocol.max_host_info_response_bytes);
 
     const observations = protocol.command_observation_reply;
     const message: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{

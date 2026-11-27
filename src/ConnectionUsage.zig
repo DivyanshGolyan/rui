@@ -49,6 +49,8 @@ pub fn record(self: *Self, observation: provider.AllowanceObservation) void {
     if (!any(reading)) return;
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
+    // Two Turns of one connection can complete out of order; the older reading never replaces a newer one.
+    if (self.latest.find(observation.provider)) |kept| if (kept.observed_at > reading.observed_at) return;
     self.latest.set(observation.provider, reading) catch {};
 }
 
@@ -83,4 +85,9 @@ test "CM-67 a connection's reading keeps the last readable windows and ignores a
     try std.testing.expectEqual(@as(?Window, null), later.primary);
     try std.testing.expectEqual(@as(?Window, .{ .used_percent = 100, .minutes = 300, .reset_at = null }), later.secondary);
     try std.testing.expectEqual(@as(?Reading, null), usage.get(connection.Name.parse("codex").?));
+    // A Turn that completes late carries an older reading; the newer one stays.
+    usage.record(observed("work", 20, week, .{}));
+    try std.testing.expectEqual(@as(u64, 40), usage.get(work).?.observed_at);
+    usage.record(observed("work", 40, week, .{}));
+    try std.testing.expectEqual(@as(?Window, null), usage.get(work).?.secondary);
 }

@@ -324,12 +324,31 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     return .{ .ready = try parseHostInfoFacts(body, store) };
 }
 
+/// A decimal the Host writes: 1 to 20 ASCII digits and no leading zero.
+fn canonicalDecimal(text: []const u8) bool {
+    if (text.len == 0 or text.len > 20 or (text.len > 1 and text[0] == '0')) return false;
+    for (text) |digit| if (!std.ascii.isDigit(digit)) return false;
+    return true;
+}
+
+/// The Host's `{d:.1}` form of a percent: a canonical whole part, a point and one digit.
+fn canonicalPercent(text: []const u8) bool {
+    if (text.len < 3 or text[text.len - 2] != '.' or !std.ascii.isDigit(text[text.len - 1])) return false;
+    return canonicalDecimal(text[0 .. text.len - 2]);
+}
+
+fn usageU64(text: []const u8) !u64 {
+    if (!canonicalDecimal(text)) return error.InvalidHostInfo;
+    return std.fmt.parseUnsigned(u64, text, 10) catch error.InvalidHostInfo;
+}
+
 fn usageWindow(wire: ?protocol.UsageWindowWire) !?protocol.UsageWindow {
     const window = wire orelse return null;
+    if (!canonicalPercent(window.used_percent)) return error.InvalidHostInfo;
     const percent = std.fmt.parseFloat(f64, window.used_percent) catch return error.InvalidHostInfo;
-    if (!std.math.isFinite(percent) or percent < 0) return error.InvalidHostInfo;
-    const minutes = std.fmt.parseUnsigned(u64, window.minutes, 10) catch return error.InvalidHostInfo;
-    const reset_at = if (window.reset_at) |text| std.fmt.parseUnsigned(u64, text, 10) catch return error.InvalidHostInfo else null;
+    if (!std.math.isFinite(percent) or percent > protocol.max_usage_percent) return error.InvalidHostInfo;
+    const minutes = try usageU64(window.minutes);
+    const reset_at = if (window.reset_at) |text| try usageU64(text) else null;
     return .{ .used_percent = percent, .minutes = minutes, .reset_at = reset_at };
 }
 
@@ -341,7 +360,7 @@ fn connectionFacts(list: anytype) !protocol.Connections {
         for (list[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, item.name)) return error.InvalidHostInfo;
         const label = provider_route.Label.parse(item.label) orelse return error.InvalidHostInfo;
         const usage: ?protocol.UsageReading = if (item.usage) |wire| .{
-            .observed_at = std.fmt.parseUnsigned(u64, wire.observed_at, 10) catch return error.InvalidHostInfo,
+            .observed_at = try usageU64(wire.observed_at),
             .primary = try usageWindow(wire.primary),
             .secondary = try usageWindow(wire.secondary),
         } else null;
@@ -4780,4 +4799,40 @@ test "CM-68 host info carries each connection's latest usage to the client's fac
     response.len = 0;
     try response.render(host_reply.renderHostInfo, .{none});
     for ((try parseHostInfo(response.slice(), "/sqlite")).ready.capabilities.connections.slice()) |fact| try std.testing.expectEqual(@as(?protocol.UsageReading, null), fact.usage);
+}
+
+test "CM-68 a host info reply whose usage numbers are not in the Host's own form is refused" {
+    const host_reply = @import("host_reply.zig");
+    const provider = @import("provider.zig");
+    const codex = connection.Name.parse("codex").?;
+    var entries: [1]provider_route.Entry = undefined;
+    entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
+    var usage: @import("ConnectionUsage.zig") = .init(std.testing.io);
+    usage.record(.{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = codex, .status = 200, .observed_at = 1795745356, .primary = .{ .used = .{ .value = 25.5 }, .minutes = .{ .value = 10080 }, .reset_at = .{ .value = 1796350153 } }, .secondary = .{} });
+    const readings = [_]?protocol.UsageReading{usage.get(codex)};
+    const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderHostInfo, .{info});
+    const good = response.slice();
+    _ = try parseHostInfo(good, "/sqlite");
+    const swaps = [_][2][]const u8{
+        .{ "\"1795745356\"", "\"+1795745356\"" },
+        .{ "\"1795745356\"", "\"01795745356\"" },
+        .{ "\"1795745356\"", "\"\"" },
+        .{ "\"10080\"", "\"-1\"" },
+        .{ "\"10080\"", "\"123456789012345678901\"" },
+        .{ "\"1796350153\"", "\"1e3\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"1e3\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"nan\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"inf\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"-1.0\"" },
+        .{ "\"used_percent\":\"25.5\"", "\"used_percent\":\"025.5\"" },
+        .{ "\"minutes\":\"10080\",", "" },
+    };
+    var scratch: [protocol.max_host_info_response_bytes]u8 = undefined;
+    for (swaps) |swap| {
+        const at = std.mem.indexOf(u8, good, swap[0]) orelse return error.TestUnexpectedResult;
+        const bad = std.fmt.bufPrint(&scratch, "{s}{s}{s}", .{ good[0..at], swap[1], good[at + swap[0].len ..] }) catch return error.TestUnexpectedResult;
+        if (parseHostInfo(bad, "/sqlite")) |_| return error.TestUnexpectedResult else |_| {}
+    }
 }

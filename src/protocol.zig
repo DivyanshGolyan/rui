@@ -2774,15 +2774,17 @@ pub const UsageReading = struct { observed_at: u64, primary: ?UsageWindow, secon
 /// A reported percentage above this is written as this: the wire keeps a bounded number.
 pub const max_usage_percent: f64 = 1_000_000;
 
+const usage_percent_bytes = 24;
+
 pub const UsageWindowJson = struct {
     value: UsageWindow,
 
     pub const openapi_name = "UsageWindow";
-    pub const json_shape = .{ "{\"used_percent\":", Hole{ .string = 24 }, ",\"minutes\":\"", Hole.decimal, "\",\"reset_at\":", Hole.optional_id, "}" };
+    pub const json_shape = .{ "{\"used_percent\":", Hole{ .string = usage_percent_bytes }, ",\"minutes\":\"", Hole.decimal, "\",\"reset_at\":", Hole.optional_id, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const UsageWindowJson, out: *std.Io.Writer) !void {
-        var text: [24]u8 = undefined;
+        var text: [usage_percent_bytes]u8 = undefined;
         const percent = std.fmt.bufPrint(&text, "{d:.1}", .{@min(self.value.used_percent, max_usage_percent)}) catch unreachable;
         try writeShape(out, json_shape, .{ percent, self.value.minutes, self.value.reset_at });
     }
