@@ -22,6 +22,19 @@ const view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
 const Self = @This();
 const focus = @import("chat_info_focus.zig");
+const connection = @import("connection.zig");
+
+/// Row indices of the Chat panel: its fields, then its actions.
+const effort_row = @backingInt(focus.Focus.effort);
+const permissions_row = @backingInt(focus.Focus.permissions);
+const tools_row = @backingInt(focus.Focus.tools);
+const model_row = @backingInt(focus.Focus.model);
+const account_row = @backingInt(focus.Focus.account);
+const rename_row = @backingInt(focus.Focus.rename);
+const archive_row = @backingInt(focus.Focus.archive);
+const copy_row = @backingInt(focus.Focus.copy);
+const context_row = account_row + 1;
+const row_count = copy_row + 1;
 
 pub const SaveState = enum { idle, pending, saved, failed, unconfirmed };
 pub const Edit = union(enum) {
@@ -29,7 +42,20 @@ pub const Edit = union(enum) {
     permission: @FieldType(status.Session, "permission"),
     tools: @import("configuration_admission.zig").ToolEdit,
     model: []const u8,
+    connection: []const u8,
     label: []const u8,
+
+    /// The edit with its text copied into `buffer`, so it outlives the caller's bytes.
+    pub fn copiedInto(self: Edit, buffer: []u8) error{ValueTooLong}!Edit {
+        switch (self) {
+            inline .label, .model, .connection => |text, tag| {
+                if (text.len > buffer.len) return error.ValueTooLong;
+                @memcpy(buffer[0..text.len], text);
+                return @unionInit(Edit, @tagName(tag), buffer[0..text.len]);
+            },
+            else => return self,
+        }
+    }
 };
 
 pub const Backend = struct {
@@ -58,16 +84,20 @@ session: status.Session = undefined,
 ready: bool = false,
 read_failed: bool = false,
 panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true, .top_rule = false },
-fields: [6]Panel.Field = undefined,
+fields: [rename_row]Panel.Field = undefined,
 actions: [3][]const u8 = undefined,
-failures: [9]?[]const u8 = @splat(null),
-unconfirmed_keys: [9]?@import("configure_outcome.zig").Original = @splat(null),
+failures: [row_count]?[]const u8 = @splat(null),
+unconfirmed_keys: [row_count]?@import("configure_outcome.zig").Original = @splat(null),
 pending: ?usize = null,
 effort_labels: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
 tool_draft: ?tools.Selection = null,
 tool_labels: [std.enums.values(tools.BuiltInTool).len][]const u8 = undefined,
 model_choice: ModelChoice = .{},
+/// The connections of this Host's model menu other than the chat's own: where an Account choice may go.
+accounts: connection_names.NameSet = .{},
+account_choices: connection_names.NameSet = .{},
+account_labels: [connection.max_served][]const u8 = undefined,
 renaming: bool = false,
 rename_bytes: [status.max_label_bytes]u8 = undefined,
 rename_editor: Editor = .initLocked(&.{}, .line_refusals_release),
@@ -107,7 +137,7 @@ pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row) !voi
     if (self.pending != null) return;
     self.closeStandaloneChoice();
     self.standalone = .{ .row = row };
-    const index: usize = if (row == .model) 4 else 0;
+    const index: usize = if (row == .model) model_row else effort_row;
     self.bind();
     self.panel.selected = index;
     try activate(self, ctx, index);
@@ -139,7 +169,7 @@ fn drawStandalone(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const self: *Self = @ptrCast(@alignCast(raw));
     self.bind();
     if (!self.standaloneOpen()) return .empty(self.standaloneWidget());
-    var surface = try self.panel.drawChoice(ctx, if (self.standalone.?.row == .model) 4 else 0);
+    var surface = try self.panel.drawChoice(ctx, if (self.standalone.?.row == .model) model_row else effort_row);
     surface.widget = self.standaloneWidget();
     return surface;
 }
@@ -200,6 +230,7 @@ fn title(self: *const Self) []const u8 {
 fn bind(self: *Self) void {
     const model_was_active = self.model_choice.active;
     if (!self.model_choice.validate() and model_was_active and self.standalone != null) self.closeStandaloneChoice();
+    self.collectAccounts();
     self.panel.userdata = self;
     self.panel.on_activate = activate;
     self.panel.on_pick = pick;
@@ -209,7 +240,8 @@ fn bind(self: *Self) void {
         .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else setting_words.permission(self.session.permission), .tail = self.failures[1] },
         .{ .label = "Allowed tools", .value = "", .tail = self.failures[2] },
         .{ .label = "Folder", .value = if (self.ready) self.session.workspace.slice() else "unavailable", .selectable = false },
-        .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[4] },
+        .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[model_row] },
+        .{ .label = "Account", .value = if (self.ready) self.session.provider.slice() else "unavailable", .tail = self.failures[account_row], .visible = self.accounts.len > 0 },
         .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.contextReading() != null },
     };
     if (self.pending) |row| if (row < self.fields.len) {
@@ -233,7 +265,7 @@ fn bind(self: *Self) void {
     self.model_choice.hover_style = self.panel.hover_style;
     self.model_choice.quiet = self.panel.quiet;
     self.panel.title_widget = .{ .userdata = self, .drawFn = drawTitle };
-    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(4) else null;
+    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(model_row) else null;
 }
 
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
@@ -270,14 +302,15 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
             self.updateTools();
             self.panel.openChoice(&self.tool_labels, null);
         },
-        4 => self.openModel(),
-        6 => {
+        model_row => self.openModel(),
+        account_row => self.openAccounts(),
+        rename_row => {
             self.rename_editor = .initLocked(&self.rename_bytes, .line_refusals_release);
             _ = self.rename_editor.append(self.session.label.slice());
             self.renaming = true;
         },
-        7, 8 => {
-            if (row == 7) {
+        archive_row, copy_row => {
+            if (row == archive_row) {
                 if (try self.backend.archive(self.backend.context) == .refused) {
                     self.failures[row] = " · couldn't archive";
                     ctx.redraw = true;
@@ -300,12 +333,31 @@ fn openModel(self: *Self) void {
     self.model_choice.openSource(.{ .context = self.backend.context, .read = self.backend.models }, self.session.provider, self.session.model.slice());
     self.model_choice.userdata = self;
     self.model_choice.on_pick = pickModel;
-    if (!self.model_choice.active) self.failures[4] = " · models unavailable";
+    if (!self.model_choice.active) self.failures[model_row] = " · models unavailable";
+}
+
+fn openAccounts(self: *Self) void {
+    self.account_choices = .{};
+    self.account_choices.insert(self.session.provider) catch unreachable;
+    self.account_choices.unionWith(&self.accounts) catch {};
+    for (self.account_choices.slice(), 0..) |*name, at| self.account_labels[at] = name.slice();
+    self.panel.openChoice(self.account_labels[0..self.account_choices.len], 0);
+}
+
+/// The model menu names every connection the Host serves; the chat's own is not a place to move to.
+fn collectAccounts(self: *Self) void {
+    self.accounts = .{};
+    if (!self.ready) return;
+    const menu = self.backend.models(self.backend.context).menu orelse return;
+    for (menu.entries) |entry| for (entry.providers.slice()) |name| {
+        if (name.eql(self.session.provider)) continue;
+        self.accounts.insert(name) catch return;
+    };
 }
 
 fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, model: []const u8) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.save(ctx, 4, .{ .model = model });
+    try self.save(ctx, model_row, .{ .model = model });
 }
 
 fn contextReading(self: *const Self) ?session_line.Context {
@@ -324,6 +376,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize, choice: usize) !vo
     switch (row) {
         0 => try self.save(ctx, row, .{ .effort = if (choice == 0) null else std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_labels[choice]).? }),
         1 => try self.save(ctx, row, .{ .permission = setting_words.permissionAt(choice) }),
+        account_row => if (choice != 0) try self.save(ctx, row, .{ .connection = self.account_choices.slice()[choice].slice() }),
         2 => {
             self.tool_draft.?.toggle(std.enums.values(tools.BuiltInTool)[choice]);
             self.updateTools();
@@ -363,8 +416,8 @@ fn poll(self: *Self) void {
         self.unconfirmed_keys[row] = read(self.backend.context);
     };
     self.failures[row] = if (state == .unconfirmed) " · not confirmed · /requests" else if (state == .failed) switch (row) {
-        7 => " · couldn't archive",
-        8 => " · couldn't copy",
+        archive_row => " · couldn't archive",
+        copy_row => " · couldn't copy",
         else => " · couldn't save",
     } else if (self.read_failed) " · couldn't read chat" else null;
     self.pending = null;
@@ -398,15 +451,15 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         return;
     }
     if (self.renaming) {
-        const outcome = panel_editor.event(&self.rename_editor, input, self.pasting, &self.failures[6]);
+        const outcome = panel_editor.event(&self.rename_editor, input, self.pasting, &self.failures[rename_row]);
         switch (outcome) {
             .submit => {
                 const text = self.rename_editor.text();
                 if (std.mem.indexOfAny(u8, text, "\r\n\t") != null) {
-                    self.failures[6] = " · name must be one line";
+                    self.failures[rename_row] = " · name must be one line";
                 } else {
-                    try self.save(ctx, 6, .{ .label = text });
-                    if (self.pending != null or self.failures[6] == null) self.renaming = false;
+                    try self.save(ctx, rename_row, .{ .label = text });
+                    if (self.pending != null or self.failures[rename_row] == null) self.renaming = false;
                 }
             },
             else => {},
@@ -427,11 +480,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             self.cancelChoice();
             var edit: @import("configuration_admission.zig").ToolEdit = .{};
             edit.replaceBuiltIns(&self.session.tools, &self.session.loaded_tools, selected) catch |err| {
-                self.failures[2] = if (err == error.LoadedToolsNotAllowed) " · loaded tools aren't allowed" else " · too many tool names";
+                self.failures[tools_row] = if (err == error.LoadedToolsNotAllowed) " · loaded tools aren't allowed" else " · too many tool names";
                 ctx.consumeAndRedraw();
                 return;
             };
-            try self.save(ctx, 2, .{ .tools = edit });
+            try self.save(ctx, tools_row, .{ .tools = edit });
             ctx.consumeAndRedraw();
             return;
         }
@@ -445,12 +498,12 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     }
     if (self.standalone) |shown| {
         if (shown.phase == .pending) return;
-        try self.panel.choiceEvent(ctx, input, if (shown.row == .model) 4 else 0);
+        try self.panel.choiceEvent(ctx, input, if (shown.row == .model) model_row else effort_row);
     } else {
         if (!self.hasChoice() and input == .key_press) {
             if (focusMove(input.key_press)) |move| {
                 const current: focus.Focus = @fromBackingInt(@intCast(self.panel.selected));
-                const next = focus.step(if (self.panel.stacked_actions) .stacked else .horizontal, current, move);
+                const next = focus.step(if (self.panel.stacked_actions) .stacked else .horizontal, self.accounts.len > 0, current, move);
                 self.panel.selected = @backingInt(next);
                 ctx.consumeAndRedraw();
                 return;
@@ -535,7 +588,7 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
     if (size.width == 0 or size.height == 0) return .empty(self.bodyWidget());
     const name = try safe(ctx.arena, self.title());
     self.panel.title = if (show_title) name else "";
-    self.panel.show_title = show_title or self.renaming or self.failures[6] != null or self.pending == 6;
+    self.panel.show_title = show_title or self.renaming or self.failures[rename_row] != null or self.pending == rename_row;
     var tool_text: std.Io.Writer.Allocating = .init(ctx.arena);
     if (self.ready) {
         var selected = self.session.tools.iterator();
@@ -550,25 +603,25 @@ fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.
     self.fields[2].value = (try view.fitted(ctx.arena, self.backend.caps(self.backend.context), self.fields[2].value, tool_room, .head)).bytes;
     if (self.ready) {
         self.fields[3].value = try self.folderValue(ctx, Panel.valueWidth(size.width));
-        self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
+        self.fields[model_row].value = try safe(ctx.arena, self.session.model.slice());
         // Without a trigger (a codec that does not compact) the context row is omitted.
         if (self.contextReading()) |reading| {
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
             try status.writeGrouped(&context.writer, reading.estimate);
             try context.writer.writeAll(" of ");
             try status.writeGrouped(&context.writer, reading.trigger);
-            self.fields[5].value = context.written();
+            self.fields[context_row].value = context.written();
         }
     }
     const actions = try ctx.arena.alloc([]const u8, 3);
     var action_width: usize = 3 + 2 * 5;
-    for (self.panel.actions, 6..) |label, row| {
-        const message = if (row == 6) "" else self.failures[row] orelse if (self.pending == row) " · saving" else "";
-        actions[row - 6] = if (message.len > 0)
-            try std.fmt.allocPrint(ctx.arena, "{s}: {s}", .{ if (row == 8) "Copy" else label, message[" · ".len..] })
+    for (self.panel.actions, rename_row..) |label, row| {
+        const message = if (row == rename_row) "" else self.failures[row] orelse if (self.pending == row) " · saving" else "";
+        actions[row - rename_row] = if (message.len > 0)
+            try std.fmt.allocPrint(ctx.arena, "{s}: {s}", .{ if (row == copy_row) "Copy" else label, message[" · ".len..] })
         else
             label;
-        action_width += ctx.stringWidth(actions[row - 6]);
+        action_width += ctx.stringWidth(actions[row - rename_row]);
     }
     self.panel.actions = actions;
     self.panel.stacked_actions = action_width > size.width;
@@ -606,7 +659,7 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.panel.ground });
     if (size.width == 0 or size.height == 0) return surface;
-    const failure = try Panel.displayText(ctx.arena, self.failures[6] orelse if (self.pending == 6) " · saving" else "", self.panel.unicode);
+    const failure = try Panel.displayText(ctx.arena, self.failures[rename_row] orelse if (self.pending == rename_row) " · saving" else "", self.panel.unicode);
     const tail_width: u16 = @intCast(@min(ctx.stringWidth(failure), size.width));
     const edit_width = size.width - tail_width;
     const original = if (self.renaming) self.rename_editor.text() else self.panel.title;
@@ -644,6 +697,7 @@ const Fixture = struct {
     archives: usize = 0,
     copies: usize = 0,
     copy_notice: @import("session_chrome.zig").Notice(64) = .{},
+    menu: ?*const @import("model_picker.zig").Menu = null,
 
     fn init(self: *Fixture) void {
         status.sample(&self.session);
@@ -667,13 +721,7 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         self.save_calls += 1;
         if (self.fail_submit) return error.AccessDenied;
-        self.edit = switch (edit) {
-            .label, .model => |text| blk: {
-                @memcpy(self.text[0..text.len], text);
-                break :blk if (edit == .label) .{ .label = self.text[0..text.len] } else .{ .model = self.text[0..text.len] };
-            },
-            else => edit,
-        };
+        self.edit = try edit.copiedInto(&self.text);
         self.state_value = .pending;
     }
     fn archive(raw: *anyopaque) !view.IntentAdmission {
@@ -693,8 +741,9 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         return self.state_value;
     }
-    fn models(_: *anyopaque) ModelChoice.Snapshot {
-        return .{};
+    fn models(raw: *anyopaque) ModelChoice.Snapshot {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return .{ .menu = self.menu };
     }
     fn copied(raw: *anyopaque) bool {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -837,7 +886,7 @@ test "Chat info read-only rows are skipped by arrows and never activated" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const forward = [_]usize{ 1, 2, 4, 6, 6 };
+    const forward = [_]usize{ 1, 2, 4, 7, 7 };
     for (forward) |wanted| {
         try press(&page, &ctx, vaxis.Key.down);
         try std.testing.expectEqual(wanted, page.panel.selected);
@@ -865,7 +914,7 @@ test "Chat info rename edits title saves label and Escape cancels only edit" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    page.panel.selected = 6;
+    page.panel.selected = 7;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.renaming);
     try typeText(&page, &ctx, " revised");
@@ -895,16 +944,16 @@ test "Chat info failures remain on their row and recover from backend answers" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]usize{ 0, 1, 2, 6, 7, 8 }) |row| {
+    for ([_]usize{ 0, 1, 2, 7, 8, 9 }) |row| {
         page.panel.selected = row;
         fixture.fail_submit = true;
         try press(&page, &ctx, vaxis.Key.enter);
-        if (row < 7) try press(&page, &ctx, vaxis.Key.enter);
+        if (row < archive_row) try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(page.failures[row] != null);
         try std.testing.expectEqual(@as(?usize, null), page.pending);
         for ([_]u16{ 99, 46 }) |width| {
             const text = try dump(&page, arena.allocator(), width, 12);
-            try std.testing.expect(std.mem.indexOf(u8, text, if (row == 7) "couldn't archive" else if (row == 8) "couldn't copy" else "couldn't save") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, if (row == archive_row) "couldn't archive" else if (row == copy_row) "couldn't copy" else "couldn't save") != null);
         }
         page.cancelChoice();
         fixture.fail_submit = false;
@@ -922,18 +971,18 @@ test "Chat info failures remain on their row and recover from backend answers" {
     fixture.state_value = .saved;
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expectEqual(@as(?[]const u8, null), page.failures[1]);
-    page.panel.selected = 7;
+    page.panel.selected = 8;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(usize, 1), fixture.archives);
     fixture.state_value = .saved;
     try page.widget().handleEvent(&ctx, .tick);
-    page.panel.selected = 8;
+    page.panel.selected = 9;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(usize, 1), fixture.copies);
     fixture.fail_read = true;
     fixture.state_value = .saved;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings(" · couldn't read chat", page.failures[8].?);
+    try std.testing.expectEqualStrings(" · couldn't read chat", page.failures[9].?);
     fixture.fail_read = false;
     page.panel.selected = 1;
     try press(&page, &ctx, vaxis.Key.enter);
@@ -955,7 +1004,7 @@ test "Chat info completion reports every backend outcome and read failure on edi
             try press(&page, &ctx, vaxis.Key.enter);
             try press(&page, &ctx, vaxis.Key.enter);
             try std.testing.expectEqual(@as(?usize, 1), page.pending);
-            page.panel.selected = 7;
+            page.panel.selected = 8;
             try press(&page, &ctx, vaxis.Key.enter);
             try std.testing.expectEqual(@as(usize, 0), fixture.archives);
             try std.testing.expectEqual(@as(?usize, 1), page.pending);
@@ -982,11 +1031,11 @@ test "Chat info rename rejects oversized multiline input and preserves cancelled
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    page.panel.selected = 6;
+    page.panel.selected = 7;
     try press(&page, &ctx, vaxis.Key.enter);
     try typeText(&page, &ctx, &(@as([status.max_label_bytes + 1]u8, @splat('a'))));
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(page.failures[6] != null);
+    try std.testing.expect(page.failures[rename_row] != null);
     try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
     page.cancelChoice();
     try press(&page, &ctx, vaxis.Key.enter);
@@ -994,7 +1043,7 @@ test "Chat info rename rejects oversized multiline input and preserves cancelled
     try typeText(&page, &ctx, "\nsecond line");
     try page.widget().handleEvent(&ctx, .paste_end);
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(page.failures[6] != null);
+    try std.testing.expect(page.failures[rename_row] != null);
     try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
     page.cancelChoice();
     try std.testing.expectEqualStrings("Fix retry deadline", page.title());
@@ -1074,7 +1123,7 @@ test "Chat info rename failure words remain visible beside long editable names" 
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        page.panel.selected = 6;
+        page.panel.selected = 7;
         try press(&page, &ctx, vaxis.Key.enter);
         switch (failure) {
             0 => fixture.fail_submit = true,
@@ -1115,7 +1164,7 @@ test "Chat info action failures persist after navigation and fit narrow rows tog
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]usize{ 7, 8 }) |row| {
+    for ([_]usize{ archive_row, copy_row }) |row| {
         page.panel.selected = row;
         try press(&page, &ctx, vaxis.Key.enter);
         for (0..9) |_| try press(&page, &ctx, vaxis.Key.up);
@@ -1124,7 +1173,7 @@ test "Chat info action failures persist after navigation and fit narrow rows tog
         try page.widget().handleEvent(&ctx, .tick);
         for ([_]u16{ 99, 46 }) |width| {
             const text = try dump(&page, arena.allocator(), width, 14);
-            try std.testing.expect(std.mem.indexOf(u8, text, if (row == 7) "Archive: couldn't archive" else "Copy: couldn't copy") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, if (row == archive_row) "Archive: couldn't archive" else "Copy: couldn't copy") != null);
         }
     }
     const text = try dump(&page, arena.allocator(), 46, 14);
@@ -1142,7 +1191,7 @@ test "Chat info static title keeps late and cancelled rename failures visible fo
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        page.panel.selected = 6;
+        page.panel.selected = 7;
         try press(&page, &ctx, vaxis.Key.enter);
         fixture.fail_submit = outcome == 2;
         try press(&page, &ctx, vaxis.Key.enter);
@@ -1176,7 +1225,7 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
         for (0..5) |state| {
             page.cancelChoice();
             page.failures[1] = " · couldn't save";
-            page.failures[6] = " · name couldn't be entered";
+            page.failures[rename_row] = " · name couldn't be entered";
             if (state > 0) {
                 page.panel.selected = switch (state) {
                     1 => 0,
@@ -1235,11 +1284,11 @@ test "Chat info hosted idle has no title row but rename and errors retain one" {
         const standalone = try page.widget().draw(ctx);
         try std.testing.expectEqual(idle_height + 2, standalone.size.height);
         try std.testing.expectEqual(@as(u16, 1), page.panel.body.top);
-        page.failures[6] = " · couldn't save";
+        page.failures[rename_row] = " · couldn't save";
         const failed = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(idle_height + 1, failed.size.height);
         try std.testing.expectEqual(@as(?u16, 1), page.panel.fieldRow(0));
-        page.failures[6] = null;
+        page.failures[rename_row] = null;
         page.renaming = true;
         const editing = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(idle_height + 1, editing.size.height);
@@ -1321,7 +1370,7 @@ test "Chat info Context appears only for measured estimates regardless of work o
         fixture.session.context_estimate = estimate;
         page.refresh();
         const text = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 14);
-        try std.testing.expectEqual(estimate != null, page.fields[5].visible);
+        try std.testing.expectEqual(estimate != null, page.fields[context_row].visible);
         try std.testing.expectEqual(estimate != null, std.mem.indexOf(u8, text, "Context") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "unknown") == null);
         if (estimate) |tokens| {
@@ -1361,9 +1410,9 @@ test "SUI-171 Chat info Context shows the Host reported threshold" {
         fixture.unicode = unicode;
         page.refresh();
         const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 14);
-        try std.testing.expectEqual(case.value != null, page.fields[5].visible);
+        try std.testing.expectEqual(case.value != null, page.fields[context_row].visible);
         if (case.value) |value| {
-            try std.testing.expectEqualStrings(value, page.fields[5].value);
+            try std.testing.expectEqualStrings(value, page.fields[context_row].value);
             try std.testing.expect(std.mem.indexOf(u8, text, value) != null);
         } else try std.testing.expect(std.mem.indexOf(u8, text, "Context") == null);
         _ = arena.reset(.retain_capacity);
@@ -1382,20 +1431,20 @@ test "Chat info hidden Context preserves action IDs failures and the blank actio
         page.refresh();
         _ = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 15);
         page.panel.selected = 4;
-        for ([_]usize{ 6, 7, 8 }) |selected| {
-            try press(&page, &ctx, if (selected == 6) vaxis.Key.down else vaxis.Key.right);
+        for ([_]usize{ 7, 8, 9 }) |selected| {
+            try press(&page, &ctx, if (selected == 7) vaxis.Key.down else vaxis.Key.right);
             try std.testing.expectEqual(selected, page.panel.selected);
         }
-        for ([_]usize{ 7, 6, 4 }) |selected| {
+        for ([_]usize{ 8, 7, 4 }) |selected| {
             try press(&page, &ctx, if (selected == 4) vaxis.Key.up else vaxis.Key.left);
             try std.testing.expectEqual(selected, page.panel.selected);
         }
-        page.failures[7] = " · couldn't archive";
-        page.pending = 8;
+        page.failures[archive_row] = " · couldn't archive";
+        page.pending = 9;
         fixture.state_value = .pending;
         const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 15);
-        try std.testing.expectEqual(@as(usize, 6), page.panel.fields.len);
-        try std.testing.expectEqual(@as(?usize, 8), page.pending);
+        try std.testing.expectEqual(@as(usize, 7), page.panel.fields.len);
+        try std.testing.expectEqual(@as(?usize, 9), page.pending);
         try std.testing.expectEqual(@as(u16, 1), page.panel.action_gap);
         try std.testing.expect(std.mem.indexOf(u8, text, "\n\n   Rename") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Archive: couldn't archive") != null);
@@ -1408,10 +1457,10 @@ test "Chat info hidden Context preserves action IDs failures and the blank actio
         fixture.state_value = .failed;
         try page.widget().handleEvent(&ctx, .tick);
         try std.testing.expectEqual(@as(?usize, null), page.pending);
-        try std.testing.expectEqualStrings(" · couldn't copy", page.failures[8].?);
-        try std.testing.expectEqualStrings(" · couldn't archive", page.failures[7].?);
-        page.failures[7] = null;
-        page.failures[8] = null;
+        try std.testing.expectEqualStrings(" · couldn't copy", page.failures[copy_row].?);
+        try std.testing.expectEqualStrings(" · couldn't archive", page.failures[archive_row].?);
+        page.failures[archive_row] = null;
+        page.failures[copy_row] = null;
     };
 }
 
@@ -1500,9 +1549,9 @@ test "Chat info hosted parts and standalone wrapper respect finite zero and smal
     for ([_]bool{ true, false }) |unicode| for ([_]bool{ false, true }) |failed| for (0..65) |width| for (0..15) |height| {
         fixture.unicode = unicode;
         page.failures[1] = if (failed) " · couldn't save" else null;
-        page.failures[6] = if (failed) " · name couldn't be entered" else null;
-        page.failures[7] = if (failed) " · couldn't archive" else null;
-        page.failures[8] = if (failed) " · couldn't copy" else null;
+        page.failures[rename_row] = if (failed) " · name couldn't be entered" else null;
+        page.failures[archive_row] = if (failed) " · couldn't archive" else null;
+        page.failures[copy_row] = if (failed) " · couldn't copy" else null;
         for ([_]vxfw.Widget{ page.bodyWidget(), page.footerWidget(), page.widget() }, 0..) |part, index| {
             const surface = try part.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
             try std.testing.expect(surface.size.width <= width);
@@ -1525,7 +1574,7 @@ test "Chat info Rename recovers refused input without reopening its field" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        page.panel.selected = 6;
+        page.panel.selected = 7;
         try press(&page, &ctx, vaxis.Key.enter);
         try press(&page, &ctx, vaxis.Key.left);
         const spaces = @as([status.max_label_bytes + 1]u8, @splat(' '));
@@ -1571,7 +1620,7 @@ test "Chat info Rename recovers refused input without reopening its field" {
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(!page.renaming);
         try std.testing.expectEqualStrings(corrected, fixture.edit.?.label);
-        try std.testing.expectEqual(@as(?[]const u8, null), page.failures[6]);
+        try std.testing.expectEqual(@as(?[]const u8, null), page.failures[rename_row]);
     }
 }
 
@@ -1620,8 +1669,8 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         try std.testing.expect(std.mem.indexOf(u8, narrowed_text, "Filter:") == null);
         try press(&page, &events, vaxis.Key.escape);
         try std.testing.expectEqual(base_height, (try page.bodyWidget().draw(ctx)).size.height);
-        page.failures[7] = " · couldn't archive";
-        page.failures[8] = " · couldn't copy";
+        page.failures[archive_row] = " · couldn't archive";
+        page.failures[copy_row] = " · couldn't copy";
         const failed = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + @as(u16, if (width == 46) 2 else 0), failed.size.height);
         try std.testing.expectEqual(width == 46, page.panel.stacked_actions);
@@ -1640,13 +1689,16 @@ test "Chat info hover follows editable fields and action click regions without c
         _ = try page.widget().draw(draw_ctx);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try page.widget().handleEvent(&events, .mouse_enter);
+        var shown: usize = 0;
         for (0..page.fields.len) |index| {
-            const selectable = index != 3 and index != 5;
-            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(1 + index), .button = .none, .type = .motion, .mods = .{} };
+            if (!page.fields[index].visible) continue;
+            defer shown += 1;
+            const selectable = index != 3 and index != context_row;
+            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(1 + shown), .button = .none, .type = .motion, .mods = .{} };
             try page.widget().handleEvent(&events, .{ .mouse = mouse });
             const drawn = try page.widget().draw(draw_ctx);
             try std.testing.expectEqual(selectable, page.panel.hover.pointing);
-            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(1 + index)).style);
+            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(1 + shown)).style);
             try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
             try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
         }
@@ -1996,9 +2048,9 @@ test "Chat info copy label follows successful short reply dismissal replacement 
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u16{ 140, 46 }) |width| {
-        page.panel.selected = 8;
+        page.panel.selected = 9;
         try press(&page, &ctx, vaxis.Key.enter);
-        try std.testing.expectEqual(@as(?usize, 8), page.pending);
+        try std.testing.expectEqual(@as(?usize, 9), page.pending);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
         fixture.copy_notice.showCopy(0, .panel_copy);
         fixture.state_value = .saved;
@@ -2014,7 +2066,7 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         fixture.copy_notice.showCopy(0, .panel_copy);
         fixture.copy_notice.show(@import("marks.zig").Say.quiet("another reply"), 0);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
-        page.panel.selected = 8;
+        page.panel.selected = 9;
         try press(&page, &ctx, vaxis.Key.enter);
         fixture.state_value = .failed;
         try page.widget().handleEvent(&ctx, .tick);
@@ -2039,13 +2091,13 @@ test "Chat info routes horizontal and forward reverse Tab without opening choice
     page.panel.selected = 4;
     try press(&page, &ctx, vaxis.Key.down);
     try press(&page, &ctx, vaxis.Key.right);
-    try std.testing.expectEqual(@as(usize, 7), page.panel.selected);
+    try std.testing.expectEqual(@as(usize, 8), page.panel.selected);
     // Tab is defined only over the controls actually drawn this frame.
     _ = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 20);
     try press(&page, &ctx, vaxis.Key.tab);
-    try std.testing.expectEqual(@as(usize, 8), page.panel.selected);
+    try std.testing.expectEqual(@as(usize, 9), page.panel.selected);
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } } });
-    try std.testing.expectEqual(@as(usize, 7), page.panel.selected);
+    try std.testing.expectEqual(@as(usize, 8), page.panel.selected);
     try std.testing.expect(!page.hasChoice());
 }
 
@@ -2057,26 +2109,26 @@ test "Chat info focus consumes drawn action layout across pending failures and C
         fixture.state_value = .pending;
         var page: Self = .{ .backend = fixture.backend() };
         page.refresh();
-        page.failures[7] = if (archive_failed) " · couldn't archive" else null;
-        page.pending = if (copy_pending) 8 else null;
+        page.failures[archive_row] = if (archive_failed) " · couldn't archive" else null;
+        page.pending = if (copy_pending) 9 else null;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         _ = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 20);
         const stacked = page.panel.stacked_actions;
         try std.testing.expectEqual(width == 46 and archive_failed, stacked);
-        page.panel.selected = 6;
+        page.panel.selected = 7;
         try press(&page, &ctx, vaxis.Key.down);
-        try std.testing.expectEqual(@as(usize, if (stacked) 7 else 6), page.panel.selected);
-        page.panel.selected = 6;
+        try std.testing.expectEqual(@as(usize, if (stacked) 8 else 7), page.panel.selected);
+        page.panel.selected = 7;
         try press(&page, &ctx, vaxis.Key.right);
-        try std.testing.expectEqual(@as(usize, if (stacked) 6 else 7), page.panel.selected);
-        page.panel.selected = 8;
+        try std.testing.expectEqual(@as(usize, if (stacked) 7 else 8), page.panel.selected);
+        page.panel.selected = 9;
         try press(&page, &ctx, vaxis.Key.up);
-        try std.testing.expectEqual(@as(usize, if (stacked) 7 else 4), page.panel.selected);
+        try std.testing.expectEqual(@as(usize, if (stacked) 8 else 4), page.panel.selected);
         page.panel.selected = 4;
         try press(&page, &ctx, vaxis.Key.tab);
-        try std.testing.expectEqual(@as(usize, 6), page.panel.selected);
+        try std.testing.expectEqual(@as(usize, 7), page.panel.selected);
     };
 }
 
@@ -2093,7 +2145,7 @@ test "Chat info contains only chat settings and never an app Memory row" {
         try std.testing.expect(std.mem.indexOf(u8, text, "Memory") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Permissions") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Copy last answer") != null);
-        try std.testing.expectEqual(@as(usize, 6), page.fields.len);
+        try std.testing.expectEqual(@as(usize, 7), page.fields.len);
         _ = arena.reset(.retain_capacity);
     };
 }
@@ -2275,4 +2327,54 @@ test "SUI-4 Chat info permission wording follows mode across tool sets" {
         try std.testing.expect(std.mem.indexOf(u8, text, "Bash runs without") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Bash commands can run without asking you") == null);
     };
+}
+
+test "SUI-181 Chat info shows the Account row only with a second account and switches by choice" {
+    const picker = @import("model_picker.zig");
+    const codex = connection.Name.parse("codex").?;
+    const work = connection.Name.parse("work").?;
+    const alone: picker.Menu = .{ .entries = &.{.{ .id = "m", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{codex}) }} };
+    const two: picker.Menu = .{ .entries = &.{.{ .id = "m", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&.{ codex, work }) }} };
+    for ([_]?*const picker.Menu{ null, &alone, &two }, 0..) |menu, case| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.menu = menu;
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const text = try dump(&page, arena.allocator(), 99, 20);
+        try std.testing.expectEqual(case == 2, std.mem.indexOf(u8, text, "Account") != null);
+        try std.testing.expectEqual(case == 2, page.fields[account_row].visible);
+        // A hidden row cannot be opened.
+        page.panel.selected = account_row;
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(case == 2, page.hasChoice());
+        if (case != 2) continue;
+        try std.testing.expectEqualStrings("codex", page.fields[account_row].value);
+        try std.testing.expectEqual(@as(usize, 2), page.panel.choice.?.labels.len);
+        try std.testing.expectEqualStrings("codex", page.panel.choice.?.labels[0]);
+        try std.testing.expectEqualStrings("work", page.panel.choice.?.labels[1]);
+        // Choosing the chat's own connection saves nothing.
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+        try std.testing.expect(page.pending == null);
+        page.panel.selected = account_row;
+        try press(&page, &ctx, vaxis.Key.enter);
+        try press(&page, &ctx, vaxis.Key.down);
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqualStrings("work", fixture.edit.?.connection);
+        try std.testing.expectEqual(@as(?usize, account_row), page.pending);
+        // A refusal from the Host stays on the row.
+        fixture.state_value = .failed;
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqualStrings(" · couldn't save", page.failures[account_row].?);
+        // Focus keys pass through the row between Model and the actions.
+        page.panel.selected = model_row;
+        try press(&page, &ctx, vaxis.Key.down);
+        try std.testing.expectEqual(account_row, page.panel.selected);
+        try press(&page, &ctx, vaxis.Key.down);
+        try std.testing.expectEqual(rename_row, page.panel.selected);
+    }
 }

@@ -180,7 +180,7 @@ An explicit `tools: []` allows no tools.
 `provider` may be left out when the Host serves one provider.
 A creation naming `parent` inherits that Session's Workspace and provider and cannot supply either field.
 `effort: null` and `compactAt: null` request the Host defaults for the selected model.
-Updates preserve omitted settings and may change the model within the Session's fixed provider; the Workspace remains fixed.
+Updates preserve omitted settings and may change the model, and the connection to another served one of the same wire format; the Workspace remains fixed.
 
 ```ts
 const session = await rui.sessions.create({

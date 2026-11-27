@@ -167,6 +167,15 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
     return value;
 }
 
+/// The one rule for moving a Session to another connection: the target must be one a Session may be
+/// created on and speak the Session's own codec, so only the account changes. Replay keys opaque state on
+/// the connection, so the history stays valid; a signed-out target fails at its first request by name.
+pub fn switchRejection(existing: *const CurrentConfiguration, requested: connection.Name, served: *const provider_route.Served) ?configuration_admission.Rejection {
+    if (requested.eql(existing.provider)) return null;
+    const codec = served.codecOf(requested.slice()) orelse return .connection_unserved;
+    return if (codec == existing.codec) null else .connection_wire_differs;
+}
+
 pub fn configurationBeforeWorkspace(
     selected_facts: []const model_catalog.Entry,
     current: ?*const CurrentConfiguration,
@@ -180,15 +189,7 @@ pub fn configurationBeforeWorkspace(
     else
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
-    const provider = if (requested.provider.state == .value)
-        connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection
-    else
-        null;
-    if (current) |existing| {
-        if (provider) |value| {
-            if (!value.eql(existing.provider)) return .connection_is_immutable;
-        }
-    }
+    if (requested.provider.state == .value) _ = connection.Name.parse(requested.provider.value.slice()) orelse return .unknown_connection;
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
@@ -353,7 +354,7 @@ const Settings = struct {
                         (if (old) |value| (if (next) |other| value.eql(other.slice()) else false) else next == null)
                     else
                         old.eql(next.slice()),
-                    .choice, .content, .tools, .decimal_policy, .app_tools => old == next,
+                    .choice, .content, .tools, .decimal_policy, .app_tools => std.meta.eql(old, next),
                 };
                 fields.setPresent(@field(session_settings.SessionField, entry.field), !same);
             }
@@ -489,6 +490,8 @@ pub const ConfigurationReads = struct {
     tools: ?tool_set.Selection = null,
     loaded_tools: ?tool_set.Selection = null,
     saved_tools: command_input.ToolsField = undefined,
+    /// Whether this update moves the Session to another connection, so its saved tools are judged against the new one.
+    switching: bool = false,
     saved_loaded: command_input.ToolsField = undefined,
     creator: ?[session_id.bytes]u8 = null,
     inherits_parent: bool = false,
@@ -700,8 +703,10 @@ fn loadedToolsRejection(tools: *const command_input.ToolsField, loaded: *const c
 fn loadedTools(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const requested = &reads.configuration;
     const creating = request.session.len == 0;
-    if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return finishValidation(request, reads);
-    if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return finishValidation(request, reads);
+    // A switch judges the saved tools against the new connection, so it reads them even when nothing else asks.
+    const switching = reads.switching and requested.tools.state != .value;
+    if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value and !switching) return finishValidation(request, reads);
+    if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null) and !switching) return finishValidation(request, reads);
     const v = &reads.step.validating;
     if (creating or requested.tools.state == .value) {
         v.tools = requestedNames(requested);
@@ -805,6 +810,9 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
         .model => return validateModel(a, request, reads),
         .saved_tools => {
             try savedNames(reads);
+            if (reads.switching) if (toolsRejection(&reads.lane_tools, request.served, connection.Name.parse(reads.configuration.provider.value.slice()).?, &reads.saved_tools)) |rejection| return .{ .rejected = rejection };
+            // Nothing but the switch asked for the saved tools: the rest of the update leaves loaded tools as they are.
+            if (reads.configuration.loaded_tools.state != .value) return finishValidation(request, reads);
             reads.step.validating.tools = &reads.saved_tools;
             return loadedNames(a, request, reads);
         },
@@ -1014,6 +1022,10 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
     const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
     // Named tools resolve through the lane before their parent authority is judged, so an unknown or unavailable name
     // is refused by name, as the Host-only path did.
+    if (current_configuration) |existing| {
+        if (switchRejection(existing, provider, request.served)) |rejection| return .{ .rejected = rejection };
+        reads.switching = !provider.eql(existing.provider);
+    }
     if (configuration.tools.state == .value) if (toolsRejection(&reads.lane_tools, request.served, provider, requestedNames(configuration))) |rejection| return .{ .rejected = rejection };
     reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
         .creating = creating,

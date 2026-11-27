@@ -8,6 +8,7 @@ const tool_set_domain = @import("../domain/tool_set.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const configuration_domain = @import("../domain/configuration.zig");
+const configuration_admission = @import("../../configuration_admission.zig");
 const content_domain = @import("../domain/content.zig");
 const store_testing = @import("../testing.zig");
 const ConfigurationContentAction = configuration_domain.ConfigurationContentAction;
@@ -124,7 +125,6 @@ test "configuration pre-Workspace decisions allow model revisions" {
             .model_requested = null,
             .expected = null,
         },
-        .{ .name = "a different connection name is immutable on an existing Session", .has_current = true, .workspace_requested = false, .provider_requested = "other", .model_requested = null, .expected = .connection_is_immutable },
     };
 
     var existing: CurrentConfiguration = .{};
@@ -277,7 +277,106 @@ test "Store configuration requires Workspace and model and, on a Host serving se
     }.run);
 }
 
-test "a different connection name rejects mixed configuration atomically and replays exact shape" {
+test "a Session switches only to a served connection of its own wire format, over every pair of built-in names" {
+    var served = protocol.servedBuiltIns(.endpoint);
+    try served.put(.{ .name = connection.Name.parse("work").?, .label = .{}, .route = .key_file, .codec = .@"openai-responses/3", .web_search = true });
+    const names = [_][]const u8{ "codex", "chatgpt", "openai", "work", "ghost" };
+    for (names) |from| for (names) |to| {
+        const from_codec = served.codecOf(from) orelse continue;
+        var existing: CurrentConfiguration = .{};
+        existing.provider = connection.Name.parse(from).?;
+        existing.codec = from_codec;
+        const expected: ?configuration_admission.Rejection = if (std.mem.eql(u8, from, to)) null else if (served.codecOf(to)) |codec|
+            (if (codec == from_codec) null else .connection_wire_differs)
+        else
+            .connection_unserved;
+        try std.testing.expectEqual(expected, configuration_domain.switchRejection(&existing, connection.Name.parse(to).?, &served));
+    };
+    // A Session whose connection is no longer served still switches, by the codec it saved.
+    var gone: CurrentConfiguration = .{};
+    gone.provider = connection.Name.parse("retired").?;
+    gone.codec = .@"openai-responses/3";
+    try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), configuration_domain.switchRejection(&gone, connection.Name.parse("work").?, &served));
+    // The one pair the contract is about: two accounts of one wire format switch freely.
+    var chat: CurrentConfiguration = .{};
+    chat.provider = connection.Name.parse("chatgpt").?;
+    chat.codec = .@"openai-responses/3";
+    try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), configuration_domain.switchRejection(&chat, connection.Name.parse("work").?, &served));
+}
+
+test "a Session moves to another account of its wire format, records the change, and refuses another wire format" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var routes = protocol.servedBuiltIns(.endpoint);
+            try routes.put(.{ .name = connection.Name.parse("work").?, .label = .{}, .route = .key_file, .codec = .@"openai-responses/3", .web_search = true });
+            try routes.put(.{ .name = connection.Name.parse("plain").?, .label = .{}, .route = .key_file, .codec = .@"openai-responses/3", .web_search = false });
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var initial = try completeConfiguration("switch-initial", "", workspace, "model-a");
+            initial.configuration.provider.state = .value;
+            try initial.configuration.provider.value.set("chatgpt");
+            const created = try storage.configure(&initial, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            const before = try storage.inspectSessionForTesting(session.slice());
+
+            // The Session holds web_search, which a connection that does not run it cannot be offered: the
+            // switch is refused whole whether the saved tools are kept or named again, and accepted once they leave it.
+            var plain: wire_request.ConfigureCommand = .{};
+            try plain.key.set("switch-to-plain");
+            try plain.session.set(session.slice());
+            plain.configuration.provider.state = .value;
+            try plain.configuration.provider.value.set("plain");
+            const kept_tools = try storage.configure(&plain, .{});
+            try std.testing.expect(kept_tools == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_tool_missing, kept_tools.rejected.code);
+            try std.testing.expectEqual(before.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
+            var named: wire_request.ConfigureCommand = .{};
+            try named.key.set("switch-to-plain-named");
+            try named.session.set(session.slice());
+            named.configuration.provider.state = .value;
+            try named.configuration.provider.value.set("plain");
+            named.configuration.tools.state = .value;
+            named.configuration.tools.count = 0;
+            named.configuration.tools.names.len = 0;
+            try named.configuration.tools.insert("web_search");
+            const named_tools = try storage.configure(&named, .{});
+            try std.testing.expect(named_tools == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.provider_tool_missing, named_tools.rejected.code);
+
+            var move: wire_request.ConfigureCommand = .{};
+            try move.key.set("switch-to-work");
+            try move.session.set(session.slice());
+            move.configuration.provider.state = .value;
+            try move.configuration.provider.value.set("work");
+            const moved = try storage.configure(&move, .{});
+            try std.testing.expect(moved == .accepted);
+            try std.testing.expectEqual(before.revision + 1, moved.accepted.revision);
+            const after = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqualStrings("work", after.provider.?.slice());
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE field='provider' AND revision=?1", .{moved.accepted.revision}));
+
+            var other: wire_request.ConfigureCommand = .{};
+            try other.key.set("switch-to-codex");
+            try other.session.set(session.slice());
+            other.configuration.provider.state = .value;
+            try other.configuration.provider.value.set("codex");
+            const refused = try storage.configure(&other, .{});
+            try std.testing.expect(refused == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_wire_differs, refused.rejected.code);
+            const kept = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(after.revision, kept.revision);
+            try std.testing.expectEqualStrings("work", kept.provider.?.slice());
+        }
+    }.run);
+}
+
+test "an unserved connection name rejects mixed configuration atomically and replays exact shape" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -308,7 +407,7 @@ test "a different connection name rejects mixed configuration atomically and rep
             const revision_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{});
             const rejected = try storage.configure(&update, .{});
             try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_is_immutable, rejected.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.connection_unserved, rejected.rejected.code);
             try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             const current = try storage.inspectSessionForTesting(created_session_0.slice());

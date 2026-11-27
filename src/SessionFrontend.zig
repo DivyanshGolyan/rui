@@ -518,7 +518,7 @@ fn configureIntent(buffer: []u8, edit: ChatInfo.Edit) []const u8 {
     const value: []const u8 = switch (edit) {
         .effort => |effort| if (effort) |value| @tagName(value) else "model default",
         .permission => |permission| @tagName(permission),
-        .model, .label => |text| text,
+        .model, .connection, .label => |text| text,
         .tools => return "tools (see the saved request)",
     };
     out.print("{s}: ", .{@tagName(edit)}) catch return "configuration (see the saved request)";
@@ -577,15 +577,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
         fn configure(raw: *anyopaque, edit: ChatInfo.Edit) !void {
             const frontend = owner(raw);
             try frontend.infoMaySave();
-            var held = edit;
-            switch (edit) {
-                .label, .model => |text| {
-                    if (text.len > frontend.info_bytes.len) return error.ValueTooLong;
-                    @memcpy(frontend.info_bytes[0..text.len], text);
-                    if (edit == .label) held = .{ .label = frontend.info_bytes[0..text.len] } else held = .{ .model = frontend.info_bytes[0..text.len] };
-                },
-                else => {},
-            }
+            const held = try edit.copiedInto(&frontend.info_bytes);
             var intent_buffer: [1024]u8 = undefined;
             if (try frontend.reserveConfigure(configureIntent(&intent_buffer, held)) != .admitted) return error.Busy;
             frontend.info_edit = held;
@@ -5518,7 +5510,7 @@ test "chat info owns typed keys before Host restart across every modal editor an
             .permissions => 1,
             .tools => 2,
             .model => 4,
-            .rename => 6,
+            .rename => 7,
         };
         if (mode != .rows) try held.keys("\r");
         const selected = page.panel.selected;
@@ -10323,10 +10315,10 @@ test "chat info Archive delegates once and settles only its exact Session answer
         try captureInfo(held, "Fix retry deadline");
         try held.keys("draft\x1bi");
         _ = try held.draw();
-        held.self.app_info.panel.selected = 7;
+        held.self.app_info.panel.selected = 8;
         try held.keys("\r");
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
-        try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+        try std.testing.expectEqual(@as(?usize, 8), held.self.app_info.pending);
         const result: overview_view.ArchiveResult = .{ .request = .{ .reference = "k7m2qx".* }, .outcome = switch (ending) {
             0 => .{ .requested = .pending },
             1 => .{ .failed = "refused" },
@@ -10340,7 +10332,7 @@ test "chat info Archive delegates once and settles only its exact Session answer
         var ctx = held.context();
         try held.self.app_info.widget().handleEvent(&ctx, .tick);
         try std.testing.expect(held.self.app_info.pending == null);
-        try std.testing.expectEqual(ending != 0, held.self.app_info.failures[7] != null);
+        try std.testing.expectEqual(ending != 0, held.self.app_info.failures[8] != null);
         try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
         try std.testing.expect(held.self.input.queuedCommand() == null);
     }
@@ -10376,25 +10368,25 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
         try captureInfo(held, "Fix retry deadline");
         try held.keys("kept draft\x1bi");
         _ = try held.draw();
-        held.self.app_info.panel.selected = 7;
+        held.self.app_info.panel.selected = 8;
         try held.keys("\r");
         try std.testing.expectEqual(@as(usize, @intFromBool(!refused)), overview.archives);
         try std.testing.expectEqual(before + @intFromBool(!refused), overview.state.request_count);
-        try std.testing.expectEqual(@as(?usize, if (refused) null else 7), held.self.app_info.pending);
-        try std.testing.expectEqual(refused, held.self.app_info.failures[7] != null);
+        try std.testing.expectEqual(@as(?usize, if (refused) null else 8), held.self.app_info.pending);
+        try std.testing.expectEqual(refused, held.self.app_info.failures[8] != null);
         try std.testing.expectEqual(@as(@TypeOf(held.self.info_effect), if (refused) .idle else .archive), held.self.info_effect);
         try held.keys("\x07\x1bi");
         _ = try held.draw();
         if (refused) {
-            held.self.app_info.panel.selected = 6;
+            held.self.app_info.panel.selected = 7;
             try held.keys("\r");
             try std.testing.expect(held.self.app_info.renaming);
             try held.keys("\x07");
             overview.state.request_count = 0;
-            held.self.app_info.panel.selected = 7;
+            held.self.app_info.panel.selected = 8;
             try held.keys("\r");
             try std.testing.expectEqual(@as(usize, 1), overview.archives);
-            try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+            try std.testing.expectEqual(@as(?usize, 8), held.self.app_info.pending);
         }
         try held.keys("\x07");
         const result: overview_view.ArchiveResult = .{ .request = .{ .reference = "k7m2qx".* }, .outcome = .{ .requested = .completed } };
@@ -10403,11 +10395,11 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
         held.self.archiveAnswered(other);
         var ctx = held.context();
         try held.self.app_info.widget().handleEvent(&ctx, .tick);
-        try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+        try std.testing.expectEqual(@as(?usize, 8), held.self.app_info.pending);
         held.self.archiveAnswered(result);
         try held.self.app_info.widget().handleEvent(&ctx, .tick);
         try std.testing.expect(held.self.app_info.pending == null);
-        try std.testing.expect(held.self.app_info.failures[7] == null);
+        try std.testing.expect(held.self.app_info.failures[8] == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
     };
 }
@@ -10424,10 +10416,10 @@ test "chat info archive owner errors propagate instead of becoming ordinary admi
     try held.keys("kept draft\x1bi");
     _ = try held.draw();
     held.self.lender.step = Failed.step;
-    held.self.app_info.panel.selected = 7;
+    held.self.app_info.panel.selected = 8;
     try std.testing.expectError(error.TestArchiveDispatchFailed, held.keys("\r"));
     try std.testing.expect(held.self.app_info.pending == null);
-    try std.testing.expect(held.self.app_info.failures[7] == null);
+    try std.testing.expect(held.self.app_info.failures[8] == null);
     try std.testing.expectEqual(.idle, held.self.info_effect);
     try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
 }
@@ -10487,7 +10479,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
             return null;
         }
     };
-    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{ .allowed = try .of(&.{ "bash", "none" }), .loaded = try .of(&.{"none"}) } }, .{ .model = "gpt-6-luna" }, .{ .label = "Renamed" } };
+    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{ .allowed = try .of(&.{ "bash", "none" }), .loaded = try .of(&.{"none"}) } }, .{ .model = "gpt-6-luna" }, .{ .connection = "work" }, .{ .label = "Renamed" } };
     for (std.enums.values(Hold)) |hold| for (0..edits.len + 1) |effect| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -10644,7 +10636,7 @@ test "chat info retains Session detach keys with full-page and standalone choice
             held.self.app_info.panel.selected = switch (choice) {
                 1 => 0,
                 2 => 4,
-                else => 6,
+                else => 7,
             };
             try held.keys("\r");
             try std.testing.expect(held.self.app_info.hasChoice());
