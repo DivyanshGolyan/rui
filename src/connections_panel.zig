@@ -7,7 +7,7 @@ const protocol = @import("protocol.zig");
 const Panel = @import("widgets/Panel.zig");
 
 const max_line = 96;
-const lines_per_connection = 4;
+const lines_per_connection = 7;
 const max_lines = connection.max_served * lines_per_connection;
 
 pub const Rows = struct {
@@ -30,37 +30,34 @@ pub const Rows = struct {
         for (facts[0..@min(facts.len, connection.max_served)], 0..) |fact, index| {
             const name = fact.name.slice();
             @memcpy(rows.names[index][0..name.len], name);
-            rows.add(rows.names[index][0..name.len], "{s}", .{fact.label.slice()});
+            rows.add(rows.names[index][0..name.len], "", .{});
+        rows.add("", "  {s}", .{fact.label.slice()});
             const reading = fact.usage orelse {
                 // A browser sign-in sends no usage headers; any other connection simply has not reported yet.
-                rows.add("", "{s}", .{if (fact.route == .chatgpt_plan) "no usage for browser sign-ins" else "no usage seen yet"});
+                rows.add("", "  {s}", .{if (fact.route == .chatgpt_plan) "no usage for browser sign-ins" else "no usage seen yet"});
                 continue;
             };
             inline for (.{ reading.primary, reading.secondary }) |maybe| if (maybe) |window| {
                 var buffer: [max_line]u8 = undefined;
                 var out: std.Io.Writer = .fixed(&buffer);
-                writeWindow(&out, window, now) catch {};
+                writeWindow(&out, window) catch {};
                 rows.add("", "{s}", .{out.buffered()});
             };
             var buffer: [max_line]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
             writeAge(&out, now -| reading.observed_at) catch {};
-            rows.add("", "as of {s}", .{out.buffered()});
+            rows.add("", "  as of {s}", .{out.buffered()});
         }
         return rows.fields[0..rows.len];
     }
 };
 
-fn writeWindow(out: *std.Io.Writer, window: protocol.UsageWindow, now: u64) std.Io.Writer.Error!void {
+fn writeWindow(out: *std.Io.Writer, window: protocol.UsageWindow) std.Io.Writer.Error!void {
     try writeName(out, window.minutes);
     if (window.used_percent >= 100) {
         try out.writeAll(" limit reached");
     } else {
         try out.print(" {d:.0}% used", .{window.used_percent});
-    }
-    if (window.reset_at) |at| {
-        try out.writeAll(" · resets in ");
-        try writeSpan(out, at -| now);
     }
 }
 
@@ -108,21 +105,42 @@ test "SUI-182 the Connections reference names each window by its length and says
     var rows: Rows = .{};
     const shown = rows.build(&facts, now);
     const expected = [_][2][]const u8{
-        .{ "work", "ChatGPT (device code)" },
-        .{ "", "weekly 25% used · resets in 3 d 4 h" },
-        .{ "", "5-hour limit reached · resets in 7 m" },
-        .{ "", "as of 12 m ago" },
-        .{ "home", "ChatGPT" },
-        .{ "", "no usage for browser sign-ins" },
-        .{ "lab", "ChatGPT (device code)" },
-        .{ "", "no usage seen yet" },
-        .{ "odd", "ChatGPT (device code)" },
-        .{ "", "90-minute 3% used" },
-        .{ "", "as of just now" },
+        .{ "work", "" },
+        .{ "", "  ChatGPT (device code)" },
+        .{ "", "  weekly 25% used" },
+        .{ "", "    resets in 3 d 4 h" },
+        .{ "", "  5-hour limit reached" },
+        .{ "", "    resets in 7 m" },
+        .{ "", "  as of 12 m ago" },
+        .{ "home", "" },
+        .{ "", "  ChatGPT" },
+        .{ "", "  no usage for browser sign-ins" },
+        .{ "lab", "" },
+        .{ "", "  ChatGPT (device code)" },
+        .{ "", "  no usage seen yet" },
+        .{ "odd", "" },
+        .{ "", "  ChatGPT (device code)" },
+        .{ "", "  90-minute 3% used" },
+        .{ "", "  as of just now" },
     };
     try std.testing.expectEqual(expected.len, shown.len);
     for (expected, shown) |want, got| {
         try std.testing.expectEqualStrings(want[0], got.label);
         try std.testing.expectEqualStrings(want[1], got.value);
+    }
+}
+
+test "SUI-182 every Connections row fits the narrowest dialog for the longest name, label and window" {
+    const now: u64 = 1_800_000_000;
+    // The narrowest settings dialog is 40 columns wide (a 46-column terminal); a row is its own text plus a one-column margin.
+    const width = 40;
+    const worst: protocol.UsageWindow = .{ .used_percent = 100, .minutes = 14 * 1440 + 60, .reset_at = now + 99 * 86400 + 23 * 3600 };
+    const facts = [_]protocol.ConnectionFact{
+        served("abcdefghijklmnop", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now - 99 * 86400, .primary = worst, .secondary = worst }),
+        served("x", "ChatGPT", .chatgpt_plan, null),
+    };
+    var rows: Rows = .{};
+    for (rows.build(&facts, now)) |field| {
+        try std.testing.expect(1 + field.label.len + 3 * @intFromBool(field.label.len > 0 and field.value.len > 0) + field.value.len <= width);
     }
 }

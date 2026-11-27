@@ -1225,7 +1225,7 @@ test "SUI-182 App settings Connections opens a read-only reference of each serve
         page.select(.connections);
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(page.reference_open);
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 120, .height = 12 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 12 }, .cell_size = .{} });
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..drawn.size.height) |row| {
             for (0..drawn.size.width) |col| try text.writer.writeAll(drawn.readCell(@intCast(col), @intCast(row)).char.grapheme);
@@ -1233,7 +1233,7 @@ test "SUI-182 App settings Connections opens a read-only reference of each serve
         }
         if (read != null) {
             try std.testing.expect(std.mem.indexOf(u8, text.written(), "work") != null);
-            try std.testing.expect(std.mem.indexOf(u8, text.written(), "weekly 40% used · resets in 1 d 0 h") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "resets in 1 d 0 h") != null);
             try std.testing.expect(std.mem.indexOf(u8, text.written(), "no usage for browser sign-ins") != null);
         } else try std.testing.expect(std.mem.indexOf(u8, text.written(), "the Host cannot be read") != null);
         // The reference is read-only: Enter changes nothing and Escape-free input keeps it open.
