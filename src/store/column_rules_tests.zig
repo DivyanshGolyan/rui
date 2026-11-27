@@ -459,3 +459,266 @@ test "SH-183 store check's statements run on MySQL and count the rows that break
         }
     }
 }
+
+// SH-183 over the schema's whole domain: an independent list of the checks, and every reference, own column rule and
+// cross-column rule driven through a plain SQLite Store, each against an oracle that is not the statement under test.
+
+const Cell = evaluator.Value;
+
+fn normalCell(column: schema.Column) Cell {
+    return switch (column.type) {
+        .int, .flag => .{ .int = 7 },
+        .text, .tag => .{ .text = "k" },
+        .bytes => .{ .text = "\x07" },
+    };
+}
+
+fn otherCell(column: schema.Column) Cell {
+    return switch (column.type) {
+        .int, .flag => .{ .int = 8 },
+        .text, .tag => .{ .text = "zz" },
+        .bytes => .{ .text = "\x08" },
+    };
+}
+
+fn cellSql(arena: std.mem.Allocator, column: schema.Column, cell: Cell) ![]const u8 {
+    switch (cell) {
+        .null => return "NULL",
+        .int => |number| return std.fmt.allocPrint(arena, "{d}", .{number}),
+        .text => |bytes| {
+            const hex = try std.fmt.allocPrint(arena, "{x}", .{bytes});
+            return std.fmt.allocPrint(arena, if (column.type == .bytes) "x'{s}'" else "CAST(x'{s}' AS TEXT)", .{hex});
+        },
+    }
+}
+
+const Override = struct { column: []const u8, cell: Cell };
+
+/// One row of `table` with every column at its normal cell, except the overrides, inserted on SQLite.
+fn insertCells(database: *c.sqlite3, arena: std.mem.Allocator, table: schema.Table, overrides: []const Override) !void {
+    var names: std.ArrayList(u8) = .empty;
+    var values: std.ArrayList(u8) = .empty;
+    for (table.columns) |column| {
+        if (!column.engines.on(.sqlite)) continue;
+        var cell = normalCell(column);
+        for (overrides) |each| if (std.mem.eql(u8, each.column, column.name)) {
+            cell = each.cell;
+        };
+        if (names.items.len > 0) {
+            try names.append(arena, ',');
+            try values.append(arena, ',');
+        }
+        try names.appendSlice(arena, column.name);
+        try values.appendSlice(arena, try cellSql(arena, column, cell));
+    }
+    const sql = try std.fmt.allocPrintSentinel(arena, "INSERT INTO {s}({s}) VALUES({s})", .{ table.name, names.items, values.items }, 0);
+    try sqlite.exec(database, sql);
+}
+
+fn clearTable(database: *c.sqlite3, arena: std.mem.Allocator, name: []const u8) !void {
+    try sqlite.exec(database, try std.fmt.allocPrintSentinel(arena, "DELETE FROM {s}", .{name}, 0));
+}
+
+fn countOf(database: *c.sqlite3, all: []const store_check.Check, name: []const u8) !u32 {
+    for (all) |check| if (std.mem.eql(u8, check.name, name)) return sqlite.pragmaInt(database, check.sql);
+    std.debug.print("store check has no statement named {s}\n", .{name});
+    return error.MissingCheck;
+}
+
+fn plainDatabase(raw: *?*c.sqlite3) !*c.sqlite3 {
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", raw));
+    try sqlite.exec(raw.*.?, schema.ddlIn(.sqlite, .plain));
+    return raw.*.?;
+}
+
+fn columnNamed(table: schema.Table, name: []const u8) schema.Column {
+    for (table.columns) |column| if (std.mem.eql(u8, column.name, name)) return column;
+    unreachable;
+}
+
+fn tableNamed(name: []const u8) schema.Table {
+    for (schema.tables) |table| if (std.mem.eql(u8, table.name, name)) return table;
+    unreachable;
+}
+
+fn referenceName(arena: std.mem.Allocator, table: schema.Table, key: schema.ForeignKey) ![]const u8 {
+    const joined = try std.mem.join(arena, ",", key.columns);
+    return std.fmt.allocPrint(arena, "{s}({s})->{s}", .{ table.name, joined, key.references });
+}
+
+test "SH-183 store check holds exactly one statement per rule and reference the schema holds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const all = comptime store_check.checks(dialect);
+        var names: std.StringHashMapUnmanaged(void) = .empty;
+        for (all) |check| try std.testing.expect(!(try names.getOrPut(arena, check.name)).found_existing);
+        var expected: usize = 0;
+        inline for (schema.tables) |table| {
+            if (comptime !table.engines.on(dialect)) continue;
+            inline for (table.columns) |column| {
+                if (comptime !column.engines.on(dialect)) continue;
+                if (comptime schema.columnCheck(column) != null) {
+                    expected += 1;
+                    try std.testing.expect(names.contains(table.name ++ "." ++ column.name));
+                }
+            }
+            inline for (0..table.checks.len) |position| {
+                expected += 1;
+                try std.testing.expect(names.contains(try std.fmt.allocPrint(arena, "{s}#{d}", .{ table.name, position })));
+            }
+            inline for (table.foreign_keys) |key| {
+                expected += 1;
+                try std.testing.expect(names.contains(try referenceName(arena, table, key)));
+            }
+        }
+        try std.testing.expectEqual(expected, all.len);
+        for (all) |check| try std.testing.expect(std.mem.startsWith(u8, check.sql, "SELECT COUNT(*) FROM "));
+    }
+}
+
+test "SH-183 a reference counts a missing parent, and not a present parent or a NULL part, for every reference in the schema" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    const database = try plainDatabase(&raw);
+    const all = comptime store_check.checks(.sqlite);
+    var composite: usize = 0;
+    var nullable_parts: usize = 0;
+    var cases: usize = 0;
+    for (schema.tables) |table| {
+        if (!table.engines.on(.sqlite)) continue;
+        for (table.foreign_keys) |key| {
+            const name = try referenceName(arena, table, key);
+            const parent = tableNamed(key.references);
+            const own = std.mem.eql(u8, table.name, key.references);
+            var overlap = false;
+            for (key.columns) |part| for (key.referenced) |target| {
+                overlap = overlap or std.mem.eql(u8, part, target);
+            };
+            if (key.columns.len > 1) composite += 1;
+            // No parent row: every part set and none matching is one violator, and so is a single part that differs.
+            for (key.columns, 0..) |_, differing| {
+                if (own and overlap) continue;
+                try clearTable(database, arena, table.name);
+                try clearTable(database, arena, parent.name);
+                if (!own) try insertCells(database, arena, parent, &.{});
+                var parts: std.ArrayList(Override) = .empty;
+                try parts.append(arena, .{ .column = key.columns[differing], .cell = otherCell(columnNamed(table, key.columns[differing])) });
+                try insertCells(database, arena, table, parts.items);
+                try std.testing.expectEqual(@as(u32, 1), try countOf(database, all, name));
+                cases += 1;
+            }
+            // Its parent row present: nothing to count.
+            try clearTable(database, arena, table.name);
+            try clearTable(database, arena, parent.name);
+            if (!own) try insertCells(database, arena, parent, &.{});
+            try insertCells(database, arena, table, &.{});
+            try std.testing.expectEqual(@as(u32, 0), try countOf(database, all, name));
+            // A part that is NULL makes the reference unknown, whatever the other parts name.
+            for (key.columns) |part| {
+                if (!columnNamed(table, part).nullable or (own and overlap)) continue;
+                try clearTable(database, arena, table.name);
+                try clearTable(database, arena, parent.name);
+                if (!own) try insertCells(database, arena, parent, &.{});
+                var parts: std.ArrayList(Override) = .empty;
+                for (key.columns) |each| try parts.append(arena, .{ .column = each, .cell = otherCell(columnNamed(table, each)) });
+                for (parts.items) |*each| if (std.mem.eql(u8, each.column, part)) {
+                    each.cell = .null;
+                };
+                try insertCells(database, arena, table, parts.items);
+                try std.testing.expectEqual(@as(u32, 0), try countOf(database, all, name));
+                nullable_parts += 1;
+            }
+        }
+    }
+    try std.testing.expect(composite > 5);
+    try std.testing.expect(nullable_parts > 5);
+    try std.testing.expect(cases > 100);
+}
+
+test "SH-183 a column rule counts exactly the values the column refuses, for every column that holds only its own rules" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    const database = try plainDatabase(&raw);
+    const all = comptime store_check.checks(.sqlite);
+    var cases: usize = 0;
+    var refused: usize = 0;
+    inline for (schema.tables) |table| {
+        if (comptime !table.engines.on(.sqlite)) continue;
+        inline for (table.columns) |column| {
+            if (comptime !column.engines.on(.sqlite) or schema.columnCheck(column) == null or column.check != null) continue;
+            var values: std.ArrayList(Value) = .empty;
+            try candidates(column, &values, arena);
+            const name = table.name ++ "." ++ column.name;
+            for (values.items) |value| {
+                if (value == .null and !column.nullable) continue;
+                const cell: Cell = switch (value) {
+                    .null => .null,
+                    .int => |number| .{ .int = number },
+                    .octets => |bytes| .{ .text = bytes },
+                };
+                try clearTable(database, arena, table.name);
+                try insertCells(database, arena, table, &.{.{ .column = column.name, .cell = cell }});
+                const want: u32 = if (accepts(column, value)) 0 else 1;
+                try std.testing.expectEqual(want, try countOf(database, all, name));
+                cases += 1;
+                refused += want;
+            }
+        }
+    }
+    try std.testing.expect(cases > 1000);
+    try std.testing.expect(refused > 200);
+}
+
+test "SH-183 a cross-column rule counts the rows the rule value answers false, and not those it answers true or unknown" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    const database = try plainDatabase(&raw);
+    const all = comptime store_check.checks(.sqlite);
+    var false_rows: usize = 0;
+    var unknown_rows: usize = 0;
+    var true_rows: usize = 0;
+    inline for (schema.tables) |table| {
+        if (comptime !table.engines.on(.sqlite) or table.checks.len == 0) continue;
+        var names: std.ArrayList([]const u8) = .empty;
+        for (table.columns) |column| if (column.engines.on(.sqlite)) try names.append(arena, column.name);
+        inline for (table.checks, 0..) |rule, position| {
+            const name = try std.fmt.allocPrint(arena, "{s}#{d}", .{ table.name, position });
+            // The normal row, then each column on its own set to NULL, to the other cell, and (for an integer) to 0 and 1.
+            var variants: std.ArrayList(Override) = .empty;
+            try variants.append(arena, .{ .column = "", .cell = .null });
+            for (table.columns) |column| {
+                if (!column.engines.on(.sqlite)) continue;
+                if (column.nullable) try variants.append(arena, .{ .column = column.name, .cell = .null });
+                try variants.append(arena, .{ .column = column.name, .cell = otherCell(column) });
+                if (column.type == .int) for ([_]i64{ 0, 1 }) |number| try variants.append(arena, .{ .column = column.name, .cell = .{ .int = number } });
+            }
+            for (variants.items) |variant| {
+                var row: std.ArrayList(Cell) = .empty;
+                for (table.columns) |column| {
+                    if (!column.engines.on(.sqlite)) continue;
+                    try row.append(arena, if (std.mem.eql(u8, column.name, variant.column)) variant.cell else normalCell(column));
+                }
+                const answer = evaluator.eval(&rule, evaluator.Scope.ofRow(.{}, "", names.items, row.items)) catch continue;
+                const violating = answer == .int and answer.int == 0;
+                try clearTable(database, arena, table.name);
+                try insertCells(database, arena, table, &.{variant});
+                try std.testing.expectEqual(@as(u32, @intFromBool(violating)), try countOf(database, all, name));
+                if (violating) false_rows += 1 else if (answer == .null) unknown_rows += 1 else true_rows += 1;
+            }
+        }
+    }
+    try std.testing.expect(false_rows > 10);
+    try std.testing.expect(true_rows > 100);
+    try std.testing.expect(unknown_rows > 0);
+}
