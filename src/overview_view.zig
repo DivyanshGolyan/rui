@@ -6466,9 +6466,9 @@ test "SUI-172 the status rows write the sign from the line's tone: an unconfirme
     _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
-    const holding = statusLine(&state, .{}, &buffer).?;
-    try std.testing.expect(holding.say.tone == .quiet and holding.colour == .attention);
-    try std.testing.expect(std.mem.startsWith(u8, holding.drawn(&drawn), "Rui 0.61.0"));
+    const holds = statusLine(&state, .{}, &buffer).?;
+    try std.testing.expect(holds.say.tone == .quiet and holds.colour == .attention);
+    try std.testing.expect(std.mem.startsWith(u8, holds.drawn(&drawn), "Rui 0.61.0"));
 }
 
 test "the status rows above the Footer say the status bar's line" {
