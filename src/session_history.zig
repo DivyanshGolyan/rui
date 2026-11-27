@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn writeExport(sink: anytype, store: []const u8, session: []const u8, position: u64, ordinal: u64) !void {
     var buffer: [64]u8 = undefined;
-    try sink.feed("Raw export: rui session read-conversation --store-hex ");
+    try sink.feed("Raw export: rui session read-content --store-hex ");
     try writeHex(sink, store);
     try sink.feed(" --session ");
     try sink.feed(session);
@@ -35,10 +35,10 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     };
     var sink: Sink = .{};
     try writeExport(&sink, "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", 2, 0);
-    try std.testing.expectEqualStrings("Raw export: rui session read-conversation --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw --position 2 --ordinal 0", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("Raw export: rui session read-content --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw --position 2 --ordinal 0", sink.bytes[0..sink.length]);
     sink = .{};
     const long: [200]u8 = @splat('a');
     try writeExport(&sink, &long, "09azvw", 7, 2);
     const hex: [400]u8 = @bitCast(@as([200][2]u8, @splat("61".*)));
-    try std.testing.expectEqualStrings("Raw export: rui session read-conversation --store-hex " ++ hex ++ " --session 09azvw --position 7 --ordinal 2", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("Raw export: rui session read-content --store-hex " ++ hex ++ " --session 09azvw --position 7 --ordinal 2", sink.bytes[0..sink.length]);
 }

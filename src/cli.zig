@@ -284,7 +284,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_pin => try pinSession(init, parsed, true),
         .session_unpin => try pinSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
-        .session_read_conversation => try readConversation(init, parsed),
+        .session_read_content => try readContent(init, parsed),
         .session_list_parts => try readPublicParts(init, parsed, .message, false),
         .session_read_part => try readPublicParts(init, parsed, .message, true),
         .session_resume => try resumeSession(init, parsed),
@@ -3742,14 +3742,14 @@ fn readPublicParts(init: std.process.Init, parsed: *const cli_args.Parsed, kind:
     }
 }
 
-fn readConversation(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+fn readContent(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const reference = parsed.get("session").?;
     const target = (try parsed.number(u64, "position")).?;
     const item = (try parsed.number(u64, "ordinal")).?;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const requests_: client.Requests = .{ .io = init.io };
     const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
-    if (requests_.readConversationContent(store, reference, target, item, null, std.Io.File.stdout()) catch |err| return readTransportFailure(init.io, store, err)) |failure| {
+    if (requests_.readActivityContent(store, reference, target, item, null, std.Io.File.stdout()) catch |err| return readTransportFailure(init.io, store, err)) |failure| {
         try writeReadFailure(init.io, failure, reference, .stderr);
         return readFailureError(failure);
     }

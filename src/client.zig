@@ -299,18 +299,6 @@ pub const Requests = struct {
         return resolveClientPaths(self.io, store_path);
     }
 
-    pub fn readConversationContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
-        try self.check();
-        try protocol_reply.validateIdentityInputs("", session);
-        if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
-        const paths = try resolveClientPaths(self.io, store_path);
-        var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.conversation_content_request.all, .{ paths.store_identity.slice(), session, position, ordinal });
-        const fd = try openRead(self, &paths, "/v1/conversation-content", body.slice());
-        defer closeSocket(self.io, fd);
-        return readPublicContentResponse(self, fd, expected, sink);
-    }
-
     /// Validates the Activity request before resolving its worker-owned route.
     pub fn resolveActivityRoute(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ActivityCursor) !platform.Paths {
         try self.check();
@@ -555,10 +543,6 @@ pub const SessionReads = struct {
 
     pub fn sessionId(self: SessionReads) []const u8 {
         return self.session;
-    }
-
-    pub fn isBound(self: SessionReads) bool {
-        return self.route == .bound;
     }
 
     /// Standalone Displays retain their caller-provided context; a bound worker
@@ -4504,7 +4488,6 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", session, 1, 0, 0, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionArguments("/never-open", session, 1, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionCallId("/never-open", session, 1, file, &reply));
-        try std.testing.expectError(error.InvalidSession, requests.readConversationContent("/never-open", session, 1, 0, null, file));
         try std.testing.expectError(error.InvalidSession, requests.activityPage("/never-open", session, .{}));
         try std.testing.expectError(error.InvalidSession, requests.readActivityContent("/never-open", session, 1, 0, null, file));
     }
@@ -5563,7 +5546,6 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.list_sessions_request.all, .{ &store, @as(?[]const u8, &workspace), protocol.SessionArchiveFilter.archived, id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
         .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
-        .{ protocol.conversation_content_request.all, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
         .{ (protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request.head ++ protocol.activity_page_request.tail) },
         .{ protocol.activity_page_request.all, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_search_request.all, .{ &store, &session, &search_query, protocol.ActivityPage.Kinds.full, optional_id, optional_id, id }, protocol.max_activity_search_request_bytes },

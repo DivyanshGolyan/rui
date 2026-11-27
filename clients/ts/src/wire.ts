@@ -344,23 +344,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/conversation-content": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** The content of one conversation item. */
-        post: operations["conversationContent"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/public-parts": {
         parameters: {
             query?: never;
@@ -387,7 +370,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** The exact bytes of one part of an owner's parts value, framed as conversation content. */
+        /** The exact bytes of one part of an owner's parts value, framed as activity content. */
         post: operations["publicPartContent"];
         delete?: never;
         options?: never;
@@ -520,7 +503,7 @@ export interface components {
     schemas: {
         ActionBackgroundConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -536,7 +519,7 @@ export interface components {
         };
         ActionBackgroundReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -553,7 +536,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -568,7 +551,7 @@ export interface components {
         };
         ActionBackgroundRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "action_background";
             store: string;
@@ -584,7 +567,7 @@ export interface components {
         };
         ActionPublishRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "action_publish";
             store: string;
@@ -594,7 +577,7 @@ export interface components {
         };
         ActionStopConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_stop_reply";
             answer: {
@@ -610,7 +593,7 @@ export interface components {
         };
         ActionStopReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_stop_reply";
             answer: {
@@ -623,7 +606,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_stop_reply";
             answer: {
@@ -638,7 +621,7 @@ export interface components {
         };
         ActionStopRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "action_stop";
             store: string;
@@ -648,7 +631,7 @@ export interface components {
         };
         ActivityContentRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "activity_content";
             store: string;
@@ -866,7 +849,7 @@ export interface components {
         };
         ActivityPageReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "activity_page";
             end: components["schemas"]["Decimal"];
@@ -881,7 +864,7 @@ export interface components {
             since: string | null;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "activity_page";
             /** @constant */
@@ -890,7 +873,7 @@ export interface components {
         };
         ActivityPageRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "activity_page";
             store: string;
@@ -924,7 +907,7 @@ export interface components {
         };
         ActivitySearchReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "activity_search";
             items: components["schemas"]["ActivitySearchItem"][];
@@ -932,7 +915,7 @@ export interface components {
         };
         ActivitySearchRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "activity_search";
             store: string;
@@ -1022,7 +1005,7 @@ export interface components {
         };
         ConfigureConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1043,7 +1026,7 @@ export interface components {
         };
         ConfigureReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1062,7 +1045,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1095,7 +1078,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1117,7 +1100,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -1139,7 +1122,7 @@ export interface components {
         };
         ConfigureRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "configure";
             store: string;
@@ -1177,27 +1160,13 @@ export interface components {
             sha256: string;
             owner: components["schemas"]["PartOwner"];
         };
-        ConversationContentRequest: {
-            /** @constant */
-            version: "33";
-            /** @constant */
-            kind: "conversation_content";
-            store: string;
-            session: string;
-            position: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"];
-            /** @constant */
-            start: "0";
-            /** @constant */
-            stream?: true;
-        };
         /** @description An unsigned 64-bit integer in decimal. */
         Decimal: string;
         ErrorReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @enum {string} */
-            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
+            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
             code: string;
         };
         FirstMessage: {
@@ -1209,7 +1178,7 @@ export interface components {
         };
         HostInfoReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "host_info";
             store: string;
@@ -1230,21 +1199,21 @@ export interface components {
         };
         HostInfoRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "host_info";
             store: string;
         };
         HostPauseReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "host_pause_reply";
             paused: boolean;
         };
         HostPauseRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "host_pause";
             store: string;
@@ -1394,14 +1363,14 @@ export interface components {
         };
         HostStopReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "host_stop_reply";
             /** @constant */
             status: "acknowledged";
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "host_stop_reply";
             /** @constant */
@@ -1410,13 +1379,13 @@ export interface components {
         };
         HostStopRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "host_stop";
             store: string;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "host_stop";
             store: string;
@@ -1443,7 +1412,7 @@ export interface components {
         };
         InspectSessionReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1466,7 +1435,7 @@ export interface components {
             execution: components["schemas"]["domainreportExecutionJson"];
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1487,7 +1456,7 @@ export interface components {
             execution: components["schemas"]["domainreportExecutionJson"];
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1506,7 +1475,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1523,7 +1492,7 @@ export interface components {
         };
         InspectSessionRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1531,7 +1500,7 @@ export interface components {
             since?: string | null;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1540,7 +1509,7 @@ export interface components {
             profile: "full";
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1552,7 +1521,7 @@ export interface components {
         };
         ListSessionsReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1565,7 +1534,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1578,7 +1547,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1588,7 +1557,7 @@ export interface components {
             next: null;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["ArchivedRowFields"][];
@@ -1604,7 +1573,7 @@ export interface components {
         };
         ListSessionsRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1618,7 +1587,7 @@ export interface components {
             after_reference?: string;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1632,7 +1601,7 @@ export interface components {
         };
         MessageConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1684,7 +1653,7 @@ export interface components {
         };
         MessageReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1706,7 +1675,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1742,7 +1711,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1767,7 +1736,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1793,7 +1762,7 @@ export interface components {
         };
         MessageRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "message";
             store: string;
@@ -1810,7 +1779,7 @@ export interface components {
             require_model?: true;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "message";
             store: string;
@@ -1823,7 +1792,7 @@ export interface components {
         };
         ModelInterruptionConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1842,7 +1811,7 @@ export interface components {
         };
         ModelInterruptionReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1857,7 +1826,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1875,7 +1844,7 @@ export interface components {
         };
         ModelInterruptionRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "model_interruption";
             store: string;
@@ -1897,14 +1866,14 @@ export interface components {
         };
         ModelListReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "model_list";
             connections: components["schemas"]["ModelListEntry"][];
         };
         ModelListRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "model_list";
             store: string;
@@ -1915,7 +1884,7 @@ export interface components {
         };
         ObserveCommandReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1928,7 +1897,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1968,7 +1937,7 @@ export interface components {
             };
         } | ({
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1996,7 +1965,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2029,7 +1998,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2063,7 +2032,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2095,7 +2064,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2132,7 +2101,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2170,7 +2139,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2198,7 +2167,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2236,7 +2205,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2275,7 +2244,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2308,7 +2277,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2342,7 +2311,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2375,7 +2344,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2409,7 +2378,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2428,7 +2397,7 @@ export interface components {
             };
         }) | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2480,7 +2449,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2526,7 +2495,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2572,7 +2541,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2618,7 +2587,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2656,7 +2625,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2714,7 +2683,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2764,7 +2733,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2774,7 +2743,7 @@ export interface components {
         };
         ObserveCommandRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "observe_command";
             store: string;
@@ -2805,7 +2774,7 @@ export interface components {
         };
         PermissionDecisionConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2823,7 +2792,7 @@ export interface components {
         };
         PermissionDecisionReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2837,7 +2806,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2854,7 +2823,7 @@ export interface components {
         };
         PermissionDecisionRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "permission_decision";
             store: string;
@@ -2889,7 +2858,7 @@ export interface components {
         };
         PublicPartContentRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "public_part_content";
             store: string;
@@ -2902,7 +2871,7 @@ export interface components {
         };
         PublicPartsReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "public_parts";
             session: string;
@@ -2911,7 +2880,7 @@ export interface components {
         };
         PublicPartsRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "public_parts";
             store: string;
@@ -2927,7 +2896,7 @@ export interface components {
         };
         ReadActionArgumentsRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "read_action_arguments";
             store: string;
@@ -2936,7 +2905,7 @@ export interface components {
         };
         ReadActionCallIdRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "read_action_call_id";
             store: string;
@@ -2945,7 +2914,7 @@ export interface components {
         };
         ReadActionReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_read";
             session: string;
@@ -2964,7 +2933,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_read";
             session: string;
@@ -2993,7 +2962,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "action_read";
             session: string;
@@ -3018,7 +2987,7 @@ export interface components {
         };
         ReadActionRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "read_action";
             store: string;
@@ -3029,7 +2998,7 @@ export interface components {
         };
         ReadResultRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "read_result";
             store: string;
@@ -3037,7 +3006,7 @@ export interface components {
         };
         SessionArchiveConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3056,7 +3025,7 @@ export interface components {
         };
         SessionArchiveReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3072,7 +3041,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3090,7 +3059,7 @@ export interface components {
         };
         SessionArchiveRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "session_archive";
             store: string;
@@ -3100,7 +3069,7 @@ export interface components {
         };
         SessionPinConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3115,7 +3084,7 @@ export interface components {
         };
         SessionPinReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3127,7 +3096,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3141,7 +3110,7 @@ export interface components {
         };
         SessionPinRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "session_pin";
             store: string;
@@ -3179,7 +3148,7 @@ export interface components {
         };
         SessionStopConflictReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3198,7 +3167,7 @@ export interface components {
         };
         SessionStopReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3217,7 +3186,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3235,7 +3204,7 @@ export interface components {
         };
         SessionStopRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "session_stop";
             store: string;
@@ -3251,7 +3220,7 @@ export interface components {
         };
         SkillSuggestionsReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "skill_suggestions";
             revision: components["schemas"]["Decimal"];
@@ -3263,7 +3232,7 @@ export interface components {
         };
         SkillSuggestionsRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "skill_suggestions";
             store: string;
@@ -3271,7 +3240,7 @@ export interface components {
             prefix: string;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "skill_suggestions";
             store: string;
@@ -3300,7 +3269,7 @@ export interface components {
         };
         ToolsReloadReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "tools_reload_reply";
             instance: string;
@@ -3311,13 +3280,13 @@ export interface components {
         };
         ToolsReloadRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "tools_reload";
             store: string;
         } | {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "tools_reload";
             store: string;
@@ -3325,7 +3294,7 @@ export interface components {
         };
         ToolsStatusReply: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             type: "tools_status";
             instance: string;
@@ -3344,7 +3313,7 @@ export interface components {
         };
         ToolsStatusRequest: {
             /** @constant */
-            version: "33";
+            version: "34";
             /** @constant */
             kind: "tools_status";
             store: string;
@@ -3714,7 +3683,7 @@ export interface components {
     responses: never;
     parameters: {
         /** @description The wire version this document describes. Any other version is refused. */
-        WireVersion: "33";
+        WireVersion: "34";
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
         HostInstance: string;
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused. */
@@ -4559,44 +4528,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ListSessionsReply"];
-                };
-            };
-            /** @description A refusal or failure. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorReply"];
-                };
-            };
-        };
-    };
-    conversationContent: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description The wire version this document describes. Any other version is refused. */
-                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
-                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
-                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ConversationContentRequest"];
-            };
-        };
-        responses: {
-            /** @description The content bytes, from the requested offset. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/octet-stream": string;
                 };
             };
             /** @description A refusal or failure. */

@@ -247,13 +247,6 @@ pub const routes = [_]Route{
         }, .{ live_list_deltas, live_list_deltas, live_list_deltas, .{"window"} }),
     },
     .{
-        .path = "/v1/conversation-content",
-        .kind = .conversation_content,
-        .summary = "The content of one conversation item.",
-        .variants = &.{variant(protocol.conversation_content_request.head ++ .{Optional(protocol.conversation_content_request.stream)} ++ protocol.conversation_content_request.tail, .{})},
-        .reply = .bytes,
-    },
-    .{
         .path = "/v1/public-parts",
         .kind = .public_parts,
         .summary = "The complete certified, ordered part list of a Message or Action Resolution parts value, addressed by its owner in the Session.",
@@ -263,7 +256,7 @@ pub const routes = [_]Route{
     .{
         .path = "/v1/public-part-content",
         .kind = .public_part_content,
-        .summary = "The exact bytes of one part of an owner's parts value, framed as conversation content.",
+        .summary = "The exact bytes of one part of an owner's parts value, framed as activity content.",
         .variants = &.{variant(protocol.public_part_content_request.head ++ .{Optional(protocol.public_part_content_request.stream)} ++ protocol.public_part_content_request.tail, .{ .{ 2, "{\"action\":\"1\"}" }, .{ 4, "0" } })},
         .reply = .bytes,
     },
@@ -2239,7 +2232,6 @@ fn publishedResponseRoutes() !void {
         .{ .path = "/v1/read-result", .type = "text/plain" },
         .{ .path = "/v1/read-action-call-id", .type = "text/plain" },
         .{ .path = "/v1/read-action-arguments", .type = "text/plain" },
-        .{ .path = "/v1/conversation-content", .type = "application/octet-stream" },
         .{ .path = "/v1/activity-content", .type = "application/octet-stream" },
         .{ .path = "/v1/inspect-session", .type = "application/json" },
         .{ .path = "/v1/inspect-session", .type = "application/octet-stream" },

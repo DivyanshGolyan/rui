@@ -36,7 +36,7 @@ pub const Command = enum {
     session_pin,
     session_unpin,
     session_interrupt_model,
-    session_read_conversation,
+    session_read_content,
     session_list_parts,
     session_read_part,
     session_resume,
@@ -92,7 +92,7 @@ pub const Command = enum {
             .session_pin => .{ .resource = .session, .name = "pin", .description = "Pin a Session above unpinned Sessions. Repeated pinning preserves its position. Refused for archiving or archived Sessions.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_unpin => .{ .resource = .session, .name = "unpin", .description = "Unpin a Session without changing its work. An already unpinned Session is unchanged.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
-            .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
+            .session_read_content => .{ .resource = .session, .name = "read-content", .description = "Stream the exact saved content of the Activity row at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
             .session_list_parts => .{ .resource = .session, .name = "list-parts", .description = "List the certified parts of a Message's parts value as JSON.", .options = destination ++ session ++ &[_]Option{admission}, .requires = need_session ++ &[_][]const []const u8{&.{"admission"}} },
             .session_read_part => .{ .resource = .session, .name = "read-part", .description = "Stream the exact bytes of one Text or Image part of a Message.", .options = destination ++ session ++ &[_]Option{ admission, part }, .requires = need_session ++ &[_][]const []const u8{ &.{"admission"}, &.{"part"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
@@ -653,8 +653,8 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .action_inspect, .name = "action", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "turn", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "operation", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
-        .{ .command = .session_read_conversation, .name = "position", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
-        .{ .command = .session_read_conversation, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
+        .{ .command = .session_read_content, .name = "position", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
+        .{ .command = .session_read_content, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
         .{ .command = .session_inspect, .name = "attempt", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .request_wait, .name = "timeout-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
         .{ .command = .host_pause, .name = "drain-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
@@ -757,7 +757,7 @@ test "Session IDs in positional argv name the missing selector flag" {
     _ = try expectRefusal(.session_send, &.{ "--session", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
     _ = try expectRefusal(.session_send, &.{ "--record", "--session", "v948er" }, .session_id_needs_session, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
-    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background, Command.action_stop }) |command| {
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_content, Command.action_allow, Command.action_deny, Command.action_background, Command.action_stop }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }

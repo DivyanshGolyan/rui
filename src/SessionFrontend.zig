@@ -6444,7 +6444,7 @@ test "reader failure provenance keeps transport loss separate from local copy fa
                 try reply(page, "application/json", body.buffered().len, "", body.buffered());
             }
             if (self.mode == .temporary) return;
-            const content = try self.request("/v1/conversation-content");
+            const content = try self.request("/v1/activity-content");
             defer content.close(std.testing.io);
             self.contents += 1;
             var extra: [128]u8 = undefined;
@@ -8525,7 +8525,7 @@ test "SessionFrontend feed reload restores keyed Ctrl-O target and replaces a pr
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const held = fixture.held;
-    const target: View.Collapsed = .{ .source = .activity, .position = 40, .ordinal = 0, .content = .{ .text = .{ .length = 2000, .digest = @splat(7) } }, .row = false };
+    const target: View.Collapsed = .{ .position = 40, .ordinal = 0, .content = .{ .text = .{ .length = 2000, .digest = @splat(7) } }, .row = false };
     const summary = row_text.user_line ++ "preview\n  " ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n";
     try fixture.page(.opening, &.{ .{ .key = 40, .text = summary, .target = target }, .{ .key = 50, .text = "settled\n" } }, true, true);
     _ = try held.draw();
@@ -10212,7 +10212,7 @@ test "SessionFrontend summary bounds keep Ctrl-O and clicks exact across sixteen
     const Domain = struct {
         const line_length = "┄ item 00\n".len;
         fn target(key: u64, index: usize) View.Collapsed {
-            return .{ .source = if (index % 2 == 0) .activity else .conversation, .position = key * 1000 + index, .ordinal = index, .content = .{ .text = .{ .length = 100 + index, .digest = @splat(@intCast(index)) } }, .row = index % 2 != 0 };
+            return .{ .position = key * 1000 + index, .ordinal = index, .content = .{ .text = .{ .length = 100 + index, .digest = @splat(@intCast(index)) } }, .row = index % 2 != 0 };
         }
         fn page(fixture: FeedFixture, key: u64, aggregate: bool) !void {
             const frontend = &fixture.held.self;

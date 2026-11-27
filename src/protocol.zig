@@ -203,7 +203,6 @@ pub const Kind = enum {
     read_action_arguments,
     inspect_session,
     list_sessions,
-    conversation_content,
     activity_page,
     activity_search,
     activity_content,
@@ -820,7 +819,6 @@ fn RequestOf(comptime Custody: type) type {
         read_action_arguments: ReadActionArguments,
         inspect_session: InspectSession,
         list_sessions: ListSessions,
-        conversation_content: ConversationContent,
         activity_page: ActivityPage,
         activity_search: ActivitySearch,
         activity_content: ReadActivityContent,
@@ -837,7 +835,7 @@ fn RequestOf(comptime Custody: type) type {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
                 .action_publish => |*command| try command.text.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list, .tools_reload, .tools_status => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list, .tools_reload, .tools_status => {},
             }
         }
 
@@ -997,10 +995,6 @@ fn ParserOf(comptime Custody: type) type {
                 .list_sessions => {
                     out.* = .{ .list_sessions = .{ .store = store } };
                     try self.parseListSessions(&out.list_sessions, &members);
-                },
-                .conversation_content => {
-                    out.* = .{ .conversation_content = .{ .store = store } };
-                    try self.parseConversationContent(&out.conversation_content, &members);
                 },
                 .activity_search => {
                     out.* = .{ .activity_search = .{ .store = store } };
@@ -1723,24 +1717,6 @@ fn ParserOf(comptime Custody: type) type {
             try out.validate();
         }
 
-        fn parseConversationContent(self: *Parser, out: *ConversationContent, members: *Members) !void {
-            const Field = enum { session, position, ordinal, start, stream };
-            var seen: std.enums.EnumSet(Field) = .empty;
-            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-                .session => try self.readSmallString(&out.session),
-                .position => out.position = try self.readCanonicalU64(),
-                .ordinal => out.ordinal = try self.readCanonicalU64(),
-                .start => out.start = try self.readCanonicalU64(),
-                .stream => {
-                    for ("true") |byte| try self.expectByte(byte);
-                    out.stream = true;
-                },
-            };
-            try require(Field, seen, &.{ .session, .position, .ordinal, .start });
-            if (out.position == 0 or out.position > std.math.maxInt(i64) or
-                out.ordinal > std.math.maxInt(i64) or (out.stream and out.start != 0)) return error.InvalidCursor;
-        }
-
         fn parseActivityPage(self: *Parser, out: *ActivityPage, members: *Members) !void {
             const Field = enum { session, end, position, ordinal, direction, kinds, limit, since };
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -2351,12 +2327,6 @@ pub const read_action_request = struct {
 
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_call_id\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
-pub const conversation_content_request = struct {
-    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\"" };
-    pub const stream = .{",\"stream\":true"};
-    pub const tail = .{"}"};
-    pub const all = head ++ stream ++ tail;
-};
 pub const activity_search_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 } };
     pub const kinds = .{ ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind } };
@@ -2540,18 +2510,16 @@ pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request.all
 pub const max_read_action_request_bytes = shapeBytes(read_action_request.all);
 pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
-pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request.all);
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request.all);
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request.all,         host_info_request,                host_stop_request,
-    host_drain_request,                  host_pause_request,               read_result_request,
-    list_sessions_request.all,           read_action_request.all,          read_action_arguments_request,
-    read_action_call_id_request,         conversation_content_request.all, activity_search_request.all,
-    activity_page_request.all,           activity_content_request.all,     skill_suggestions_session_request,
-    skill_suggestions_workspace_request, model_list_request,               public_parts_request,
-    public_part_content_request.all,     tools_reload_request.all,         tools_reload_request.named,
-    tools_status_request,
+    observe_command_request.all,  host_info_request,                 host_stop_request,
+    host_drain_request,           host_pause_request,                read_result_request,
+    list_sessions_request.all,    read_action_request.all,           read_action_arguments_request,
+    read_action_call_id_request,  activity_search_request.all,       activity_page_request.all,
+    activity_content_request.all, skill_suggestions_session_request, skill_suggestions_workspace_request,
+    model_list_request,           public_parts_request,              public_part_content_request.all,
+    tools_reload_request.all,     tools_reload_request.named,        tools_status_request,
 }));
 
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
@@ -2755,7 +2723,7 @@ pub const command_observation_reply = struct {
     };
 };
 
-pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable, parts_unavailable };
+pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, activity_unavailable, failed_response_unavailable, parts_unavailable };
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
@@ -3003,29 +2971,6 @@ test "fixed JSON buffers preserve control bytes and enforce capacity" {
     try response.appendJsonString("");
     try std.testing.expectEqual(response.bytes.len, response.len);
     try std.testing.expectError(error.BufferTooLarge, response.appendJsonString("x"));
-}
-
-test "Conversation content stream wire requires start zero and literal true" {
-    const cases = [_]struct { suffix: []const u8, stream: bool = false, failure: ?anyerror = null }{
-        .{ .suffix = "\"0\"}" },
-        .{ .suffix = "\"0\",\"stream\":true}", .stream = true },
-        .{ .suffix = "\"1\",\"stream\":true}", .failure = error.InvalidCursor },
-        .{ .suffix = "\"0\",\"stream\":false}", .failure = error.InvalidJsonShape },
-        .{ .suffix = "\"0\",\"stream\":\"true\"}", .failure = error.InvalidJsonShape },
-        .{ .suffix = "\"0\",\"stream\":true,\"stream\":true}", .failure = error.UnexpectedField },
-    };
-    for (cases) |case| {
-        var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":\"s\",\"session\":\"x\",\"position\":\"1\",\"ordinal\":\"0\",\"start\":{s}", .{case.suffix});
-        var source: MetadataSource = .{ .input = json };
-        var parser = Tested.Parser{ .source = &source };
-        if (case.failure) |failure| {
-            try std.testing.expectError(failure, parseForTest(&parser));
-        } else {
-            const request = (try parseForTest(&parser)).conversation_content;
-            try std.testing.expectEqual(case.stream, request.stream);
-        }
-    }
 }
 
 test "an activity page names its kinds once each, in order, and a limit from 1 to 16" {
