@@ -352,6 +352,34 @@ pub inline fn admit(comptime S: type, args: *const S.Args) error{ColumnRuleRefus
             if (!column_rules.accepts(column, value)) return error.ColumnRuleRefused;
         }
     }
+    if (comptime !S.guarded) try admitRow(S, args);
+}
+
+/// Refuses an inserted row a CHECK rule of its table would refuse, when the statement binds every column the rule reads: the same
+/// rule value that renders the CHECK is evaluated over the bound values, so the Host answers before the engine is asked and no round trip is added.
+/// A rule that reads a column the statement does not bind (a literal, an expression) is left to the engine's own CHECK.
+fn admitRow(comptime S: type, args: *const S.Args) error{ColumnRuleRefused}!void {
+    if (comptime S.bound_columns.len == 0) return;
+    const table = comptime tableNamed(S.bound_columns[0].table);
+    const names = comptime blk: {
+        var out: [S.bound_columns.len][]const u8 = undefined;
+        for (S.bound_columns, 0..) |bound, at| out[at] = bound.column;
+        break :blk out;
+    };
+    const info = @typeInfo(S.Args).@"struct";
+    var values: [names.len]?column_rules.Value = undefined;
+    inline for (S.bound_columns, 0..) |bound, at| {
+        values[at] = valueOf(info.field_types[bound.arg - 1], &@field(args, info.field_names[bound.arg - 1]));
+    }
+    if (!column_rules.acceptsRow(table, &names, &values)) return error.ColumnRuleRefused;
+}
+
+fn tableNamed(comptime name: []const u8) schema.Table {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        for (schema.tables) |table| if (std.mem.eql(u8, table.name, name)) return table;
+        @compileError("engine: no table named " ++ name);
+    }
 }
 
 /// The rule-relevant value of a bound argument, or null for a type whose every value the language already keeps inside any rule.

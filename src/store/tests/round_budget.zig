@@ -103,6 +103,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../rules/char_set.zig"),
         @embedFile("../rules/eval.zig"),
         @embedFile("../rules/rule.zig"),
+        @embedFile("../rules/row.zig"),
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
         @embedFile("../column_rules.zig"),

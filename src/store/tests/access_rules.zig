@@ -81,6 +81,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../rules/char_set.zig"),
         @embedFile("../rules/eval.zig"),
         @embedFile("../rules/rule.zig"),
+        @embedFile("../rules/row.zig"),
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
         @embedFile("../column_rules.zig"),

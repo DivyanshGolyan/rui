@@ -287,6 +287,27 @@ test "SH-180 a call with the wrong shape is an error whatever the row holds" {
     try std.testing.expectError(error.BadCall, evaluator.eval(&length_of_int, evaluator.Scope.ofRow(.{}, "", &.{"s"}, &.{.{ .int = 1 }})));
 }
 
+test "SH-179 an inserted row a cross-column rule of its table refuses fails before anything is sent, and a rule over a column the statement does not bind is left to the engine" {
+    const Part = struct { content: u64, ordinal: u64, part: u64 };
+    const Insert = rsql.Write(.{
+        .sql = "INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(?1,?2,?3)",
+        .Args = Part,
+        .expect = .{ .at_most = 1 },
+    });
+    var part: Part = .{ .content = 1, .ordinal = 0, .part = 2 };
+    try admit(Insert, &part);
+    part.part = 1;
+    try std.testing.expectError(error.ColumnRuleRefused, admit(Insert, &part));
+    // The same table written without binding part_content_id: the rule reads a column the statement does not bind.
+    const Partial = rsql.Write(.{
+        .sql = "INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(?1,?2,7)",
+        .Args = struct { content: u64, ordinal: u64 },
+        .expect = .{ .at_most = 1 },
+    });
+    var partial: Partial.Args = .{ .content = 7, .ordinal = 0 };
+    try admit(Partial, &partial);
+}
+
 const key_fits: [128]u8 = @splat('k');
 const key_long: [129]u8 = @splat('k');
 
