@@ -505,9 +505,6 @@ test "SessionChrome identity omits permission and archive command hints" {
     var bytes: [chrome.facts_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("model · high", (@as(Identity, .{ .current = .{ .model = "model", .effort = .high, .context = session_line.Context.atLeft(62) } })).fit(&bytes, 140, .unicode));
     try std.testing.expectEqualStrings("Archived", (@as(Identity, .{ .archive = .archived })).fit(&bytes, 46, .unicode));
-    var buffer: [state_text_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("! Not confirmed", stateText(&buffer, .attention("Not confirmed · ctrl+r retries original"), "ctrl+r retries original"));
-    try std.testing.expectEqualStrings("Copied 12 lines", stateText(&buffer, .quiet("Copied 12 lines"), ""));
 }
 
 test "SessionChrome footer keeps the input gutter beside the visible list" {

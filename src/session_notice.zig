@@ -178,7 +178,7 @@ test "a Session link leaves only where Esc would, and never past a waiting Actio
     try std.testing.expectEqualStrings("Links open once the command ends.", follow(null, false, true, false, true).stay);
 }
 
-test "original presentation preserves placement actions repair and opening precedence" {
+test "SUI-14 a held original fixes its slot, action, details and in-flight over every kind and state, and opening or waiting supersedes it" {
     try std.testing.expectEqualDeep(Presentation{}, presentation(false, false, null));
     for ([_]submission.Kind{ .message, .decision }) |kind| {
         for ([_]submission.State{ .not_started, .submitting, .unconfirmed, .rejected }) |state| {

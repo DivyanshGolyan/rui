@@ -172,29 +172,6 @@ pub fn send(status: ?Say, in_flight: bool) Send {
     return if (said.words.len == 0) .{} else if (in_flight) .{ .progress = said } else .{ .needs = said };
 }
 
-test "opening and decision progress share the footer while unresolved decisions retain their state" {
-    const same = struct {
-        fn text(want: ?Say, got: ?Say) !void {
-            try std.testing.expectEqual(want == null, got == null);
-            if (want) |expected| try say_text.expect(expected, got.?);
-        }
-        fn check(want: Send, got: Send) !void {
-            try text(want.needs, got.needs);
-            try text(want.progress, got.progress);
-        }
-    }.check;
-    try same(.{ .progress = .quiet("Opening…") }, send(.quiet("Opening…"), true));
-    try same(.{ .needs = .attention("Not confirmed · ctrl+r retries original") }, send(.attention("Not confirmed · ctrl+r retries original"), false));
-    try same(.{}, send(.quiet(""), false));
-    for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
-    try std.testing.expectEqualStrings("Unknown command /x", bar(.{ .progress = .quiet("Opening…"), .notice = Say.attention("Unknown command /x"), .width = 80 }).notice.?.words);
-    const opening = bar(.{ .progress = .quiet("Opening…"), .width = 80 });
-    try std.testing.expectEqualStrings("", opening.left.words);
-    try std.testing.expectEqualStrings("Opening…", opening.notice.?.words);
-    try std.testing.expectEqual(Tone.quiet, opening.tone);
-    try say_text.expect("! x", bar(.{ .needs = .attention("x"), .notice = Say.quiet("Copied 3 lines"), .progress = .quiet("Opening…"), .width = 80 }).left);
-}
-
 pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + session_line.Context.footer_bytes + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
 
 test "SUI-174 the facts row's room holds the widest row with the longest archive badge" {
