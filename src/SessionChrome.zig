@@ -45,9 +45,9 @@ pub const View = struct {
     list_visible: bool = false,
     browsing: bool = false,
     new_entries: u64 = 0,
-    needs: ?[]const u8 = null,
+    needs: ?chrome.Say = null,
     needs_key: []const u8 = "",
-    progress: ?[]const u8 = null,
+    progress: ?chrome.Say = null,
     stoppable: bool = false,
     details: bool = false,
     repair_details: bool = false,
@@ -75,6 +75,7 @@ activity: ActivityBlock,
 marker: Chip,
 marker_text: [chrome.marker_bytes]u8 = undefined,
 state: vxfw.Text = .{ .text = "", .softwrap = false, .overflow = .clip, .width_basis = .parent },
+state_text: [state_text_bytes]u8 = undefined,
 info: Chip,
 pick: Chip,
 close: Chip,
@@ -119,7 +120,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea
     self.details.label = if (view.details) "alt+d details" else "";
     self.repair_details = view.repair_details;
     self.notice_priority = view.notice_priority;
-    self.state.text = stateText(self.status.bar.left, self.status.key.label);
+    self.state.text = stateText(&self.state_text, self.status.bar.left, self.status.key.label);
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
     input.facts = .{ .userdata = self, .drawFn = drawFooter };
     input.status = self.state.widget();
@@ -133,13 +134,17 @@ pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea
     input.panel = view.overlay;
 }
 
-fn stateText(text: []const u8, key: []const u8) []const u8 {
-    if (key.len != 0 and std.mem.endsWith(u8, text, key)) {
-        const prefix = text[0 .. text.len - key.len];
-        if (std.mem.endsWith(u8, prefix, " · ")) return prefix[0 .. prefix.len - " · ".len];
+/// The status row's text as drawn: the sign for attention, then the words without the key that ends them.
+fn stateText(buffer: *[state_text_bytes]u8, said: chrome.Say, key: []const u8) []const u8 {
+    var words = said.words;
+    if (key.len != 0 and std.mem.endsWith(u8, words, key)) {
+        const prefix = words[0 .. words.len - key.len];
+        if (std.mem.endsWith(u8, prefix, " · ")) words = prefix[0 .. prefix.len - " · ".len];
     }
-    return text;
+    return std.fmt.bufPrint(buffer, "{s}{s}", .{ said.sign(), words }) catch unreachable;
 }
+
+const state_text_bytes = @import("marks.zig").attention_sign.len + @import("session_notice.zig").max_line_bytes;
 
 fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -303,7 +308,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
-    const view: View = .{ .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries", .stoppable = true, .facts = .{ .current = .{ .model = "gpt-6.1-sol", .effort = .high, .context = session_line.Context.atLeft(62) } }, .width = 80 };
+    const view: View = .{ .needs = .attention("Not confirmed · ctrl+r retries"), .needs_key = "ctrl+r retries", .stoppable = true, .facts = .{ .current = .{ .model = "gpt-6.1-sol", .effort = .high, .context = session_line.Context.atLeft(62) } }, .width = 80 };
 
     self.place(&screen, &input, view);
     try std.testing.expect(screen.tail == null and screen.marker != null);
@@ -351,7 +356,7 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
         self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived } });
         const idle = try input.widget().draw(ctx);
-        self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived }, .progress = "Opening…" });
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .archive = .archived }, .progress = chrome.Say.quiet("Opening…") });
         const opening = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, opening.size.height);
         try std.testing.expectEqualStrings("", self.state.text);
@@ -366,8 +371,9 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
 
     self.place(&screen, &input, .{ .width = 80 });
     try std.testing.expect(input.panel == null);
-    self.place(&screen, &input, .{ .width = 80, .notice = chrome.Say.quiet("Copied 12 lines"), .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
-    try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", self.status.bar.left);
+    self.place(&screen, &input, .{ .width = 80, .notice = chrome.Say.quiet("Copied 12 lines"), .needs = .attention("Not confirmed · ctrl+r retries"), .needs_key = "ctrl+r retries" });
+    try std.testing.expectEqualStrings("Not confirmed · ctrl+r retries", self.status.bar.left.words);
+    try std.testing.expectEqualStrings("! ", self.status.bar.left.sign());
     try std.testing.expectEqualStrings("ctrl+r retries", self.status.key.label);
 }
 
@@ -499,8 +505,6 @@ test "SessionChrome identity omits permission and archive command hints" {
     var bytes: [chrome.facts_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("model · high", (@as(Identity, .{ .current = .{ .model = "model", .effort = .high, .context = session_line.Context.atLeft(62) } })).fit(&bytes, 140, .unicode));
     try std.testing.expectEqualStrings("Archived", (@as(Identity, .{ .archive = .archived })).fit(&bytes, 46, .unicode));
-    try std.testing.expectEqualStrings("! Not confirmed", stateText("! Not confirmed · ctrl+r retries original", "ctrl+r retries original"));
-    try std.testing.expectEqualStrings("Copied 12 lines", stateText("Copied 12 lines", ""));
 }
 
 test "SessionChrome footer keeps the input gutter beside the visible list" {

@@ -1386,6 +1386,17 @@ pub fn readByBoth(comptime table: []const u8) []const []const u8 {
 }
 
 /// The CHECK expression a column's own rules render to on an engine, null when it carries none.
+/// The cross-column rules of a table, each as the expression its CHECK holds, in the order the catalog lists them.
+pub fn tableRuleSql(comptime dialect: rsql.Dialect, comptime table: []const u8) []const []const u8 {
+    comptime {
+        @setEvalBranchQuota(100_000_000);
+        const found = tables[tablePosition(&tables, table)];
+        var texts: []const []const u8 = &.{};
+        for (tableChecks(found)) |check| texts = texts ++ .{expression(dialect, found, check)};
+        return texts;
+    }
+}
+
 pub fn columnRuleSql(comptime dialect: rsql.Dialect, comptime table: []const u8, comptime column: Column) ?[]const u8 {
     comptime {
         const text = columnCheck(column) orelse return null;
