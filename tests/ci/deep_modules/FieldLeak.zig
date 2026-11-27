@@ -1,9 +1,9 @@
 //! `field-leak` (deep-modules U14, deslop's leaks.rs): code that works on a field of a type
-//! it is not part of. A type guards its fields when it keeps one to itself and has a method
-//! with a `self` parameter, not a wrapper, that uses its fields. Then each of its fields that
-//! code outside the type and its tangle writes, borrows, indexes or calls a method on, directly
-//! or through a getter, is known outside it. Reading a value is no leak. Fields that hold
-//! nothing play no part.
+//! it is not part of. Zig has no private fields, so the file is the boundary. A type guards a
+//! field when its own file works on it (writes, borrows, indexes or calls a method on it) and
+//! no other file uses it at all. Each field of a guarding type that code outside its file and
+//! tangle works on, directly or through a getter, is known outside it. Reading a value is no
+//! leak. Fields that hold nothing play no part.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -24,28 +24,35 @@ const Outside = std.AutoArrayHashMapUnmanaged(ItemId, std.ArrayList(u32));
 pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Items, refs: []const References.Reference, graph: *const Graph.Graph, scope: ?NodeId) Allocator.Error![]const Diagnostic.Diagnostic {
     const fields = try fieldsByThing(arena, items, graph);
     var outside: Outside = .empty;
-    const working = try arena.alloc(bool, graph.things.len);
-    @memset(working, false);
+    var worked: std.AutoArrayHashMapUnmanaged(ItemId, void) = .empty;
     for (graph.uses, 0..) |usage, index| {
         if (items.get(usage.item).kind != .field) continue;
         const owner = graph.thing_of[@backingInt(usage.item)] orelse continue;
         const tangle = graph.tangle_of[@backingInt(owner)];
-        const insider = if (usage.user) |user|
+        const owner_home = graph.things[@backingInt(owner)].home;
+        const insider = refs[usage.reference].from == owner_home or (if (usage.user) |user|
             user == owner or (tangle != null and graph.tangle_of[@backingInt(user)] == tangle)
         else
-            false;
+            false);
         if (!insider) {
             const slot = try outside.getOrPut(arena, usage.item);
             if (!slot.found_existing) slot.value_ptr.* = .empty;
             try slot.value_ptr.append(arena, @intCast(index));
-        } else if (usage.user == owner and worksOnFields(items, refs, usage)) {
-            working[@backingInt(owner)] = true;
+        } else if (!usage.copies) {
+            try worked.put(arena, usage.item, {});
+        }
+    }
+    const working = try arena.alloc(bool, graph.things.len);
+    for (fields, working) |list, *slot| {
+        slot.* = false;
+        for (list) |field| {
+            if (!outside.contains(field) and worked.contains(field)) slot.* = true;
         }
     }
 
     var found: std.ArrayList(Diagnostic.Diagnostic) = .empty;
     for (fields, working, 0..) |list, works, thing_index| {
-        if (!works or !guards(list, &outside)) continue;
+        if (!works) continue;
         const thing: ThingId = @fromBackingInt(@intCast(thing_index));
         const home = graph.things[thing_index].home;
         for (list) |field| {
@@ -74,20 +81,6 @@ fn fieldsByThing(arena: Allocator, items: *const Items.Items, graph: *const Grap
     const out = try arena.alloc([]const ItemId, lists.len);
     for (lists, out) |list, *slot| slot.* = list.items;
     return out;
-}
-
-/// Whether some field of `list` is kept: no code outside uses it at all.
-fn guards(list: []const ItemId, outside: *const Outside) bool {
-    for (list) |field| {
-        if (!outside.contains(field)) return true;
-    }
-    return false;
-}
-
-/// Whether `usage` is by a method with a `self` parameter, which works on its type's fields.
-fn worksOnFields(items: *const Items.Items, refs: []const References.Reference, usage: Graph.Use) bool {
-    const holder = items.get(refs[usage.reference].holder);
-    return holder.kind == .function and holder.takes_self;
 }
 
 /// The uses in `indexes` that are not plain reads of the field.
