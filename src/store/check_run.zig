@@ -61,7 +61,7 @@ fn builtStore(tmp: *std.testing.TmpDir, io: std.Io, format: u32, broken: bool) !
     var built = try history.build(io, .sqlite, tmp, &.{ .format = format, .baseline_rows = false });
     defer built.deinit();
     if (broken) try built.exec(test_broken_row);
-    return std.testing.allocator.dupeZ(u8, built.path());
+    return std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{built.path()}, 0);
 }
 
 test "SH-185 store check on a SQLite file reports each broken rule, refuses another format and leaves the file as it was" {
