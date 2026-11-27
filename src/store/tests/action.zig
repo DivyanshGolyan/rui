@@ -2372,7 +2372,7 @@ test "action value pages preserve delivery state" {
     }.run);
 }
 
-test "APV-10 Activity keeps Action values and public Conversation omits them" {
+test "APV-10 Activity keeps Action values as received rows and, once applied, as user rows of their Action" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -2430,17 +2430,6 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
             try std.testing.expectEqual(@as(usize, 20), value_queued);
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             _ = try storage.openActivityContent(&.{ .session = session, .position = value_at.?.position, .ordinal = value_at.?.ordinal });
-            var rows = store_testing.ConversationRows{ .session = session };
-            while (true) {
-                const page = try store_testing.conversationRows(&storage, rows);
-                for (page.items[0..page.count]) |item| {
-                    if (item.value == .user) try std.testing.expect(!std.mem.eql(u8, &item.value.user.content.identity().digest, &protocol.contentDigest("hidden value")));
-                }
-                if (!page.more) break;
-                rows.end = page.end;
-                rows.before_position = page.items[page.count - 1].position;
-                rows.before_ordinal = page.items[page.count - 1].ordinal;
-            }
             const found = try std.testing.allocator.create(protocol.ActivitySearchFacts);
             defer std.testing.allocator.destroy(found);
             var search: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.received), .limit = 4 };
