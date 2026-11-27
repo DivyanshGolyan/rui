@@ -98,7 +98,8 @@ test "finish makes a part one line and drops one that is not UTF-8" {
     try part.text.set("a\nb\tc\x7fd");
     part.finish();
     try std.testing.expectEqualStrings("a b c d", part.text.slice());
-    try part.text.set("\xff");
+    part.text.bytes[0] = 0xff;
+    part.text.len = 1;
     part.finish();
     try std.testing.expectEqual(@as(usize, 0), part.text.len);
 }
