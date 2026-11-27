@@ -101,29 +101,9 @@ pub fn text(comptime value: []const u8) Expr {
 }
 pub const null_value: Expr = .null_value;
 
-fn compare(comptime op: Expr.Op, comptime left: Expr, comptime right: Expr) Expr {
+/// `left op right`: every comparison, with the operator named, so there is one constructor and one place that builds it.
+pub fn compare(comptime op: Expr.Op, comptime left: Expr, comptime right: Expr) Expr {
     return .{ .cmp = .{ .op = op, .left = &left, .right = &right } };
-}
-pub fn eq(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.eq, left, right);
-}
-pub fn ne(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.ne, left, right);
-}
-pub fn bangNe(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.bang_ne, left, right);
-}
-pub fn lt(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.lt, left, right);
-}
-pub fn le(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.le, left, right);
-}
-pub fn gt(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.gt, left, right);
-}
-pub fn ge(comptime left: Expr, comptime right: Expr) Expr {
-    return compare(.ge, left, right);
 }
 pub fn isNull(comptime value: Expr) Expr {
     return .{ .is_null = &value };
@@ -284,7 +264,7 @@ fn selectText(comptime projection: []const u8, comptime query: Select) []const u
 
 test "a comparison, a null test and a set render as portable Rui SQL" {
     try std.testing.expectEqualStrings("t.a=1 AND t.b IS NULL AND t.c IN ('x','y')", comptime render(all(&.{
-        eq(col("t", "a"), int(1)),
+        compare(.eq, col("t", "a"), int(1)),
         isNull(col("t", "b")),
         oneOf(col("t", "c"), &.{ "x", "y" }),
     })));
@@ -293,38 +273,38 @@ test "a comparison, a null test and a set render as portable Rui SQL" {
 
 test "SH-181 a disjunction inside a conjunction keeps its parentheses, and a negation binds its whole operand" {
     try std.testing.expectEqualStrings("t.a=1 AND (t.b=2 OR t.c=3)", comptime render(all(&.{
-        eq(col("t", "a"), int(1)),
-        any(&.{ eq(col("t", "b"), int(2)), eq(col("t", "c"), int(3)) }),
+        compare(.eq, col("t", "a"), int(1)),
+        any(&.{ compare(.eq, col("t", "b"), int(2)), compare(.eq, col("t", "c"), int(3)) }),
     })));
-    try std.testing.expectEqualStrings("NOT (t.a=1 AND t.b=2)", comptime render(not(all(&.{ eq(col("t", "a"), int(1)), eq(col("t", "b"), int(2)) }))));
+    try std.testing.expectEqualStrings("NOT (t.a=1 AND t.b=2)", comptime render(not(all(&.{ compare(.eq, col("t", "a"), int(1)), compare(.eq, col("t", "b"), int(2)) }))));
 }
 
 test "a boolean comparison renders both sides in parentheses" {
-    try std.testing.expectEqualStrings("(t.a IS NULL)=(t.b IS NULL)", comptime render(eq(isNull(col("t", "a")), isNull(col("t", "b")))));
+    try std.testing.expectEqualStrings("(t.a IS NULL)=(t.b IS NULL)", comptime render(compare(.eq, isNull(col("t", "a")), isNull(col("t", "b")))));
 }
 
 test "SH-181 every node kind used as an operand keeps its own structure" {
-    const q = comptime Select{ .table = "c", .alias = "c", .where = eq(col("c", "p"), col("p", "id")) };
+    const q = comptime Select{ .table = "c", .alias = "c", .where = compare(.eq, col("c", "p"), col("p", "id")) };
     const x = comptime col("t", "a");
-    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id))=1", comptime render(eq(notExists(q), int(1))));
+    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id))=1", comptime render(compare(.eq, notExists(q), int(1))));
     try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id)) IS NULL", comptime render(isNull(notExists(q))));
     try std.testing.expectEqualStrings("(t.a IS NULL) IN ('x')", comptime render(oneOf(isNull(x), &.{"x"})));
-    try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ eq(x, int(1)), eq(x, int(2)) }), &.{ "x", "y", "z" })));
-    try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(eq(eq(x, int(1)), eq(x, int(2)))));
+    try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ compare(.eq, x, int(1)), compare(.eq, x, int(2)) }), &.{ "x", "y", "z" })));
+    try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(compare(.eq, compare(.eq, x, int(1)), compare(.eq, x, int(2)))));
 }
 
 test "SH-181 a BETWEEN or an IN list used as an operand is parenthesised, a call and a group are not" {
     const x = comptime col("t", "a");
-    try std.testing.expectEqualStrings("(t.a BETWEEN 1 AND 3)=1", comptime render(eq(between(x, int(1), int(3)), int(1))));
+    try std.testing.expectEqualStrings("(t.a BETWEEN 1 AND 3)=1", comptime render(compare(.eq, between(x, int(1), int(3)), int(1))));
     try std.testing.expectEqualStrings("(t.a IN (1,2)) IS NULL", comptime render(isNull(inList(x, &.{ int(1), int(2) }))));
-    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(eq(call(.length, &.{x}), int(2))));
+    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(compare(.eq, call(.length, &.{x}), int(2))));
 }
 
 test "SH-181 a conjunction inside a disjunction needs a group to keep its parentheses, and a call spells as its rsql macro" {
     const x = comptime col("t", "a");
-    const both = comptime all(&.{ eq(x, int(1)), eq(x, int(2)) });
-    try std.testing.expectEqualStrings("t.a=1 AND t.a=2 OR t.a=3", comptime render(any(&.{ both, eq(x, int(3)) })));
-    try std.testing.expectEqualStrings("(t.a=1 AND t.a=2) OR t.a=3", comptime render(any(&.{ group(both), eq(x, int(3)) })));
+    const both = comptime all(&.{ compare(.eq, x, int(1)), compare(.eq, x, int(2)) });
+    try std.testing.expectEqualStrings("t.a=1 AND t.a=2 OR t.a=3", comptime render(any(&.{ both, compare(.eq, x, int(3)) })));
+    try std.testing.expectEqualStrings("(t.a=1 AND t.a=2) OR t.a=3", comptime render(any(&.{ group(both), compare(.eq, x, int(3)) })));
     try std.testing.expectEqualStrings("@same(t.a,'x')", comptime render(call(.same, &.{ x, text("x") })));
     try std.testing.expectEqualStrings("@initial(t.a,'a-z')", comptime render(call(.initial, &.{ x, text("a-z") })));
 }

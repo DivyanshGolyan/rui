@@ -2252,7 +2252,7 @@ const mysql_test_label: Table = .{
     .columns = &.{
         .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 8 } } },
         .{ .name = "note", .type = .{ .text = .{ .max = 100 } }, .nullable = true },
-        .{ .name = "body", .type = .{ .bytes = null }, .check = rules.lt(rules.call(.length, &.{rules.field("body")}), rules.int(10)) },
+        .{ .name = "body", .type = .{ .bytes = null }, .check = rules.compare(.lt, rules.call(.length, &.{rules.field("body")}), rules.int(10)) },
         .{ .name = "first_turn", .type = .int },
     },
     .primary_key = &.{"label"},
