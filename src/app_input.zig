@@ -175,7 +175,7 @@ pub const Facts = struct {
     mouse_target: ?Target = null,
 
     pub const Settings = struct {
-        keys_open: bool = false,
+        reference_open: bool = false,
         choice_open: bool = false,
         takes_key: bool = false,
         takes_paste: bool = false,
@@ -225,7 +225,7 @@ pub const Effects = struct {
 
     pub const Page = enum {
         keep,
-        close_keys,
+        close_reference,
         cancel_choice,
         reset,
     };
@@ -313,7 +313,7 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
                 .main, .settings => .settings,
                 .sign_in => .{ .sign_in = .{ .over = .settings } },
             };
-            return navigated(state.layer, .close_keys);
+            return navigated(state.layer, .close_reference);
         },
         .show_main, .focus_chat => {
             state.area = .main;
@@ -464,7 +464,7 @@ fn settingsKey(state: *State, facts: Facts, key: Input.Key) Effects {
     const page = facts.settings;
     if (state.pasting) return if (page.takes_paste) .{} else .{ .route = .swallow };
     const closes = key.named == .escape or key.named == .ctrl_g;
-    if (closes and page.keys_open) return .{ .page = .close_keys, .route = .swallow, .redraw = true };
+    if (closes and page.reference_open) return .{ .page = .close_reference, .route = .swallow, .redraw = true };
     if (closes and page.choice_open) return .{ .page = .cancel_choice, .route = .swallow, .redraw = true };
     if (closes and !page.upgrade_takes_escape) {
         state.layer = .main;
@@ -484,7 +484,7 @@ fn settingsKey(state: *State, facts: Facts, key: Input.Key) Effects {
 
 pub fn sui4RootRouting() !void {
     const LayerCase = enum { main, settings, sign_in_over_main, sign_in_over_settings };
-    const Page = enum { plain, keys_open, choice_open, model_filter, upgrade_cancellable };
+    const Page = enum { plain, reference_open, choice_open, model_filter, upgrade_cancellable };
     const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, pasted_click, wheel, key_release, colors, focus_out, open_settings, show_main, open_sign_in, close_sign_in, signed_in };
     const all_layers = std.enums.values(LayerCase);
     const all_pages = std.enums.values(Page);
@@ -534,17 +534,17 @@ pub fn sui4RootRouting() !void {
         .{ .layers = &.{.main}, .sessions = &.{false}, .events = &.{ .pasted_printable, .pasted_enter }, .effects = overview(true) },
         .{ .layers = &.{.main}, .sessions = &.{false}, .events = &.{ .printable, .enter, .escape, .ctrl_g, .ctrl_c }, .effects = overview(false) },
         .{ .layers = &.{.settings}, .pages = &.{.model_filter}, .events = &.{ .pasted_printable, .pasted_enter, .printable }, .effects = .{} },
-        .{ .layers = &.{.settings}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{ .pasted_printable, .pasted_enter }, .effects = .{ .route = .swallow } },
-        .{ .layers = &.{.settings}, .sessions = &.{false}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .route = app_keys, .redraw = true } },
-        .{ .layers = &.{.settings}, .sessions = &.{true}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .page = .reset, .focus = .main, .field = .input, .route = .{ .session = .{ .under = .main, .pasted = false } }, .redraw = true }, .layer = .main },
+        .{ .layers = &.{.settings}, .pages = &.{ .plain, .reference_open, .choice_open, .upgrade_cancellable }, .events = &.{ .pasted_printable, .pasted_enter }, .effects = .{ .route = .swallow } },
+        .{ .layers = &.{.settings}, .sessions = &.{false}, .pages = &.{ .plain, .reference_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .route = app_keys, .redraw = true } },
+        .{ .layers = &.{.settings}, .sessions = &.{true}, .pages = &.{ .plain, .reference_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .page = .reset, .focus = .main, .field = .input, .route = .{ .session = .{ .under = .main, .pasted = false } }, .redraw = true }, .layer = .main },
         .{ .layers = &.{.settings}, .events = &.{.enter}, .effects = .{} },
         .{ .layers = &.{.settings}, .events = &.{.ctrl_c}, .effects = .{ .route = app_keys, .redraw = true } },
-        .{ .layers = &.{.settings}, .pages = &.{.keys_open}, .events = &closing, .effects = .{ .page = .close_keys, .route = .swallow, .redraw = true } },
+        .{ .layers = &.{.settings}, .pages = &.{.reference_open}, .events = &closing, .effects = .{ .page = .close_reference, .route = .swallow, .redraw = true } },
         .{ .layers = &.{.settings}, .pages = &.{ .choice_open, .model_filter }, .events = &closing, .effects = .{ .page = .cancel_choice, .route = .swallow, .redraw = true } },
         .{ .layers = &.{.settings}, .pages = &.{.plain}, .events = &closing, .effects = closed, .layer = .main },
         .{ .layers = &.{.settings}, .pages = &.{.upgrade_cancellable}, .events = &closing, .effects = .{ .route = app_keys, .redraw = true } },
-        .{ .layers = &.{ .main, .settings }, .events = &.{.open_settings}, .effects = .{ .page = .close_keys, .focus = .settings, .redraw = true }, .layer = .settings },
-        .{ .layers = &signing, .events = &.{.open_settings}, .effects = .{ .page = .close_keys, .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_settings },
+        .{ .layers = &.{ .main, .settings }, .events = &.{.open_settings}, .effects = .{ .page = .close_reference, .focus = .settings, .redraw = true }, .layer = .settings },
+        .{ .layers = &signing, .events = &.{.open_settings}, .effects = .{ .page = .close_reference, .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_settings },
         .{ .layers = &.{ .main, .settings }, .events = &.{.show_main}, .effects = main_shown, .layer = .main },
         .{ .layers = &signing, .events = &.{.show_main}, .effects = .{ .page = .reset, .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_main },
         .{ .layers = &.{ .main, .sign_in_over_main }, .events = &.{.open_sign_in}, .effects = .{ .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_main },
@@ -570,7 +570,7 @@ pub fn sui4RootRouting() !void {
             return .{
                 .session_open = session,
                 .settings = .{
-                    .keys_open = page == .keys_open,
+                    .reference_open = page == .reference_open,
                     .choice_open = page == .choice_open or filter,
                     .takes_key = switch (event) {
                         .enter, .pasted_enter => true,
@@ -764,7 +764,7 @@ test "App input Tab order follows each drawn frame at wide and narrow widths and
             var initial: Effects = .{};
             chooseFocus(&state, target, &initial);
             state.field = initial.field orelse .input;
-            const facts: Facts = .{ .wide = wide, .session_open = session_open, .frame = frame, .settings = .{ .takes_key = true, .keys_open = shown == .keys } };
+            const facts: Facts = .{ .wide = wide, .session_open = session_open, .frame = frame, .settings = .{ .takes_key = true, .reference_open = shown == .keys } };
             const result = step(&state, facts, .{ .key = .{ .named = if (reverse) .shift_tab else .tab } });
             if (shown == .settings or shown == .keys) {
                 // The page owns its fields; the read-only Keys reference has no stops.
