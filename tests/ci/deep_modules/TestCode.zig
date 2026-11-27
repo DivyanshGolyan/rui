@@ -7,13 +7,15 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Bodies = @import("Bodies.zig");
 const Items = @import("Items.zig");
 const References = @import("References.zig");
 const Sources = @import("Sources.zig");
 
 /// `refs` without the references that test code holds.
 pub fn production(arena: Allocator, sources: *const Sources, items: *const Items.Items, refs: []const References.Reference) Allocator.Error![]const References.Reference {
-    const marked = try mark(arena, sources, items, refs);
+    const bodies = try Bodies.collect(arena, sources, items);
+    const marked = try mark(arena, sources, items, &bodies, refs);
     var kept: std.ArrayList(References.Reference) = .empty;
     for (refs) |reference| {
         if (!marked[@backingInt(reference.holder)]) try kept.append(arena, reference);
@@ -23,13 +25,15 @@ pub fn production(arena: Allocator, sources: *const Sources, items: *const Items
 
 /// Whether the body of `function` uses `std.testing`: the path itself, or the file's alias
 /// `const testing = std.testing`. A parameter, field or declaration that happens to be named
-/// `testing` is not that.
-fn namesStdTesting(ast: *const std.zig.Ast, items: *const Items.Items, function: Items.Item) bool {
+/// `testing` is not that, and neither is a `test` declaration nested in the function: only the
+/// tokens `Bodies` gives to the function count.
+fn namesStdTesting(ast: *const std.zig.Ast, items: *const Items.Items, bodies: *const Bodies, function: Items.Item, id: Items.ItemId) bool {
     const aliased = fileAliasesTesting(ast, items, function);
     var token = ast.firstToken(function.decl);
     const last = ast.lastToken(function.decl);
     while (token <= last) : (token += 1) {
         if (ast.tokenTag(token) != .identifier or !std.mem.eql(u8, ast.tokenSlice(token), "testing")) continue;
+        if (bodies.holder(function.file, token) != id) continue;
         if (token >= 2 and ast.tokenTag(token - 1) == .period) {
             if (ast.tokenTag(token - 2) == .identifier and std.mem.eql(u8, ast.tokenSlice(token - 2), "std")) return true;
             continue;
@@ -50,13 +54,13 @@ fn fileAliasesTesting(ast: *const std.zig.Ast, items: *const Items.Items, functi
 }
 
 /// By ItemId: whether the item is a function of test code.
-fn mark(arena: Allocator, sources: *const Sources, items: *const Items.Items, refs: []const References.Reference) Allocator.Error![]bool {
+fn mark(arena: Allocator, sources: *const Sources, items: *const Items.Items, bodies: *const Bodies, refs: []const References.Reference) Allocator.Error![]bool {
     const marked = try arena.alloc(bool, items.list.len);
     @memset(marked, false);
-    for (items.list, marked) |item, *flag| {
+    for (items.list, marked, 0..) |item, *flag, index| {
         if (item.kind != .function) continue;
         const ast = &sources.files[@backingInt(item.file)].ast;
-        if (namesStdTesting(ast, items, item)) flag.* = true;
+        if (namesStdTesting(ast, items, bodies, item, @fromBackingInt(@intCast(index)))) flag.* = true;
     }
     const from_test = try arena.alloc(u32, items.list.len);
     const from_code = try arena.alloc(u32, items.list.len);
@@ -117,6 +121,13 @@ test "a parameter, field or function named testing is not std.testing, an aliase
     try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ "pub fn run(testing: bool, x: *q.Q) void {\n    if (testing) x.items = 1;\n}\n"));
     try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ "pub fn run(x: *q.Q, o: anytype) void {\n    if (o.testing) x.items = 1;\n}\n"));
     try testing.expectEqual(@as(usize, 0), try leaks(a, header ++ "const testing = std.testing;\npub fn stage(x: *q.Q) !void {\n    try testing.expect(true);\n    x.items = 1;\n}\n"));
+}
+
+test "a test declaration nested in a production function does not make it test code" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ "pub fn run(x: *q.Q) void {\n    const Local = struct {\n        test \"check\" {\n            try std.testing.expect(true);\n        }\n    };\n    _ = Local;\n    x.items = 1;\n}\n"));
 }
 
 test "a function a production function also calls, or nobody calls, stays production" {
