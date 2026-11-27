@@ -362,4 +362,36 @@ test "SUI-170 provider trouble follows failures, answers since, sign-in and rese
         errdefer std.debug.print("provider trouble case {d}\n", .{number});
         try std.testing.expectEqualDeep(case.expected, trouble(testRows(&case.rows), case.viewer));
     }
+
+    // The whole domain of the answered-since rule: a failed row on (codex, m) against another row's provider, model, work state and age.
+    // A usage limit is ended by an answer on its connection from any model; a sign-in or plan failure only by the same model.
+    const Other = struct { provider: []const u8, model: []const u8 };
+    const others = [_]Other{ .{ .provider = "codex", .model = "m" }, .{ .provider = "codex", .model = "other" }, .{ .provider = "openai", .model = "m" } };
+    for ([_][]const u8{ "provider_quota", "provider_plan", "provider_http_401" }) |code| for (others) |other| for (std.enums.values(session_work.Kind)) |kind| for ([_]u64{ 90, 100, 110 }) |since| {
+        const failed = failedWork(code, 100, now_s + 60);
+        const work: WorkState = switch (kind) {
+            .idle => .{ .idle = .{ .since = since } },
+            .pending => .{ .pending = .{ .since = since } },
+            .working => .{ .working = .{ .since = since } },
+            .retrying => retryingWork("provider_temporary_error", (now_s + 5) * 1000),
+            .bash => .{ .bash = .{ .since = since, .call = 0, .description = null, .running = 1, .approvals = 0 } },
+            .approval => .{ .approval = .{ .since = since } },
+            .stopping => .{ .stopping = .{ .since = since } },
+            .finished => .{ .finished = .{ .since = since } },
+            .failed => failedWork("provider_policy", since, null),
+            .stopped => .{ .stopped = .{ .since = since, .cause = .stop } },
+        };
+        const same_connection = std.mem.eql(u8, other.provider, "codex");
+        const same_model = std.mem.eql(u8, other.model, "m");
+        const reaches = same_connection and (same_model or failure_class.of(code) == .quota);
+        const rows = [_]Facts{ listedFacts(&failed, "codex", "m"), listedFacts(&work, other.provider, other.model) };
+        const rows_slice: []const Facts = &rows;
+        const shown = trouble(testRows(&rows_slice), viewer);
+        if (reaches and std.meta.activeTag(work).answered() and since >= 100) {
+            try std.testing.expectEqual(@as(?Band, null), shown);
+        } else {
+            try std.testing.expectEqual(failure_class.troubleOfFailure(code).?, shown.?.trouble);
+            try std.testing.expectEqualDeep(connection.Name.parse("codex"), shown.?.provider);
+        }
+    };
 }
