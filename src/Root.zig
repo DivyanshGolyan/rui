@@ -234,7 +234,7 @@ fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = frame, .accepts_tab = if (self.focusOwner()) |owner| if (owner.accepts_tab) |accepts| accepts(owner.context) else false else false };
     const page = &self.settings_page;
     return .{ .session_open = session_open, .settings = .{
-        .keys_open = page.keys_open,
+        .reference_open = page.reference_open,
         .choice_open = page.hasChoice(),
         .takes_key = if (key) |pressed| page.takesKey(pressed) else false,
         .takes_paste = page.takesPaste(),
@@ -245,12 +245,12 @@ fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
 fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, routed: ?vxfw.Event) !void {
     switch (effects.page) {
         .keep => {},
-        .close_keys => self.settings_page.keys_open = false,
+        .close_reference => self.settings_page.reference_open = false,
         .cancel_choice => self.settings_page.cancelChoice(),
         .reset => {
             self.closeMainPresentation();
             self.settings_page.cancelChoice();
-            self.settings_page.keys_open = false;
+            self.settings_page.reference_open = false;
         },
     }
     // Retire UI holds owned by a Session when focus or a footer field moves.
@@ -857,10 +857,10 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
         root.settings_page.select(.keys);
         try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-        try std.testing.expect(root.settings_page.keys_open);
+        try std.testing.expect(root.settings_page.reference_open);
         ctx.phase = .capturing;
         try root.widget().captureEvent(&ctx, escape);
-        try std.testing.expect(!root.settings_page.keys_open);
+        try std.testing.expect(!root.settings_page.reference_open);
         try std.testing.expect(root.input.layer.settingsOpen());
         try std.testing.expect(root.session == null);
         root.settings_page.select(.model);
@@ -892,11 +892,11 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try root.openSettings(&ctx);
         root.settings_page.select(.keys);
         try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-        try std.testing.expect(root.settings_page.keys_open);
+        try std.testing.expect(root.settings_page.reference_open);
         ctx.consume_event = false;
         try root.widget().captureEvent(&ctx, escape);
         try std.testing.expect(ctx.consume_event);
-        try std.testing.expect(!root.settings_page.keys_open);
+        try std.testing.expect(!root.settings_page.reference_open);
         try std.testing.expect(root.input.layer.settingsOpen());
         try std.testing.expect(root.session.?.eql(session.widget()));
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(root.settings_page.widget()));
@@ -971,11 +971,11 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         try root.openSettings(&ctx);
         root.settings_page.select(.keys);
         try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-        try std.testing.expect(root.settings_page.keys_open);
+        try std.testing.expect(root.settings_page.reference_open);
         ctx.consume_event = false;
         try root.widget().captureEvent(&ctx, escape);
         try std.testing.expect(ctx.consume_event);
-        try std.testing.expect(!root.settings_page.keys_open);
+        try std.testing.expect(!root.settings_page.reference_open);
         try std.testing.expect(root.input.layer.settingsOpen());
         try std.testing.expectEqual(@as(usize, 0), fixture.escapes);
         root.settings_page.select(.model);
@@ -1701,19 +1701,19 @@ test "Root routes Keys scrolling to Settings over a retained multiline draft" {
         try std.testing.expect(events.cmds.items[events.cmds.items.len - 1].request_focus.eql(root.settings_page.widget()));
         root.settings_page.select(.keys);
         try app_events.send(&events, "\r", root.widget(), root.settings_page.widget());
-        try std.testing.expect(root.settings_page.keys_open);
+        try std.testing.expect(root.settings_page.reference_open);
         _ = try root.widget().draw(draw_ctx);
         const page = &root.settings_page;
-        const bottom = page.keys_rows -| page.keys_height;
+        const bottom = page.reference_rows -| page.reference_height;
         try std.testing.expect(bottom > 0);
         try app_events.send(&events, "\x1b[B", root.widget(), page.widget());
-        try std.testing.expectEqual(@as(usize, 1), page.keys_offset);
+        try std.testing.expectEqual(@as(usize, 1), page.reference_offset);
         try app_events.send(&events, "\x1b[A", root.widget(), page.widget());
-        try std.testing.expectEqual(@as(usize, 0), page.keys_offset);
+        try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
         try app_events.send(&events, "\x1b[6~", root.widget(), page.widget());
-        try std.testing.expectEqual(@min(page.keys_height, bottom), page.keys_offset);
+        try std.testing.expectEqual(@min(page.reference_height, bottom), page.reference_offset);
         try app_events.send(&events, "\x1b[5~", root.widget(), page.widget());
-        try std.testing.expectEqual(@as(usize, 0), page.keys_offset);
+        try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
         try std.testing.expectEqualStrings(draft, editor.text());
         try std.testing.expectEqual(@as(usize, 7), editor.cursor());
         try std.testing.expect(root.input.layer.settingsOpen());
