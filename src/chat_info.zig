@@ -385,7 +385,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize, choice: usize) !vo
             self.tool_draft.?.toggle(std.enums.values(tools.BuiltInTool)[choice]);
             self.updateTools();
             self.panel.openChoice(&self.tool_labels, null);
-            self.panel.choice.?.selected = choice;
+            self.panel.selectChoice(choice);
         },
         else => unreachable,
     }

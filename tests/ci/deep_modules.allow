@@ -227,7 +227,6 @@ field-leak store/wire/mysql_connection.Connection.writer
 field-leak testing/app_events.Events.pasting
 field-leak tool_result.Result.writer
 field-leak widgets/Hover.Hover.targets
-field-leak widgets/Panel.Panel.choice
 field-leak word_search.Matcher.hits
 hand-set-flag AnswerRenderer.AnswerRenderer.escape_next
 hand-set-flag AnswerRenderer.AnswerRenderer.in_link
