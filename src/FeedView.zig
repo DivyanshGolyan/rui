@@ -1462,7 +1462,7 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         const original = try std.testing.allocator.dupe(u8, window.document.text());
         defer std.testing.allocator.free(original);
         var anchor: Feed = .{};
-        var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .text = "Not confirmed · ctrl+r retries original" } };
+        var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .say = .quiet("Not confirmed · ctrl+r retries original") } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try testFrame(&view, arena.allocator(), width, 6);
@@ -1737,7 +1737,7 @@ fn decoratedRows() !void {
     });
     var anchor: Feed = .{};
     var actions: Actions = .{};
-    var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .text = "Not confirmed" }, .handler = .{ .userdata = &actions, .on_external = Actions.open, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
+    var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .say = .quiet("Not confirmed") }, .handler = .{ .userdata = &actions, .on_external = Actions.open, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
