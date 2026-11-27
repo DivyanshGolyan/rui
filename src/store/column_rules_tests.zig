@@ -193,6 +193,40 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, column: schema.Column, va
     }
 }
 
+fn stated(value: evaluator.Value) Value {
+    return switch (value) {
+        .null => .null,
+        .int => |number| .{ .int = number },
+        .text => |bytes| .{ .octets = bytes },
+    };
+}
+
+/// The Host's answer over the same row, bound in the reverse order and held once as a table rule and once as a column rule: it refuses exactly
+/// what SQLite's CHECK refuses (an answer of 0, never NULL), and leaves the rule to the engine when a column it reads has no stated value
+/// or is not bound at all.
+fn admission(comptime rule: rules.Expr, comptime text: []const u8, comptime names: []const []const u8, row: []const evaluator.Value, answer: evaluator.Value) !void {
+    const refused = answer == .int and answer.int == 0;
+    const reversed = comptime blk: {
+        var out: [names.len][]const u8 = undefined;
+        for (0..names.len) |at| out[at] = names[names.len - 1 - at];
+        break :blk out;
+    };
+    var values: [names.len]?Value = undefined;
+    for (row, 0..) |value, at| values[names.len - 1 - at] = stated(value);
+    const as_table = .{ .checks = &[_]rules.Expr{rule}, .columns = &[_]struct { check: ?rules.Expr }{} };
+    const as_column = .{ .checks = &[_]rules.Expr{}, .columns = &[_]struct { check: ?rules.Expr }{.{ .check = rule }} };
+    std.testing.expectEqual(!refused, column_rules.acceptsRow(as_table, &reversed, &values)) catch |failure| {
+        std.debug.print("Host disagrees with SQLite on {s} over {any}\n", .{ text, row });
+        return failure;
+    };
+    try std.testing.expectEqual(!refused, column_rules.acceptsRow(as_column, &reversed, &values));
+    if (names.len == 0) return;
+    var unstated = values;
+    unstated[0] = null;
+    try std.testing.expect(column_rules.acceptsRow(as_table, &reversed, &unstated));
+    try std.testing.expect(column_rules.acceptsRow(as_table, reversed[1..], values[1..]));
+}
+
 /// Every row over the small domains of the columns `rule` reads: the evaluator never errors and answers what SQLite answers.
 fn agreeWithSqlite(database: *c.sqlite3, comptime table: schema.Table, comptime rule: rules.Expr, checked: *usize) !void {
     const text = comptime rules.render(rule);
@@ -246,6 +280,7 @@ fn agreeWithSqlite(database: *c.sqlite3, comptime table: schema.Table, comptime 
             std.debug.print("rule {s} disagrees with SQLite on row {any}\n", .{ text, row });
             return failure;
         };
+        try admission(rule, text, &names, &row, normal);
         checked.* += 1;
         var at: usize = read.len;
         while (at > 0) {

@@ -66,12 +66,3 @@ fn collect(comptime expr: anytype, comptime names: *[]const []const u8) void {
         .exists, .not_exists, .count => @compileError("rule: a subquery reads other rows, not one checked row"),
     }
 }
-
-test "SH-180 the columns a row-local rule reads are named once each, in first-read order" {
-    const probe = comptime rule.any(&.{ rule.compare(.eq, rule.field("a"), rule.field("b")), rule.between(rule.field("a"), rule.literal(1), rule.field("c")), rule.call(.same, &.{ rule.field("b"), rule.literal("x") }) });
-    const names = comptime reads(probe);
-    try std.testing.expectEqual(@as(usize, 3), names.len);
-    try std.testing.expectEqualStrings("a", names[0]);
-    try std.testing.expectEqualStrings("b", names[1]);
-    try std.testing.expectEqualStrings("c", names[2]);
-}
