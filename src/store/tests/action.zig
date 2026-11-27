@@ -2429,9 +2429,18 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
             try std.testing.expect(peer_queued and final_queued);
             try std.testing.expectEqual(@as(usize, 20), value_queued);
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const hidden_entry = try store_testing.queryU64(&storage, "SELECT min(e.session_position) FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id WHERE m.session_ref=?1 AND m.source_kind=4", .{session.slice()});
             _ = try storage.openActivityContent(&.{ .session = session, .position = value_at.?.position, .ordinal = value_at.?.ordinal });
-            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_entry }));
+            var rows = store_testing.ConversationRows{ .session = session };
+            while (true) {
+                const page = try store_testing.conversationRows(&storage, rows);
+                for (page.items[0..page.count]) |item| {
+                    if (item.value == .user) try std.testing.expect(!std.mem.eql(u8, &item.value.user.content.identity().digest, &protocol.contentDigest("hidden value")));
+                }
+                if (!page.more) break;
+                rows.end = page.end;
+                rows.before_position = page.items[page.count - 1].position;
+                rows.before_ordinal = page.items[page.count - 1].ordinal;
+            }
             const found = try std.testing.allocator.create(protocol.ActivitySearchFacts);
             defer std.testing.allocator.destroy(found);
             var search: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.received), .limit = 4 };

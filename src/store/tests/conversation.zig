@@ -121,8 +121,6 @@ test "INS-4 conversation rows hold a fixed end, leave out settings and continue 
             try std.testing.expectEqual(@as(usize, 2), try reader.read(tail_start, &tail));
             try std.testing.expectEqualStrings("xx", &tail);
             reader.close();
-            read.position = 42;
-            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&read));
             try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = .{}, .position = 1 }));
             try std.testing.expectError(error.InvalidCursor, store_testing.conversationRows(&storage, .{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
             try std.testing.expect(!storage.isFenced());

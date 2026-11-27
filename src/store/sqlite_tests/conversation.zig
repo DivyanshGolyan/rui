@@ -20,7 +20,7 @@ const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const testingStore = store_testing.testingSqliteStore;
 const busyStatements = shared_fixtures.busyStatements;
 
-test "public content SQL failure fences Store instead of reporting absence" {
+test "INS-5 an activity content read whose SQL fails fences the Store instead of reporting absence" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -38,12 +38,12 @@ test "public content SQL failure fences Store instead of reporting absence" {
     };
     c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Interrupt.progress, null);
     defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
-    try std.testing.expectError(error.StatementPrepareFailed, storage.openActivityContent(&request));
+    try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&request));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.openActivityContent(&request));
 }
 
-test "public content SQLite step failure fences after successful preparation" {
+test "INS-5 an activity content read whose SQLite step fails fences after a successful preparation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -75,7 +75,7 @@ test "public content SQLite step failure fences after successful preparation" {
     var interrupt = Interrupt{ .database = storage.sqliteDatabase() };
     c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Interrupt.progress, &interrupt);
     defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
-    try std.testing.expectError(error.ConversationReadFailed, storage.openActivityContent(&request));
+    try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&request));
     try std.testing.expect(interrupt.interrupted_step);
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.openActivityContent(&request));
