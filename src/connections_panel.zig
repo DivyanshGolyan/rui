@@ -12,7 +12,7 @@ const max_line = 96;
 const lines_per_connection = 7;
 const max_lines = connection.max_served * lines_per_connection;
 const bar_cells = 10;
-const indent = " " ** 24;
+const indent: [24]u8 = @splat(' ');
 
 pub const Rows = struct {
     fields: [max_lines]Panel.Field = undefined,
