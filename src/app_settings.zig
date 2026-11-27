@@ -422,11 +422,16 @@ const Fixture = struct {
     fail_save: bool = false,
     home: ?[]const u8 = null,
     upgrades: usize = 0,
+    snapshot: ?ConnectionsSnapshot = null,
     last_edit: ?preferences.Edit = null,
     status: ?upgrade_status.Run = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } },
 
     fn backend(self: *Fixture) Backend {
-        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory };
+        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory, .connections = connections };
+    }
+    fn connections(raw: *anyopaque) ?ConnectionsSnapshot {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return self.snapshot;
     }
     fn read(raw: *anyopaque) !preferences.Values {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -1196,4 +1201,40 @@ test "Keys reclamps on resize and starts at the top when reopened" {
     try press(&page, &events, vaxis.Key.enter);
     try std.testing.expect(page.reference_open);
     try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
+}
+
+test "SUI-182 App settings Connections opens a read-only reference of each served connection and its usage" {
+    const now: u64 = 1_800_000_000;
+    var snapshot: ConnectionsSnapshot = .{ .facts = .{}, .now = now };
+    snapshot.facts.items[0] = .{ .name = connection.Name.parse("work").?, .label = provider_route.Label.parse("ChatGPT (device code)").?, .route = .chatgpt_device, .usage = .{ .observed_at = now - 120, .primary = .{ .used_percent = 40, .minutes = 10080, .reset_at = now + 86400 }, .secondary = null } };
+    snapshot.facts.items[1] = .{ .name = connection.Name.parse("home").?, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan };
+    snapshot.facts.len = 2;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?ConnectionsSnapshot{ snapshot, null }) |read| {
+        var fixture: Fixture = .{ .snapshot = read };
+        var page: Self = .{ .backend = fixture.backend() };
+        try page.refresh();
+        page.bind();
+        try std.testing.expectEqualStrings("Connections", page.fields[@backingInt(Row.connections)].label);
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.select(.connections);
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.reference_open);
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 120, .height = 6 }, .cell_size = .{} });
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..2) |row| {
+            for (0..drawn.size.width) |col| try text.writer.writeAll(drawn.readCell(@intCast(col), @intCast(row)).char.grapheme);
+            try text.writer.writeByte('\n');
+        }
+        if (read != null) {
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "work") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "weekly 40% used · resets in 1 d 0 h") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "usage not shown for browser sign-ins") != null);
+        } else try std.testing.expect(std.mem.indexOf(u8, text.written(), "the Host cannot be read") != null);
+        // The reference is read-only: Enter changes nothing and Escape-free input keeps it open.
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.reference_open);
+        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+    }
 }
