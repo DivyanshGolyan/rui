@@ -31,6 +31,7 @@ pub const Fixture = struct {
     providers: *const providers_module.Providers = &providers_module.none,
     presets: []const core_tools.Preset = &.{},
     model_lists: ModelLists = .{},
+    usage: @import("ConnectionUsage.zig") = .init(std.testing.io),
     bash_facts: environment.HostFacts = bash.default_facts,
     environments: ?*SessionEnvironments = null,
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
