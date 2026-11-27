@@ -3,7 +3,10 @@ const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const reads_domain = @import("../domain/reads.zig");
+const skills_domain = @import("../domain/skills.zig");
 const store_testing = @import("../testing.zig");
+const canonicalCwd = store_testing.canonicalCwd;
+const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
 const settleItemsForTesting = store_testing.settleItemsForTesting;
 const submitTestMessage = store_testing.submitTestMessage;
@@ -284,5 +287,117 @@ test "INS-8 searchActivity matches Text parts, names each part and skips Image b
     try std.testing.expectEqual(@as(?u32, 3), result.items[0].hits[0].part);
     try std.testing.expectEqualStrings(image_marker ++ " needle", result.items[0].hits[0].snippet.slice());
     try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "INS-8 searchActivity matches instruction, skill and hosted-search text" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const catalog = skills_domain.Initial{ .ready = .{
+        .encoded = "{\"entries\":[{\"name\":\"audit\",\"description\":\"Audit a change\",\"path\":\"/skills/audit/SKILL.md\"}]}",
+        .instruction = "Available skills: audit with instrword at /skills/audit/SKILL.md",
+    } };
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var create = try completeConfiguration("search-kinds-config", "", workspace, "model-a");
+    const session = (try storage.configureWithInitialSkills(&create, null, &catalog, .{})).accepted.session;
+    try store_testing.submitTestMessageWithSkills(&storage, &tmp, "search-kinds-input", "search-kinds-input", session.slice(), "use the skill", &.{
+        .{ .name = "audit", .bytes = "Check every change for skillword first." },
+    });
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&storage, &tmp, binding, &.{
+        "{\"type\":\"web_search_call\",\"id\":\"ws1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"queries\":[\"alphatarget\",\"betatarget\"]}}",
+        "{\"type\":\"web_search_call\",\"id\":\"ws2\",\"status\":\"completed\",\"action\":{\"type\":\"find_in_page\",\"url\":\"gammahost.example\",\"pattern\":\"deltapattern\"}}",
+        "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+    }, "done");
+
+    // Each row's position, read from the Activity page that serves it.
+    const page = try arena.create(protocol.ActivityFacts);
+    try storage.activityPage(&.{ .session = session }, page);
+    var instruction: ?u64 = null;
+    var skill: ?u64 = null;
+    var hosted: [2]u64 = undefined;
+    var hosted_count: usize = 0;
+    for (page.items[0..page.count]) |item| switch (item.value) {
+        .instruction => instruction = item.position,
+        .skill => skill = item.position,
+        .hosted_call => {
+            hosted[hosted_count] = item.position;
+            hosted_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), hosted_count);
+    // The page is oldest first: the search settled before the find-in-page.
+    const Case = struct { query: []const u8, kind: protocol.ActivityItem.Kind, position: u64 };
+    const cases = [_]Case{
+        .{ .query = "INSTRWORD", .kind = .instruction, .position = instruction.? },
+        .{ .query = "skillword", .kind = .skill, .position = skill.? },
+        .{ .query = "alphatarget", .kind = .hosted_call, .position = hosted[0] },
+        .{ .query = "BetaTarget", .kind = .hosted_call, .position = hosted[0] },
+        .{ .query = "gammahost", .kind = .hosted_call, .position = hosted[1] },
+        .{ .query = "deltapattern", .kind = .hosted_call, .position = hosted[1] },
+    };
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    for (cases) |case| {
+        try request.query.set(case.query);
+        try storage.searchActivity(&request, result);
+        try std.testing.expectEqual(@as(usize, 1), result.count);
+        const item = &result.items[0];
+        try std.testing.expectEqual(case.kind, item.kind);
+        try std.testing.expectEqual(case.position, item.position);
+        try std.testing.expectEqual(@as(usize, 1), item.count);
+        const hit = &item.hits[0];
+        try std.testing.expectEqual(@as(?u32, null), hit.part);
+        try std.testing.expect(std.ascii.eqlIgnoreCase(case.query, hit.snippet.slice()[hit.offset..][0..hit.length]));
+        try std.testing.expect(result.next == null);
+    }
+
+    // A hosted row's fields are one stream with a newline between them: a space does not span two targets, a newline does, as for a call's name and arguments.
+    try request.query.set("alphatarget betatarget");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try request.query.set("alphatarget\nbetatarget");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqualStrings("alphatarget\nbetatarget", result.items[0].hits[0].snippet.slice());
+    try request.query.set("gammahost.example\ndeltapattern");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+
+    // The budget is charged each field's bytes: two targets, a target and a pattern.
+    request.kinds = .initOne(.hosted_call);
+    try request.query.set("absent");
+    const before = storage.testing_content_work.read.load(.monotonic);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expectEqual(@as(u64, "alphatarget".len + "betatarget".len + "gammahost.example".len + "deltapattern".len), storage.testing_content_work.read.load(.monotonic) - before);
+    request.kinds = .initOne(.instruction);
+    const instruction_before = storage.testing_content_work.read.load(.monotonic);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(u64, catalog.ready.instruction.?.len), storage.testing_content_work.read.load(.monotonic) - instruction_before);
+
+    // A filter without the kind finds none of its text.
+    for (cases) |case| {
+        request.kinds = .initOne(.assistant);
+        try request.query.set(case.query);
+        try storage.searchActivity(&request, result);
+        try std.testing.expectEqual(@as(usize, 0), result.count);
+    }
+    // Only the named kind is found when two words share a filter.
+    request.kinds = .initMany(&.{ .instruction, .skill });
+    try request.query.set("alphatarget");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try request.query.set("skillword");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
     try std.testing.expect(!storage.isFenced());
 }
