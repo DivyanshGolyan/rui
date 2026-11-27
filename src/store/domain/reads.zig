@@ -1199,7 +1199,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
     }
     var position = request.before_position orelse end;
     var ordinal = request.before_ordinal orelse if (request.before_position == null) @as(u64, std.math.maxInt(i64)) else 0;
-    const text_kinds = activityKinds(.initMany(&.{ .admission, .user, .assistant, .call, .tool_result, .turn_ended, .received }));
+    const text_kinds = activityKinds(.initMany(&.{ .admission, .user, .assistant, .call, .tool_result, .turn_ended, .received, .instruction, .skill, .hosted_call }));
     const kinds = activityKinds(request.kinds) & text_kinds;
     var budget: usize = activity_search_budget;
     var lower: u64 = 0;
@@ -1214,32 +1214,36 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
             try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located);
             scratch.hit_count = 0;
             scratch.matcher.init(request.query.slice());
-            if (scratch.item.body() == .call) {
-                const call = scratch.item.body().call;
-                try searchField(a, scratch, call.name, &budget);
-                if (budget != 0) {
-                    scratch.matcher.feed("\n");
-                    try searchField(a, scratch, call.arguments, &budget);
-                }
-                collectHits(scratch, null);
-            } else if (located) |content| switch (content.value) {
-                .text => |reference| {
-                    try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = reference }, &budget);
+            // `Item.body` is the one owner of which rows have text and what it is; this read only searches it.
+            switch (scratch.item.body()) {
+                .none => {},
+                .call => |call| {
+                    try searchFields(a, scratch, &.{ fieldReference(call.name), fieldReference(call.arguments) }, &budget);
                     collectHits(scratch, null);
                 },
-                .parts => |value| {
-                    // The manifest is read before any part, so a value whose manifest does not
-                    // fit the remaining budget waits for the continuation, which starts after
-                    // the last entry scanned. A first entry always fits the whole budget.
-                    if (value.identity.length > budget) {
-                        lower = position;
-                        out.next = .{ .position = position, .ordinal = ordinal };
-                        break :scan;
-                    }
-                    budget -= @intCast(value.identity.length);
-                    try searchParts(a, scratch, request.query.slice(), .{ .content_id = @intCast(content.id), .reference = .{ .parts = value.identity } }, &budget);
+                .hosted => |text| {
+                    try searchFields(a, scratch, text.refs(), &budget);
+                    collectHits(scratch, null);
                 },
-            };
+                .value => if (located) |content| switch (content.value) {
+                    .text => |reference| {
+                        try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = reference }, &budget);
+                        collectHits(scratch, null);
+                    },
+                    .parts => |value| {
+                        // The manifest is read before any part, so a value whose manifest does not
+                        // fit the remaining budget waits for the continuation, which starts after
+                        // the last entry scanned. A first entry always fits the whole budget.
+                        if (value.identity.length > budget) {
+                            lower = position;
+                            out.next = .{ .position = position, .ordinal = ordinal };
+                            break :scan;
+                        }
+                        budget -= @intCast(value.identity.length);
+                        try searchParts(a, scratch, request.query.slice(), .{ .content_id = @intCast(content.id), .reference = .{ .parts = value.identity } }, &budget);
+                    },
+                },
+            }
             if (scratch.hit_count != 0) {
                 const item = &out.items[out.count];
                 item.position = at.position;
@@ -1270,13 +1274,22 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
     }
 }
 
-fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: activity_read.ProposalFieldReference, budget: *usize) !void {
-    const reference: ContentReference = .{ .length = field.length, .digest = field.digest };
-    const id = content_domain.contentIdOf(a, reference, false) catch |err| switch (err) {
-        error.ContentIsParts => return error.CorruptStore,
-        else => return err,
-    };
-    try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
+fn fieldReference(field: activity_read.ProposalFieldReference) ContentReference {
+    return .{ .length = field.length, .digest = field.digest };
+}
+
+/// Searches a row's public texts as one stream, a newline between fields, each charged to the budget.
+/// No match spans the newline, and a field the budget cannot reach is not searched.
+fn searchFields(a: *ReadAccess, scratch: *SearchScratch, fields: []const ContentReference, budget: *usize) !void {
+    for (fields, 0..) |reference, index| {
+        if (budget.* == 0) return;
+        if (index != 0) scratch.matcher.feed("\n");
+        const id = content_domain.contentIdOf(a, reference, false) catch |err| switch (err) {
+            error.ContentIsParts => return error.CorruptStore,
+            else => return err,
+        };
+        try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
+    }
 }
 
 fn collectHits(scratch: *SearchScratch, part: ?u32) void {
