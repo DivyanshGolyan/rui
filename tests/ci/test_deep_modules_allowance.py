@@ -82,6 +82,44 @@ class GrowthTest(unittest.TestCase):
             allowance.entries("tangle a,b\ntangle\n")
 
 
+DIAGNOSTIC = """pub const Lint = enum {
+    @"module-cycle",
+    tangle,
+    @"field-leak",
+    @"shallow-module",
+
+    /// The name written in reports and in the allow file.
+    pub fn name(lint: Lint) []const u8 {
+"""
+
+
+class NewLintTest(unittest.TestCase):
+    """A lint the merge base does not have starts from a baseline; one it has may not grow."""
+
+    def test_lint_names_reads_the_enum_members(self):
+        self.assertEqual(allowance.lint_names(DIAGNOSTIC), {"module-cycle", "tangle", "field-leak", "shallow-module"})
+        self.assertIsNone(allowance.lint_names("const x = 1;\n"))
+
+    def test_a_lint_the_merge_base_lacks_may_start_with_any_entries(self):
+        known = allowance.lint_names(DIAGNOSTIC)
+        current = "field-leak T.x\nhand-set-flag T.a\nhand-set-flag T.b\n"
+        self.assertEqual(allowance.growth("field-leak T.x\n", current, known), [])
+
+    def test_a_lint_the_merge_base_has_may_not_grow(self):
+        known = allowance.lint_names(DIAGNOSTIC)
+        failures = allowance.growth("field-leak T.x\n", "field-leak T.x\nfield-leak T.y\nhand-set-flag T.a\n", known)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("field-leak", failures[0])
+
+    def test_without_known_lints_every_lint_is_held_to_its_count(self):
+        self.assertEqual(len(allowance.growth("field-leak T.x\n", "field-leak T.x\nhand-set-flag T.a\n")), 1)
+
+    def test_a_later_merge_base_that_has_the_lint_holds_it_to_its_count(self):
+        known = allowance.lint_names(DIAGNOSTIC.replace("tangle,", "tangle,\n    @\"hand-set-flag\","))
+        failures = allowance.growth("hand-set-flag T.a\n", "hand-set-flag T.a\nhand-set-flag T.b\n", known)
+        self.assertEqual(len(failures), 1)
+
+
 class CheckTest(unittest.TestCase):
     """The merge-base wiring, against a temporary repository whose origin/main is its first commit."""
 
@@ -114,6 +152,18 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(trusted, TANGLE_BASE.strip())
         self.assertEqual(failures, [])
         self.commit("tangle a,b,x\ntangle d,e\ntangle p,q\n")
+        self.assertEqual(len(allowance.check(self.root)[2]), 1)
+
+    def test_check_reads_the_lints_of_the_merge_base(self):
+        diagnostic = self.root / allowance.DIAGNOSTIC
+        diagnostic.parent.mkdir(parents=True, exist_ok=True)
+        diagnostic.write_text(DIAGNOSTIC)
+        run_git(self.root, "add", allowance.DIAGNOSTIC)
+        self.commit("field-leak T.x\n")
+        self.base()
+        self.commit("field-leak T.x\nhand-set-flag T.a\nhand-set-flag T.b\n")
+        self.assertEqual(allowance.check(self.root)[2], [])
+        self.commit("field-leak T.x\nfield-leak T.y\nhand-set-flag T.a\n")
         self.assertEqual(len(allowance.check(self.root)[2]), 1)
 
     def test_check_bootstraps_when_the_file_is_absent_at_the_merge_base(self):
