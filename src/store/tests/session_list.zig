@@ -213,7 +213,7 @@ test "SUI-58 host_retry_work_version" {
             const activity = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(crossing.generation, activity.work.read_version.generation);
             try std.testing.expect(activity.work.work.state == .pending);
-            try std.testing.expectEqual(@import("../../session_work.zig").Standing.queued, @import("../../session_work.zig").standing(activity.work.work.state));
+            try std.testing.expectEqual(@import("../../session_work.zig").Standing.queued, @import("../../session_work.zig").standing(activity.work.work.state, activity.work.work.actions.decide != null));
             const unchanged = try storage.publishRetryCrossings(due, due + 1);
             try std.testing.expectEqual(crossing.generation, unchanged.generation);
             storage.io.vtable = &before;
@@ -1958,8 +1958,8 @@ test "SL-8: a creator subtree's rollup is its descendants' own rows, for every w
                         .subtree_state_change_at = try number(row, "subtree_state_change_at"),
                         .descendants = try number(row, "descendant_count"),
                         .needs_you_descendants = try number(row, "descendant_needs_you_count"),
-                        // The row's own state asks for a decision: an approval, or a Bash proposal with approvals pending.
-                        .needs_you = asksForDecision(row.get("work").?.object.get("state").?.object),
+                        // The row's own work asks for a decision: an approval, a Bash proposal with approvals pending, or any state with a decision served.
+                        .needs_you = asksForDecision(row.get("work").?.object),
                     };
                     total += 1;
                 }
@@ -1973,7 +1973,9 @@ test "SL-8: a creator subtree's rollup is its descendants' own rows, for every w
             return std.fmt.parseInt(u64, object.get(name).?.string, 10);
         }
 
-        fn asksForDecision(state: std.json.ObjectMap) bool {
+        fn asksForDecision(work: std.json.ObjectMap) bool {
+            if (work.get("actions").?.object.get("decide").? != .null) return true;
+            const state = work.get("state").?.object;
             const kind = state.get("kind").?.string;
             if (std.mem.eql(u8, kind, "approval")) return true;
             return std.mem.eql(u8, kind, "bash") and !std.mem.eql(u8, state.get("approvals").?.string, "0");

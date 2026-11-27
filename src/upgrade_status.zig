@@ -170,7 +170,7 @@ pub fn line(run: Run, buffer: *[max_line_bytes]u8, script: Script) Line {
                 break :said .{ .normal, .notice };
             },
             .failed => |why| said: {
-                writer.print("! {s}; nothing changed {s} {s}", .{ failure_words.get(why), dot, shell }) catch unreachable;
+                writer.print("{s}; nothing changed {s} {s}", .{ failure_words.get(why), dot, shell }) catch unreachable;
                 break :said .{ .attention, .notice };
             },
             .upgraded => |done| said: {
@@ -237,7 +237,7 @@ test "a run's line: the check, what the restart will do, each step, and a stop" 
     }
 }
 
-test "how a run ended: a notice, or held until another Upgrade when the client cannot go on" {
+test "SH-183 how a run ended: a notice, or held until another Upgrade when the client cannot go on" {
     const v: Version = .{ .schema = 60, .patch = 1 };
     for ([_]struct { Ended, []const u8, Tone, Lasts }{
         .{ .{ .up_to_date = .{ .schema = 59, .patch = 7 } }, "Rui is up to date (0.59.7)", .normal, .notice },
@@ -247,9 +247,9 @@ test "how a run ended: a notice, or held until another Upgrade when the client c
         .{ .{ .refused = .unknown_build }, "Can't upgrade here: an unknown build · run rui upgrade in a shell for details", .attention, .notice },
         .{ .{ .refused = .package_managed }, "Can't upgrade here: installed by another tool · run rui upgrade in a shell for details", .attention, .notice },
         .{ .cancelled, "Upgrade cancelled; nothing changed", .normal, .notice },
-        .{ .{ .failed = .download }, "! Couldn't reach GitHub; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
-        .{ .{ .failed = .release }, "! Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
-        .{ .{ .failed = .other }, "! Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
+        .{ .{ .failed = .download }, "Couldn't reach GitHub; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
+        .{ .{ .failed = .release }, "Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
+        .{ .{ .failed = .other }, "Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
         .{ .{ .upgraded = .{ .version = v, .restarted = true } }, "Upgraded to 0.60.1 · Host restarted", .normal, .notice },
         .{ .{ .upgraded = .{ .version = v, .restarted = false } }, "Upgraded to 0.60.1", .normal, .notice },
         .{ .{ .incompatible = .{ .schema = 61, .patch = 0 } }, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention, .persistent },
@@ -360,7 +360,7 @@ test "Upgrade settings field reports state without shell instructions" {
     }
 }
 
-test "relaunch ending removes old-client restart instructions only in the new client" {
+test "SH-183 relaunch ending removes old-client restart instructions only in the new client" {
     var buffer: [max_line_bytes]u8 = undefined;
     const incompatible: Run = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } };
     try std.testing.expectEqualStrings("Upgraded to 0.60.0", relaunchLine(incompatible, &buffer, .unicode));
@@ -369,7 +369,7 @@ test "relaunch ending removes old-client restart instructions only in the new cl
     try std.testing.expectEqualStrings("Upgraded to 0.60.0 · Host restarted", relaunchLine(compatible, &buffer, .unicode));
 }
 
-test "relaunch ending preserves every failure reason without a success line" {
+test "SH-183 relaunch ending preserves every failure reason without a success line" {
     var buffer: [max_line_bytes]u8 = undefined;
     inline for (std.enums.values(Failure)) |failure| {
         const run: Run = .{ .ended = .{ .how = .{ .failed = failure }, .outcome = .unchanged } };
@@ -377,7 +377,7 @@ test "relaunch ending preserves every failure reason without a success line" {
         try std.testing.expectEqualStrings(line(run, &ordinary_buffer, .unicode).text, relaunchLine(run, &buffer, .unicode));
     }
     const download: Run = .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } };
-    try std.testing.expectEqualStrings("! Couldn't reach GitHub; nothing changed · run rui upgrade in a shell for details", relaunchLine(download, &buffer, .unicode));
+    try std.testing.expectEqualStrings("Couldn't reach GitHub; nothing changed · run rui upgrade in a shell for details", relaunchLine(download, &buffer, .unicode));
 }
 
 test "update control spans every run outcome and available state" {
