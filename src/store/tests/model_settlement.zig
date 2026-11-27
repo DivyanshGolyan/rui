@@ -691,8 +691,8 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
 test "model rejection diagnostic cannot masquerade as assistant content" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const Route = enum { conversation, conversation_content, activity, activity_content };
-            for ([_]Route{ .conversation, .conversation_content, .activity, .activity_content }) |route| {
+            const Route = enum { conversation_content, activity, activity_content };
+            for ([_]Route{ .conversation_content, .activity, .activity_content }) |route| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
@@ -707,16 +707,15 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
                     .request_id = .{},
                     .report = "",
                 } }, .ordinary, .{});
-                const healthy = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
+                const healthy = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initMany(&.{ .user, .assistant }) });
                 try std.testing.expectEqual(@as(usize, 1), healthy.count);
-                try std.testing.expect(healthy.items[0].kind == .user);
+                try std.testing.expect(healthy.items[0].value == .user);
                 const position = try store_testing.queryU64(&storage, "SELECT next_position FROM session", .{});
                 try store_testing.withoutForeignKeys(&storage, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id,recorded_at) " ++
                     "SELECT o.session_ref,2,s.next_position,3,o.turn_id,o.operation_id,0,o.resolution_content_id,1 " ++
                     "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref", .{});
                 try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+1", .{});
                 const result: anyerror!void = switch (route) {
-                    .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = session })) |_| {} else |err| err,
                     .activity => if (store_core.activityPageForTesting(&storage, .{ .session = session })) |_| {} else |err| err,
                     .conversation_content => if (storage.openPublicConversationContent(&.{ .session = session, .position = position })) |value| blk: {
                         var reader: ContentReader = undefined;
