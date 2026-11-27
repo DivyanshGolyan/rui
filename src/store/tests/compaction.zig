@@ -133,7 +133,7 @@ test "compaction overflow admits a new Operation without losing applied input" {
             try submitTestMessage(&storage, &tmp, "compact-input", "input", session.slice(), "keep all input");
             const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const detail = "{\"reason\":\"ContextOverflow\",\"stage\":\"response\",\"byte_offset\":\"0\",\"output_index\":null}";
-            var failure: ModelFailure = .{ .rejected = .{ .code = "context_overflow", .diagnostic = detail, .request_id = .{}, .report = "" } };
+            var failure: ModelFailure = .{ .rejected = .{ .code = "context_overflow", .diagnostic = detail, .request_id = .{}, .report = .empty } };
             try failure.rejected.request_id.set("compact-overflow-request");
             try storage.settleModelAttemptFailure(original, failure, .context_overflow, .{});
             const next = (try storage.admitNextModelAttempt(.{})) orelse return error.MissingCompaction;

@@ -71,6 +71,7 @@ const cores = .{
     .{ "error_set.zig", @import("error_set.zig") },
     .{ "excerpt.zig", @import("excerpt.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
+    .{ "failure_report.zig", @import("failure_report.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "first_line.zig", @import("first_line.zig") },

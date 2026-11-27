@@ -210,7 +210,7 @@ fn note(arena: Allocator, sources: *const Sources, items: *const Items.Items, us
         .copy => "reads",
         .borrow => "borrows",
         .call => "calls a method of",
-        .reach => "writes or indexes",
+        .assign, .reach => "writes or indexes",
     };
     const through = if (usage.through) |wrapper|
         try std.fmt.allocPrint(arena, ", through `{s}`", .{try Circle.itemName(arena, items, wrapper)})

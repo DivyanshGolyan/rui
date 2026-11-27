@@ -483,7 +483,7 @@ test "a list row and an Activity page serve the oldest awaiting approval through
 
             try submitTestMessage(&storage, &tmp, "last-line-fail-input", "last-line-fail-key", session.slice(), "fail");
             const failing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try storage.settleModelAttemptFailure(failing, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "", .request_id = .{}, .report = "Not an answer" } }, .ordinary, .{});
+            try storage.settleModelAttemptFailure(failing, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "", .request_id = .{}, .report = .ofMessage("Not an answer") } }, .ordinary, .{});
             try expect(&storage, &tmp, session.slice(), null);
 
             const active = try configureTestSession(&storage, "last-line-active-config");
