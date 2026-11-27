@@ -71,6 +71,8 @@ pub const ConnectionFact = struct {
     name: connection.Name,
     label: provider_route.Label,
     route: Route,
+    /// The latest usage the Host saw this connection report; null until it has seen one.
+    usage: ?UsageReading = null,
 };
 
 /// The served connections a Host reports, in served order, at most one per
@@ -332,6 +334,11 @@ pub const HostInfo = struct {
             name: []const u8,
             label: []const u8,
             route: Route,
+            usage: ?struct {
+                observed_at: []const u8,
+                primary: ?UsageWindowWire = null,
+                secondary: ?UsageWindowWire = null,
+            } = null,
         },
     },
 };
@@ -2758,13 +2765,63 @@ pub const max_mutation_response_bytes = blk: {
     break :blk bytes;
 };
 
+/// One usage window a connection reported. `minutes` names the window whichever slot it came in (10080 is the week); `reset_at` is Unix seconds.
+pub const UsageWindow = struct { used_percent: f64, minutes: u64, reset_at: ?u64 };
+
+/// The latest usage a connection reported and when the Host saw it (Unix seconds).
+pub const UsageReading = struct { observed_at: u64, primary: ?UsageWindow, secondary: ?UsageWindow };
+
+/// A reported percentage above this is written as this: the wire keeps a bounded number.
+pub const max_usage_percent: f64 = 1_000_000;
+
+const usage_percent_bytes = 24;
+
+/// The percent a reply shows: never below zero (a signed zero is zero, so the Host's own output stays readable) and never above `max_usage_percent`.
+fn usagePercent(used: f64) f64 {
+    if (!(used > 0)) return 0;
+    return @min(used, max_usage_percent);
+}
+
+pub const UsageWindowJson = struct {
+    value: UsageWindow,
+
+    pub const openapi_name = "UsageWindow";
+    pub const json_shape = .{ "{\"used_percent\":", Hole{ .string = usage_percent_bytes }, ",\"minutes\":\"", Hole.decimal, "\",\"reset_at\":", Hole.optional_id, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const UsageWindowJson, out: *std.Io.Writer) !void {
+        var text: [usage_percent_bytes]u8 = undefined;
+        const percent = std.fmt.bufPrint(&text, "{d:.1}", .{usagePercent(self.value.used_percent)}) catch unreachable;
+        try writeShape(out, json_shape, .{ percent, self.value.minutes, self.value.reset_at });
+    }
+};
+
+pub const UsageWindowWire = struct { used_percent: []const u8, minutes: []const u8, reset_at: ?[]const u8 = null };
+
+pub const UsageReadingJson = struct {
+    value: UsageReading,
+
+    pub const openapi_name = "UsageReading";
+    pub const json_shape = .{ "{\"observed_at\":\"", Hole.decimal, "\",\"primary\":", Hole{ .optional_json = UsageWindowJson }, ",\"secondary\":", Hole{ .optional_json = UsageWindowJson }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    pub fn writeJson(self: *const UsageReadingJson, out: *std.Io.Writer) !void {
+        const reading = self.value;
+        try writeShape(out, json_shape, .{
+            reading.observed_at,
+            if (reading.primary) |window| UsageWindowJson{ .value = window } else null,
+            if (reading.secondary) |window| UsageWindowJson{ .value = window } else null,
+        });
+    }
+};
+
 pub const host_info_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };
     pub const doublewrite = .{ ",\"innodb_doublewrite\":", Hole{ .string = 32 } };
     pub const settings_digest = .{ ",\"settings_digest\":\"", Hole{ .hex = 32 }, "\"" };
     /// The served connections: `connections_head`, one `connection` per served name separated by commas, then `connections_tail`.
     pub const connections_head = ",\"capabilities\":{\"bash\":true,\"connections\":[";
-    pub const connection_entry = .{ "{\"name\":\"", Hole{ .text = @import("connection.zig").max_name_bytes }, "\",\"label\":", Hole{ .string = @import("connection.zig").max_label_bytes }, ",\"route\":\"", Hole{ .tag = Route }, "\"}" };
+    pub const connection_entry = .{ "{\"name\":\"", Hole{ .text = @import("connection.zig").max_name_bytes }, "\",\"label\":", Hole{ .string = @import("connection.zig").max_label_bytes }, ",\"route\":\"", Hole{ .tag = Route }, "\",\"usage\":", Hole{ .optional_json = UsageReadingJson }, "}" };
     pub const connections_tail = "]}}";
     pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(settings_digest) + shapeBytes(.{connections_head}) +
         provider_route.max_served * shapeBytes(connection_entry) + (provider_route.max_served - 1) + shapeBytes(.{connections_tail});

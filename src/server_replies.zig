@@ -7,6 +7,8 @@ const os = @import("os");
 const socket_os = os.socket;
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
+const provider_route = @import("provider_route.zig");
 const command_spec = @import("command_spec.zig");
 const core_tools = @import("core_tools.zig");
 const failed_responses = @import("failed_responses.zig");
@@ -17,6 +19,7 @@ const output_retention = @import("output_retention.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 const ModelLists = @import("ModelLists.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 const server_host = @import("server_host.zig");
 const execution_owner = @import("execution_owner.zig");
 const server_reply = @import("server_reply.zig");
@@ -70,6 +73,7 @@ pub const Shared = struct {
     probes: *Probes,
     retention: *output_retention.Queue,
     model_lists: *ModelLists,
+    usage: *ConnectionUsage,
     scratch_used: *const std.atomic.Value(u64),
     environments: ?*SessionEnvironments,
 };
@@ -89,10 +93,17 @@ pub const Facts = struct {
 /// The Host's answers. `init` copies the shared pointers and the start-time facts once. `execution` answers the
 /// Execution facts of a report, the capacity of Host info and the MCP lists a request asks for; `lists` holds the
 /// model lists the execution thread publishes.
+/// The latest reading of each served connection, in served order; a connection nothing was read from has none.
+fn readingsOf(usage: *ConnectionUsage, entries: []const provider_route.Entry, out: *[connection.max_served]?protocol.UsageReading) []const ?protocol.UsageReading {
+    for (entries, 0..) |entry, index| out[index] = usage.get(entry.name);
+    return out[0..entries.len];
+}
+
 pub const Replies = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     lists: *ModelLists,
+    usage: *ConnectionUsage,
     lease: *const platform.StoreLease,
     store: *store_module.Store,
     lifecycle: *Lifecycle,
@@ -120,6 +131,7 @@ pub const Replies = struct {
             .io = shared.io,
             .allocator = shared.allocator,
             .lists = shared.model_lists,
+            .usage = shared.usage,
             .lease = shared.lease,
             .store = shared.store,
             .lifecycle = shared.lifecycle,
@@ -340,6 +352,9 @@ pub const Replies = struct {
 
     noinline fn replyHostInfo(self: *Replies, fd: *Reply) !void {
         if (!self.lifecycle.launchAllowed()) return refuse(fd, 503, .host_unavailable, "dispatch_fenced");
+        const entries = self.served.items();
+        var readings: [connection.max_served]?protocol.UsageReading = undefined;
+        const usage = readingsOf(self.usage, entries, &readings);
         try replyJson(fd, 200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
             .store = self.lease.paths.store_identity.slice(),
             .instance = self.instance,
@@ -349,7 +364,8 @@ pub const Replies = struct {
             .started_at = self.started_at,
             .custody_occupied = self.execution.facts().custody_occupied,
             .paused = self.lifecycle.turnsHeld(),
-            .connections = self.served.items(),
+            .connections = entries,
+            .usage = usage,
             .doublewrite = self.store.admissionDiagnostic().doublewrite,
             .settings_digest = self.settings_digest,
         }});
@@ -755,6 +771,21 @@ fn overlayConfiguration(base: *wire_request.Configuration, override: *const wire
     if (override.preferences) |preferences| base.preferences = preferences;
 }
 
+test "CM-67 host info reads each served connection's usage by its name, in served order" {
+    var usage: ConnectionUsage = .init(std.testing.io);
+    const week: @import("provider.zig").AllowanceWindow = .{ .used = .{ .value = 7 }, .minutes = .{ .value = 10080 } };
+    const work = connection.Name.parse("work").?;
+    usage.record(.{ .binding = std.mem.zeroes(@FieldType(@import("provider.zig").AllowanceObservation, "binding")), .provider = work, .status = 200, .observed_at = 9, .primary = week, .secondary = .{} });
+    var served: provider_route.Served = .{};
+    try served.put(.{ .name = connection.Name.parse("codex").?, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .codec = .@"openai-responses/3", .web_search = true });
+    try served.put(.{ .name = work, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true });
+    var out: [connection.max_served]?protocol.UsageReading = undefined;
+    const readings = readingsOf(&usage, served.items(), &out);
+    try std.testing.expectEqual(@as(usize, 2), readings.len);
+    try std.testing.expectEqual(@as(?protocol.UsageReading, null), readings[0]);
+    try std.testing.expectEqual(@as(u64, 9), readings[1].?.observed_at);
+}
+
 test "preset overlay retains or replaces the whole preferences object" {
     var base: wire_request.Configuration = .{ .preferences = .{} };
     base.preferences.?.reasoning_effort.state = .value;
@@ -777,6 +808,7 @@ pub const testing_parts = if (builtin.is_test) struct {
             .probes = host.probes,
             .retention = host.retention,
             .model_lists = &host.model_lists,
+            .usage = &host.usage,
             .scratch_used = &host.scratch_used,
             .environments = host.environments,
         };
