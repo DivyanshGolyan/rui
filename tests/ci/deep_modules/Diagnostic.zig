@@ -10,6 +10,7 @@ pub const Lint = enum {
     tangle,
     @"field-leak",
     @"hand-set-flag",
+    @"scattered-transition",
     @"shallow-module",
 
     /// The name written in reports and in the allow file.
