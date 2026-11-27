@@ -1783,7 +1783,7 @@ fn memoryValue(raw: *anyopaque) ?view.Memory {
 fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
     const self: *Self = @ptrCast(@alignCast(raw));
     const state = &self.state;
-    return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady() };
+    return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady(), .limited = if (state.host) |host| host.limited else .{} };
 }
 
 fn configureKeys(raw: *anyopaque, out_keys: *[view.max_requests]@import("configure_outcome.zig").Original) usize {
@@ -2026,7 +2026,7 @@ fn startHost(self: *Self) HostLaunch {
 fn hostFacts(self: *Self) HostRead {
     const observation: HostObservation = switch (client.hostStatus(self.init.io, self.options.store)) {
         .ready => |host| .{ .ready = .{
-            .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied, .served = servedNames(host.capabilities.connections) },
+            .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied, .served = servedNames(host.capabilities.connections), .limited = @import("connection_limits.zig").limitedNames(host.capabilities.connections.slice(), @intCast(@max(std.Io.Clock.real.now(self.init.io).toSeconds(), 0))) },
             .paused = host.paused,
         } },
         .unavailable => .{ .stopped = platform.StoreLease.lastStop(self.init.io, self.options.store) },
