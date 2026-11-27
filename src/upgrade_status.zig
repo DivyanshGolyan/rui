@@ -237,7 +237,7 @@ test "a run's line: the check, what the restart will do, each step, and a stop" 
     }
 }
 
-test "how a run ended: a notice, or held until another Upgrade when the client cannot go on" {
+test "SH-183 how a run ended: a notice, or held until another Upgrade when the client cannot go on" {
     const v: Version = .{ .schema = 60, .patch = 1 };
     for ([_]struct { Ended, []const u8, Tone, Lasts }{
         .{ .{ .up_to_date = .{ .schema = 59, .patch = 7 } }, "Rui is up to date (0.59.7)", .normal, .notice },
@@ -360,7 +360,7 @@ test "Upgrade settings field reports state without shell instructions" {
     }
 }
 
-test "relaunch ending removes old-client restart instructions only in the new client" {
+test "SH-183 relaunch ending removes old-client restart instructions only in the new client" {
     var buffer: [max_line_bytes]u8 = undefined;
     const incompatible: Run = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } };
     try std.testing.expectEqualStrings("Upgraded to 0.60.0", relaunchLine(incompatible, &buffer, .unicode));
@@ -369,7 +369,7 @@ test "relaunch ending removes old-client restart instructions only in the new cl
     try std.testing.expectEqualStrings("Upgraded to 0.60.0 · Host restarted", relaunchLine(compatible, &buffer, .unicode));
 }
 
-test "relaunch ending preserves every failure reason without a success line" {
+test "SH-183 relaunch ending preserves every failure reason without a success line" {
     var buffer: [max_line_bytes]u8 = undefined;
     inline for (std.enums.values(Failure)) |failure| {
         const run: Run = .{ .ended = .{ .how = .{ .failed = failure }, .outcome = .unchanged } };

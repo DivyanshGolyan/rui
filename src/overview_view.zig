@@ -2656,7 +2656,7 @@ fn pendingRow(state: *State, input: Listed) error{OutOfMemory}!Row {
         .subtree_state_change_at = listed.subtree_state_change_at,
         .descendant_count = listed.descendant_count,
         .descendant_needs_you_count = listed.descendant_needs_you_count,
-        .list_needs_you = session_work.standing(listed.state) == .needs_you,
+        .list_needs_you = session_work.standing(listed.state, listed.actions.decide != null) == .needs_you,
         .workspace = try state.intern(listed.workspace),
         .provider = listed.provider,
         .model = bounded(model_capability.max_model_bytes, listed.model),
@@ -4215,7 +4215,7 @@ const TestSession = struct {
 };
 
 fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
-    const standing = session_work.standing(state.asOf(test_now_s * 1000));
+    const standing = session_work.standing(state.asOf(test_now_s * 1000), false);
     return .{
         .reference = ref.*,
         .creator = options.creator,
@@ -4249,7 +4249,7 @@ fn fixtureWork(value: session_work.Work) session_work.Work {
         .pending, .working, .retrying, .bash, .approval => true,
         else => false,
     };
-    work.actions.decide = if (session_work.standing(work.state) == .needs_you) work.first_action orelse 1 else null;
+    work.actions.decide = if (session_work.standing(work.state, false) == .needs_you) work.first_action orelse 1 else null;
     return work;
 }
 
@@ -4887,6 +4887,21 @@ fn creatorClockCase() !void {
     b.state = .{ .bash = .{ .since = test_now_s - 1, .call = 1, .description = null, .running = 1, .approvals = 0 } };
     _ = try refresh(&state, .changed, testToken(2), &.{b});
     try expectOrder(&state, &.{ "A", "B" });
+}
+
+test "SUI-169 a decision waiting on a Session that is not in an approval state counts as needing the person in every overview reader" {
+    var waiting = session("a1b2c3", .{ .finished = ago(5) }, .{ .label = "Waiting" });
+    waiting.actions.decide = 7;
+    const quiet = session("b4n8wd", .{ .finished = ago(5) }, .{ .label = "Done" });
+    var state = try opened(&.{ waiting, quiet });
+    defer state.deinit();
+    const row = state.find("a1b2c3".*).?;
+    // The folded-parent count reads the same rule as the Store's roll-up, at list time.
+    try std.testing.expect(row.list_needs_you);
+    try std.testing.expect(!state.find("b4n8wd".*).?.list_needs_you);
+    try std.testing.expectEqual(session_work.Standing.needs_you, classOf(&state, row).standing);
+    try std.testing.expectEqual(session_work.Standing.done, classOf(&state, state.find("b4n8wd".*).?).standing);
+    try std.testing.expectEqual(@as(usize, 1), state.summary.counts.needs_you);
 }
 
 fn creatorAttentionCase() !void {
@@ -7130,7 +7145,7 @@ test "an Archived window row has no mark: its name and age show, and no count re
     // The age is the stop time, and the failed row is not counted: Archived rows are never counted.
     try std.testing.expectEqual(Counts{}, state.summary.counts);
     try std.testing.expectEqual(WorkState.stopped, std.meta.activeTag(state.find("w00010".*).?.state));
-    try std.testing.expect(session_work.standing(state.find("w00009".*).?.state) == .failed);
+    try std.testing.expect(session_work.standing(state.find("w00009".*).?.state, false) == .failed);
 }
 
 test "archived window scrolls back up after trimming and reads the rows above with an above cursor" {
@@ -8046,7 +8061,7 @@ fn projectionCase1() !void {
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Superseded").? < std.mem.indexOf(u8, text, "Genuine").?);
     const row = state.find("asking".*).?;
-    try std.testing.expectEqual(session_work.Standing.needs_you, session_work.standing(row.state));
+    try std.testing.expectEqual(session_work.Standing.needs_you, session_work.standing(row.state, false));
     state.selected = .{ .session = row.reference };
     try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .{ .action = .stop } } }));
     try std.testing.expect(!conversation(&state, row.reference, row.actions.stop).stoppable);

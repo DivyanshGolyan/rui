@@ -5577,7 +5577,7 @@ test "SUI-4 late activity inspection cannot cover Settings Keys" {
             const shown = try text(held);
             errdefer std.debug.print("Keys frame:\n{s}\n", .{shown});
             try std.testing.expect(held.root.input.layer.settingsOpen());
-            try std.testing.expect(held.root.settings_page.keys_open);
+            try std.testing.expect(held.root.settings_page.reference_open);
             try std.testing.expect(!held.self.info_open);
             try std.testing.expect(std.mem.indexOf(u8, shown, "earlier message") != null);
             // The shared Keys row legitimately says "open chat · info actions".
