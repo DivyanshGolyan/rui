@@ -113,7 +113,7 @@ pub fn select(self: *Self, row: Row) void {
     self.panel.selected = @backingInt(row);
 }
 
-const unavailable_rows = [_]Panel.Field{.{ .label = "Connections", .value = "unavailable: the Host cannot be read" }};
+const unavailable_rows = [_]Panel.Field{.{ .label = "", .value = "unavailable: the Host cannot be read" }};
 
 pub fn refresh(self: *Self) !void {
     try self.readValues();
