@@ -105,7 +105,7 @@ pub const AllowanceObservation = struct {
     status: u16,
     observed_at: i64,
     /// The monotonic clock when the final head arrived; it orders readings of one connection, which `observed_at` (Unix seconds) cannot.
-    seen: i96 = 0,
+    seen: i64 = 0,
     primary: AllowanceWindow = .{},
     secondary: AllowanceWindow = .{},
 
@@ -500,7 +500,7 @@ pub const Reactor = struct {
                         .provider = source.provider,
                         .status = head.status,
                         .observed_at = now_seconds,
-                        .seen = std.Io.Clock.awake.now(self.io).nanoseconds,
+                        .seen = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds),
                     };
                     for (head.fields) |field| snapshot.field(transfer.observe, field.name, field.value);
                     transfer.allowance = snapshot;

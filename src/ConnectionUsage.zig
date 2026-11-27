@@ -19,7 +19,7 @@ io: std.Io,
 mutex: std.Io.Mutex = .init,
 latest: connection_names.NameArray(Kept) = .{},
 
-const Kept = struct { reading: Reading, seen: i96 };
+const Kept = struct { reading: Reading, seen: i64 };
 
 pub fn init(io: std.Io) Self {
     return .{ .io = io };
@@ -62,7 +62,7 @@ pub fn get(self: *Self, name: connection.Name) ?Reading {
     return (self.latest.get(name) orelse return null).reading;
 }
 
-fn observed(name: []const u8, at: i64, seen: i96, primary: provider.AllowanceWindow, secondary: provider.AllowanceWindow) provider.AllowanceObservation {
+fn observed(name: []const u8, at: i64, seen: i64, primary: provider.AllowanceWindow, secondary: provider.AllowanceWindow) provider.AllowanceObservation {
     return .{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = connection.Name.parse(name).?, .status = 200, .observed_at = at, .seen = seen, .primary = primary, .secondary = secondary };
 }
 
