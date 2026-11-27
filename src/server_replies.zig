@@ -614,15 +614,6 @@ pub const Replies = struct {
         try replyJson(fd, 200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{ self.instance, rows[0..count] });
     }
 
-    fn deliverActivityContent(self: *Replies, fd: std.posix.fd_t, request: @FieldType(wire_request.Request, "activity_content")) !void {
-        var command = request;
-        var reply: Reply = undefined;
-        reply.init(self.io, self.allocator, null);
-        defer reply.deinit();
-        try Replies.replyActivityContent(self, &reply, &command);
-        sendReply(self.io, fd, &reply) catch |err| self.fenceIfStoreFailed("public content", err);
-    }
-
     fn deliverPublicContent(self: *Replies, fd: *Reply, location: store_module.ContentLocation, start: u64, stream: bool) !void {
         _ = fd.start(.{ .content = .{ .location = location, .start = start, .stream = stream, .public = true } }, .{}) catch |err| {
             self.lifecycle.fenceDispatch("public content", err);
@@ -864,7 +855,16 @@ fn replyJsonGrowing(fd: *Reply, status: u16, max_bytes: usize, comptime render: 
     _ = try fd.start(try Answer.json(server_reply.allocatorOf(fd), status, max_bytes, .growing, render, args), .{});
 }
 
-test "Activity content stream native delivery reads each byte once and closes on failed handoff" {
+fn deliverActivityContentForTesting(replies: *Replies, fd: std.posix.fd_t, request: @FieldType(wire_request.Request, "activity_content")) !void {
+    var command = request;
+    var reply: Reply = undefined;
+    reply.init(replies.io, replies.allocator, null);
+    defer reply.deinit();
+    try Replies.replyActivityContent(replies, &reply, &command);
+    sendReply(replies.io, fd, &reply) catch |err| replies.fenceIfStoreFailed("public content", err);
+}
+
+test "INS-5 activity content stream native delivery reads each byte once and closes on failed handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -946,7 +946,7 @@ test "Activity content stream native delivery reads each byte once and closes on
             thread.join();
         }
         var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
-        try Replies.deliverActivityContent(&replies, sockets[0], command);
+        try deliverActivityContentForTesting(&replies, sockets[0], command);
     }
     try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
@@ -956,7 +956,7 @@ test "Activity content stream native delivery reads each byte once and closes on
     try std.testing.expectEqualStrings(expected, peer.received[body_start..peer.used]);
     storage.testing_content_work = .{};
     var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
-    try Replies.deliverActivityContent(&replies, -1, command);
+    try deliverActivityContentForTesting(&replies, -1, command);
     try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());
