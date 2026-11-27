@@ -83,7 +83,7 @@ fn writeAge(out: *std.Io.Writer, seconds: u64) std.Io.Writer.Error!void {
     try out.writeAll(" ago");
 }
 
-fn fact(name: []const u8, label: []const u8, route: protocol.Route, usage: ?protocol.UsageReading) protocol.ConnectionFact {
+fn served(name: []const u8, label: []const u8, route: protocol.Route, usage: ?protocol.UsageReading) protocol.ConnectionFact {
     return .{ .name = connection.Name.parse(name).?, .label = @import("provider_route.zig").Label.parse(label).?, .route = route, .usage = usage };
 }
 
@@ -93,10 +93,10 @@ test "SUI-182 the Connections reference names each window by its length and says
     const full: protocol.UsageWindow = .{ .used_percent = 100, .minutes = 300, .reset_at = now + 7 * 60 };
     const odd: protocol.UsageWindow = .{ .used_percent = 3, .minutes = 90, .reset_at = null };
     const facts = [_]protocol.ConnectionFact{
-        fact("work", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now - 12 * 60, .primary = week, .secondary = full }),
-        fact("home", "ChatGPT", .chatgpt_plan, null),
-        fact("lab", "ChatGPT (device code)", .chatgpt_device, null),
-        fact("odd", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now - 5, .primary = odd, .secondary = null }),
+        served("work", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now - 12 * 60, .primary = week, .secondary = full }),
+        served("home", "ChatGPT", .chatgpt_plan, null),
+        served("lab", "ChatGPT (device code)", .chatgpt_device, null),
+        served("odd", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now - 5, .primary = odd, .secondary = null }),
     };
     var rows: Rows = .{};
     const shown = build(&rows, &facts, now);
