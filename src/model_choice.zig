@@ -294,7 +294,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const targets = try ctx.arena.alloc(Hover.Rect, shown.len);
     for (targets, 0..) |*target, y| target.* = .{ .row = @intCast(y), .width = size.width };
     self.hover.targets = targets;
-    const limited = if (self.source) |source| source.read(source.context).limited else connection_names.NameSet{};
+    // The fallback lists every built-in provider for every model: it says nothing about what the Host serves, so it carries no notes.
+    const limited = if (self.menu == &fallback) connection_names.NameSet{} else if (self.source) |source| source.read(source.context).limited else connection_names.NameSet{};
     for (shown, 0..) |at, y| {
         const entry = self.menu.entries[at];
         const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, RowInset.bounds(size.width).end -| 3, self.props.unicode);
@@ -986,4 +987,14 @@ test "SUI-186 a model on a limited connection says so and names another connecti
         try std.testing.expectEqual(is_limited, std.mem.indexOf(u8, rows[1], "limit reached on work") != null);
         try std.testing.expect(std.mem.indexOf(u8, rows[1], "try") == null);
     };
+    // With no readable model list the fallback entries name no serving facts, so no note and no recommendation.
+    var limits: Limits = .{ .menu = &fallback, .limited = connection_names.NameSet.of(&.{work}) };
+    var choice: Self = .{};
+    choice.openSource(.{ .context = &limits, .read = Limits.read }, work, "");
+    const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} });
+    for (0..4) |y| {
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..drawn.size.width) |x| try text.writer.writeAll(drawn.readCell(@intCast(x), @intCast(y)).char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, text.written(), "limit reached") == null);
+    }
 }
