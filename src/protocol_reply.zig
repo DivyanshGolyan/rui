@@ -4770,17 +4770,13 @@ test "Archived window wire: a slim row reads back with its first Message and raw
 
 test "CM-68 host info carries each connection's latest usage to the client's facts" {
     const host_reply = @import("host_reply.zig");
-    const ConnectionUsage = @import("ConnectionUsage.zig");
-    const provider = @import("provider.zig");
     const codex = connection.Name.parse("codex").?;
     const work = connection.Name.parse("work").?;
     var entries: [2]provider_route.Entry = undefined;
     entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT (device code)").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
     entries[1] = .{ .name = work, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .codec = .@"openai-responses/3", .web_search = true };
-    var usage: ConnectionUsage = .init(std.testing.io);
-    const week: provider.AllowanceWindow = .{ .used = .{ .value = 25.5 }, .minutes = .{ .value = 10080 }, .reset_at = .{ .value = 1796350153 } };
-    usage.record(.{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = codex, .status = 200, .observed_at = 1795745356, .primary = week, .secondary = .{ .used = .{ .value = 100 }, .minutes = .{ .value = 300 } } });
-    const readings = [_]?protocol.UsageReading{ usage.get(codex), usage.get(work) };
+    const week: protocol.UsageWindow = .{ .used_percent = 25.5, .minutes = 10080, .reset_at = 1796350153 };
+    const readings = [_]?protocol.UsageReading{ .{ .observed_at = 1795745356, .primary = week, .secondary = .{ .used_percent = 100, .minutes = 300, .reset_at = null } }, null };
     const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
     var response: protocol.ResponseBuffer = .{};
     try response.render(host_reply.renderHostInfo, .{info});
@@ -4803,13 +4799,10 @@ test "CM-68 host info carries each connection's latest usage to the client's fac
 
 test "CM-68 a host info reply whose usage numbers are not in the Host's own form is refused" {
     const host_reply = @import("host_reply.zig");
-    const provider = @import("provider.zig");
     const codex = connection.Name.parse("codex").?;
     var entries: [1]provider_route.Entry = undefined;
     entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
-    var usage: @import("ConnectionUsage.zig") = .init(std.testing.io);
-    usage.record(.{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = codex, .status = 200, .observed_at = 1795745356, .primary = .{ .used = .{ .value = 25.5 }, .minutes = .{ .value = 10080 }, .reset_at = .{ .value = 1796350153 } }, .secondary = .{} });
-    const readings = [_]?protocol.UsageReading{usage.get(codex)};
+    const readings = [_]?protocol.UsageReading{.{ .observed_at = 1795745356, .primary = .{ .used_percent = 25.5, .minutes = 10080, .reset_at = 1796350153 }, .secondary = null }};
     const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
     var response: protocol.ResponseBuffer = .{};
     try response.render(host_reply.renderHostInfo, .{info});
