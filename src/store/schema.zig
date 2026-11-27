@@ -1509,17 +1509,24 @@ fn canForceMysqlIndex(comptime every: []const Table, comptime all_indexes: []con
 }
 
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
-    return ddlIn(dialect, .strict);
+    return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_ddl else generated.mysql_ddl;
+        @setEvalBranchQuota(objects_quota);
+        var text: []const u8 = "";
+        for (objects(dialect)) |object| text = text ++ object.sql ++ ";\n";
+        const terminated = text ++ "\x00";
+        break :blk terminated[0..text.len :0];
+    };
 }
 
 /// The DDL of one form: `strict` is the schema as it is stored; `plain` leaves out every FOREIGN KEY and CHECK, so a
 /// database team can hold the tables, keys and indexes alone while the Host and `store check` hold the rules.
 pub fn ddlIn(comptime dialect: rsql.Dialect, comptime form: Form) [:0]const u8 {
+    if (form == .strict) return ddl(dialect);
     return comptime blk: {
-        if (form == .strict) if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_ddl else generated.mysql_ddl;
         @setEvalBranchQuota(objects_quota);
         var text: []const u8 = "";
-        for (objectsIn(dialect, form)) |object| text = text ++ object.sql ++ ";\n";
+        for (plainObjects(dialect)) |object| text = text ++ object.sql ++ ";\n";
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
@@ -1566,16 +1573,25 @@ pub const Form = enum { strict, plain };
 pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
-    return objectsIn(dialect, .strict);
+    return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_objects else generated.mysql_objects;
+        @setEvalBranchQuota(objects_quota);
+        const result = renderedObjects(dialect, .strict);
+        break :blk result;
+    };
+}
+
+/// The plain form's objects: no CHECK, no FOREIGN KEY. Rendered at comptime, never served from the statement table.
+pub fn plainObjects(comptime dialect: rsql.Dialect) []const Object {
+    return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        const result = renderedObjects(dialect, .plain);
+        break :blk result;
+    };
 }
 
 pub fn objectsIn(comptime dialect: rsql.Dialect, comptime form: Form) []const Object {
-    return comptime blk: {
-        if (form == .strict) if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_objects else generated.mysql_objects;
-        @setEvalBranchQuota(objects_quota);
-        const result = renderedObjects(dialect, form);
-        break :blk result;
-    };
+    return if (form == .strict) objects(dialect) else plainObjects(dialect);
 }
 
 fn renderedObjects(comptime dialect: rsql.Dialect, comptime form: Form) []const Object {
