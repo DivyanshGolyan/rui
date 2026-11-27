@@ -1453,8 +1453,8 @@ pub fn testingPublicProjection(
 ) !protocol.ConversationContent {
     const session = try configureTestSession(storage, "projection-config");
     try answerTestTurn(storage, tmp, session.slice(), "projection", parts);
-    const page = try store_core.publicConversationPageForTesting(storage, .{ .session = session });
-    try std.testing.expect(page.items[0].kind == .assistant);
+    const page = try store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.assistant) });
+    try std.testing.expect(page.items[0].value == .assistant);
     return .{ .session = session, .position = page.items[0].position };
 }
 
