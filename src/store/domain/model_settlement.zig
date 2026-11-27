@@ -368,10 +368,9 @@ const FailureContent = struct {
         return try content_domain.importBytes(a, value, failure.diagnostic().?);
     }
 
-    fn importReport(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
+    fn importReport(content: *FailureContent, a: anytype, bytes: []const u8) !?u64 {
         const value = if (content.report) |*value| value else return null;
-        var out: [outcome_code.max_report_bytes]u8 = undefined;
-        return try content_domain.importBytes(a, value, failure.report().joined(&out));
+        return try content_domain.importBytes(a, value, bytes);
     }
 };
 
@@ -398,6 +397,12 @@ pub const SettleFailure = struct {
     facts: attempt_facts.Result = undefined,
     content: FailureContent = .{ .diagnostic = null, .report = null },
     reads: union { source: refused_effort_source.Result, floor: *history_floor_domain.FloorSearch, context: context_changed.Result } = undefined,
+    /// The report as one line. Queued statements read it in place, so it lives as long as the settlement.
+    report_line: [outcome_code.max_report_bytes]u8 = undefined,
+
+    fn reportBytes(t: *SettleFailure) []const u8 {
+        return t.input.failure.report().joined(&t.report_line);
+    }
 
     fn disposition(t: *const SettleFailure) ModelFailureClass {
         if (t.input.disposition.* != .effort_change_refused) return t.input.disposition.*;
@@ -423,8 +428,7 @@ pub const SettleFailure = struct {
                     t.exhausted_refusal = revision;
                     return t.queueFacts(r);
                 }
-                var out: [outcome_code.max_report_bytes]u8 = undefined;
-                try queueEffortRefusal(r, row.session, revision, binding.operation_id, failure.report().joined(&out));
+                try queueEffortRefusal(r, row.session, revision, binding.operation_id, t.reportBytes());
                 schedule_retry.queue(r, .{
                     .operation_id = binding.operation_id,
                     .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(t.input.io))),
@@ -502,7 +506,7 @@ pub const SettleFailure = struct {
                 } else {
                     if (!row.turn_open) return error.StaleAttemptBinding;
                     if (t.content.report != null and faults.content_import) return error.InjectedContentImportFailure;
-                    const report = try t.content.importReport(r, failure);
+                    const report = try t.content.importReport(r, t.reportBytes());
                     const outcome: TurnOutcome = if (overflow) .{ .resource_exceeded = optionalId(report) } else .{ .failed = .{
                         .code = code,
                         .report = optionalId(report),
@@ -544,15 +548,12 @@ pub const SettleFailure = struct {
                     });
                     if (!row.turn_open) return error.StaleAttemptBinding;
                     if (t.content.report != null and faults.content_import) return error.InjectedContentImportFailure;
-                    const report = try t.content.importReport(r, failure);
+                    const report = try t.content.importReport(r, t.reportBytes());
                     try turn_domain.queueCloseOr(r, try r.positions(session), binding.turn_id, .{ .retry_exhausted = optionalId(report) }, error.StaleAttemptBinding);
                 },
             },
         }
-        if (t.exhausted_refusal) |revision| {
-            var out: [outcome_code.max_report_bytes]u8 = undefined;
-            try queueEffortRefusal(r, session, revision, binding.operation_id, failure.report().joined(&out));
-        }
+        if (t.exhausted_refusal) |revision| try queueEffortRefusal(r, session, revision, binding.operation_id, t.reportBytes());
         if (faults.before_commit) return error.InjectedCommitFailure;
         return .commit;
     }

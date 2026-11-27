@@ -2961,7 +2961,7 @@ noinline fn rejectContradictoryOutput(
     var detail: [512]u8 = undefined;
     const diagnostic = rejection.format(err, &detail);
     retainFailedResponse(run, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
-    saveImmediateFailure(run, answered.owner.binding, answered.rejection("contradictory_provider_output", diagnostic, ""), .ordinary);
+    saveImmediateFailure(run, answered.owner.binding, answered.rejection("contradictory_provider_output", diagnostic, .empty), .ordinary);
 }
 
 fn advanceRetainedCleanup(
