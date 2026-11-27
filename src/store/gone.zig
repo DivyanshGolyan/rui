@@ -58,8 +58,8 @@ test "SH-188 every reference of the schema has an outcome for a gone target and 
         }
     };
     try std.testing.expectEqual(total, decided[0] + decided[1] + decided[2] + undecided().len);
-    // Links: session_forward names two Sessions and session_stop_owed names one.
-    try std.testing.expectEqual(@as(usize, 3), decided[1]);
+    // Links: session_forward names two Sessions (target_ref, child_ref) and session_stop_owed two (child_ref, cause_ref).
+    try std.testing.expectEqual(@as(usize, 4), decided[1]);
     // Lower this number when a reference is decided; raising it is a new undecided reference.
     try std.testing.expect(undecided().len <= undecided_ceiling);
 }
