@@ -100,15 +100,17 @@ fn writeName(out: *std.Io.Writer, minutes: u64) std.Io.Writer.Error!void {
     return out.print("{d}-minute", .{minutes});
 }
 
-/// The two largest whole units of a span: `3 d 4 h`, `2 h 5 m`, `7 m`; a span under a minute reads `under a minute`.
+/// The two largest whole units of a span: `3 d 4 h`, `2 h 5 m`, `7 m`; a span under a minute reads `< 1 m` and one of 1000 days or more `over 999 d`,
+/// so the longest span still fits the row of the longest window name in the narrowest dialog.
 fn writeSpan(out: *std.Io.Writer, seconds: u64) std.Io.Writer.Error!void {
     const days = seconds / 86400;
     const hours = seconds % 86400 / 3600;
     const minutes = seconds % 3600 / 60;
+    if (days >= 1000) return out.writeAll("over 999 d");
     if (days > 0) return out.print("{d} d {d} h", .{ days, hours });
     if (hours > 0) return out.print("{d} h {d} m", .{ hours, minutes });
     if (minutes > 0) return out.print("{d} m", .{minutes});
-    try out.writeAll("under a minute");
+    try out.writeAll("< 1 m");
 }
 
 fn writeAge(out: *std.Io.Writer, seconds: u64) std.Io.Writer.Error!void {
@@ -189,4 +191,21 @@ test "SUI-183 every Connections row fits the narrowest dialog for the longest na
             try std.testing.expect(1 + field.label.len + (if (field.label.len > 0 and field.value.len > 0) @as(usize, 3) else 0) + cells <= width);
         }
     }
+}
+
+test "SUI-183 a reset row fits the narrowest dialog for every window name against every reset span" {
+    const now: u64 = 1_800_000_000;
+    const lengths = [_]u64{ 300, 10080, 90, 999 * 1440 - 1, 999 * 1440, std.math.maxInt(u64) };
+    const resets = [_]?u64{ null, 0, now - 5, now, now + 59, now + 3600, now + 99 * 86400 + 23 * 3600, now + 5000 * 86400, std.math.maxInt(u64) };
+    var rows: Rows = .{};
+    for (lengths) |minutes| for (resets) |reset_at| for ([_]bool{ true, false }) |unicode| {
+        const window: protocol.UsageWindow = .{ .used_percent = 100, .minutes = minutes, .reset_at = reset_at };
+        const facts = [_]protocol.ConnectionFact{served("abcdefghijklmnop", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now, .primary = window, .secondary = window })};
+        for (rows.build(&facts, now, unicode)) |field| {
+            var cells: usize = 0;
+            var each = std.unicode.Utf8View.initUnchecked(field.value).iterator();
+            while (each.nextCodepoint()) |_| cells += 1;
+            try std.testing.expect(1 + field.label.len + (if (field.label.len > 0 and field.value.len > 0) @as(usize, 3) else 0) + cells <= 40);
+        }
+    };
 }
