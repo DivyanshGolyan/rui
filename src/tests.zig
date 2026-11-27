@@ -57,7 +57,6 @@ test {
     _ = @import("FactsRow.zig");
     _ = @import("ActivityBlock.zig");
     _ = @import("keys_panel.zig");
-    _ = @import("connection_limits.zig");
     _ = @import("connections_panel.zig");
     _ = @import("SessionChrome.zig");
     _ = @import("TerminalApp.zig");
