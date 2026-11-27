@@ -20,7 +20,7 @@ const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
 const testingBytesContent = shared_fixtures.testingBytesContent;
 const testingContent = shared_fixtures.testingContent;
 
-test "public conversation owner fixes end, filters settings and bounds content" {
+test "INS-4 conversation rows hold a fixed end, leave out settings and continue by cursor" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -130,7 +130,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     }.run);
 }
 
-test "private-only model output never becomes public conversation" {
+test "INS-4 private-only model output never becomes a conversation row" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -182,7 +182,7 @@ test "private-only model output never becomes public conversation" {
     }.run);
 }
 
-test "public tool-result cursor crosses a completed group boundary" {
+test "INS-4 a tool-result cursor crosses a completed group boundary" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

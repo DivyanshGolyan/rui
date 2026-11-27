@@ -127,21 +127,21 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
 }
 
-test "public ordinary private bytes and cursor fence" {
+test "INS-4 a private user row fences its bytes and cursor" {
     try testingOrdinaryPublicCorruption(.content, false);
     try testingOrdinaryPublicCorruption(.cursor, false);
 }
 
-test "public ordinary private page fences" {
+test "INS-4 a private user row fences its page" {
     try testingOrdinaryPublicCorruption(.page, false);
 }
 
-test "public foreign Turn bytes and cursor fence" {
+test "INS-4 a foreign Turn's user row fences its bytes and cursor" {
     try testingOrdinaryPublicCorruption(.content, true);
     try testingOrdinaryPublicCorruption(.cursor, true);
 }
 
-test "public foreign Turn page fences" {
+test "INS-4 a foreign Turn's user row fences its page" {
     try testingOrdinaryPublicCorruption(.page, true);
 }
 
@@ -208,21 +208,21 @@ test "public private tool bytes fence" {
     try testingToolPublicCorruption(.content, .private, false);
 }
 
-test "public private tool page fences" {
+test "INS-4 a private tool result fences its page" {
     try testingToolPublicCorruption(.page, .private, false);
 }
 
-test "public private tool cursor fences" {
+test "INS-4 a private tool result fences its cursor" {
     try testingToolPublicCorruption(.cursor, .private, false);
 }
 
-test "public completed tool group with missing exposed content fences" {
+test "INS-4 a completed tool group with missing content fences" {
     try testingToolPublicCorruption(.page, .missing, false);
     try testingToolPublicCorruption(.content, .missing, false);
     try testingToolPublicCorruption(.cursor, .missing, false);
 }
 
-test "public completed tool group with corrupt sibling provenance fences" {
+test "INS-4 a completed tool group with corrupt sibling provenance fences" {
     for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
         try testingToolPublicCorruption(route, .sibling_ordinal, true);
         try testingToolPublicCorruption(route, .sibling_call_id, true);
@@ -232,7 +232,7 @@ test "public completed tool group with corrupt sibling provenance fences" {
     }
 }
 
-test "public completed Action sibling corruption fences first Conversation read" {
+test "INS-4 a completed Action sibling's corruption fences the first conversation read" {
     const faults = [_][:0]const u8{
         "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0",
         "UPDATE model_tool_call SET call_id_content_id=(SELECT name_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
@@ -288,7 +288,7 @@ test "public completed Action sibling corruption fences first Conversation read"
     }
 }
 
-test "public assistant message provenance binds the exact accepted item" {
+test "INS-4 an assistant row's provenance binds the exact accepted item" {
     const faults = [_][:0]const u8{
         "DELETE FROM conversation_entry WHERE entry_kind=3",
         "UPDATE conversation_entry SET source_item_ordinal=source_item_ordinal+1 WHERE entry_kind=3",
@@ -339,7 +339,7 @@ test "public assistant message provenance binds the exact accepted item" {
     }
 }
 
-test "missing assistant certificates respect page windows and fixed ends" {
+test "INS-4 missing assistant certificates respect page windows and fixed ends" {
     for ([_]bool{ false, true }) |activity| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
