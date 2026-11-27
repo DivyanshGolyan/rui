@@ -215,3 +215,33 @@ test "the report of a field two modules write, with its arms and the fields it k
     ;
     try testing.expectEqualStrings(want, out.written());
 }
+
+const inner_text = "pub const Inner = struct {\n    n: u8,\n    pub fn peek(self: *const Inner) u8 {\n        return self.n;\n    }\n    pub fn value(self: Inner) u8 {\n        return self.n;\n    }\n    pub fn bump(self: *Inner) void {\n        self.n += 1;\n    }\n};\npub const Q = struct {\n    inner: Inner,\n    head: u8,\n    pub fn full(self: *Q) u8 {\n        self.head += 1;\n        return self.head;\n    }\n};\n";
+
+fn callKeys(arena: Allocator, user_body: []const u8) ![]const []const u8 {
+    return keysOf(arena, &.{
+        .{ .path = "src/main.zig", .text = main_text },
+        .{ .path = "src/q.zig", .text = inner_text },
+        .{ .path = "src/user.zig", .text = user_body },
+    });
+}
+
+test "a call of a method that takes its receiver by value or const pointer is a read, one that takes a pointer is a leak" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqual(@as(usize, 0), (try callKeys(a, "const q = @import(\"q.zig\");\npub fn look(x: *q.Q) u8 {\n    return x.inner.peek();\n}\n")).len);
+    try testing.expectEqual(@as(usize, 0), (try callKeys(a, "const q = @import(\"q.zig\");\npub fn look(x: *q.Q) u8 {\n    return x.inner.value();\n}\n")).len);
+    try expectKeys(&.{"q.Q.inner"}, try callKeys(a, "const q = @import(\"q.zig\");\npub fn poke(x: *q.Q) void {\n    x.inner.bump();\n}\n"));
+}
+
+test "a call of a method the lint cannot resolve is a leak as before" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const keys = try keysOf(arena.allocator(), &.{
+        .{ .path = "src/main.zig", .text = main_text },
+        .{ .path = "src/q.zig", .text = "pub const Q = struct {\n    items: std.ArrayList(u8),\n    head: u8,\n    pub fn full(self: *Q) u8 {\n        self.head += 1;\n        return self.head;\n    }\n};\nconst std = @import(\"std\");\n" },
+        .{ .path = "src/user.zig", .text = "const q = @import(\"q.zig\");\npub fn look(x: *q.Q) usize {\n    return x.items.getLastOrNull().?;\n}\n" },
+    });
+    try expectKeys(&.{"q.Q.items"}, keys);
+}

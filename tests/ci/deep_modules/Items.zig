@@ -1,6 +1,6 @@
 //! Declarations of the reached files (deep-modules U4): types, namespaces,
 //! functions, constants, struct fields and aliases, with the facts a lint reads
-//! from the syntax alone: `takes_self` and field plainness. Test declarations
+//! from the syntax alone: the receiver mode and field plainness. Test declarations
 //! are skipped.
 
 const std = @import("std");
@@ -25,8 +25,8 @@ pub const Item = struct {
     /// The enclosing container item; null for a file's own item.
     parent: ?ItemId,
     home: NodeId,
-    /// A function whose first parameter names the enclosing type.
-    takes_self: bool,
+    /// A function whose first parameter names the enclosing type: how it takes it.
+    receiver: Receiver,
     /// A field of type void, u0 or an empty struct.
     holds_nothing: bool,
     plain: Plain,
@@ -34,6 +34,15 @@ pub const Item = struct {
     type_expr: ?Ast.Node.Index,
     /// Aliases: the initializer.
     alias_of: ?Ast.Node.Index,
+
+    pub fn takesSelf(self: Item) bool {
+        return self.receiver != .none;
+    }
+
+    /// Whether a call of this function cannot change what it is called on.
+    pub fn readsReceiver(self: Item) bool {
+        return self.receiver == .value or self.receiver == .const_pointer;
+    }
 };
 
 pub const Items = struct {
@@ -69,7 +78,7 @@ pub fn collect(arena: Allocator, sources: *const Sources) Allocator.Error!Items 
     for (list) |*item| {
         if (item.kind != .function) continue;
         const owner = item.parent orelse continue;
-        item.takes_self = takesSelf(&sources.files[@backingInt(item.file)].ast, &items, owner, item.decl);
+        item.receiver = receiverOf(&sources.files[@backingInt(item.file)].ast, &items, owner, item.decl);
     }
     return items;
 }
@@ -104,7 +113,7 @@ const Walker = struct {
     }
 
     fn base(ctx: Ctx, kind: Kind, name: []const u8, decl: Ast.Node.Index, parent: ?ItemId) Item {
-        return .{ .kind = kind, .name = name, .file = ctx.file, .decl = decl, .parent = parent, .home = ctx.home, .takes_self = false, .holds_nothing = false, .plain = .no, .type_expr = null, .alias_of = null };
+        return .{ .kind = kind, .name = name, .file = ctx.file, .decl = decl, .parent = parent, .home = ctx.home, .receiver = .none, .holds_nothing = false, .plain = .no, .type_expr = null, .alias_of = null };
     }
 
     /// A container item, then its members. `decl` is the declaring node; `node` the container itself.
@@ -180,27 +189,32 @@ fn isSelfName(ast: *const Ast, node: Ast.Node.Index, name: []const u8) bool {
     return ast.nodeTag(node) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(node)), name);
 }
 
+/// How a method takes its `self`. A `value` or `const_pointer` receiver cannot change what it is called on.
+pub const Receiver = enum { none, value, const_pointer, pointer };
+
 /// The first parameter's type, after one pointer, names the enclosing type `owner`.
-fn takesSelf(ast: *const Ast, items: *const Items, owner_id: ItemId, decl: Ast.Node.Index) bool {
+fn receiverOf(ast: *const Ast, items: *const Items, owner_id: ItemId, decl: Ast.Node.Index) Receiver {
     var buffer: [1]Ast.Node.Index = undefined;
-    const proto = ast.fullFnProto(&buffer, syntax.protoNode(ast, decl)) orelse return false;
+    const proto = ast.fullFnProto(&buffer, syntax.protoNode(ast, decl)) orelse return .none;
     var params = proto.iterate(ast);
-    const first = params.next() orelse return false;
-    const type_node = first.type_expr orelse return false;
+    const first = params.next() orelse return .none;
+    const type_node = first.type_expr orelse return .none;
     const owner = items.get(owner_id).*;
     var target = type_node;
+    var mode: Receiver = .value;
     if (ast.fullPtrType(type_node)) |pointer| {
-        if (pointer.size != .one) return false;
+        if (pointer.size != .one) return .none;
         target = pointer.ast.child_type;
+        mode = if (pointer.const_token != null) .const_pointer else .pointer;
     }
-    if (syntax.isBuiltinNamed(ast, target, "@This")) return true;
-    if (ast.nodeTag(target) != .identifier) return false;
-    if (std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(target)), owner.name)) return true;
-    const alias_id = lookup(items, owner_id, ast.tokenSlice(ast.nodeMainToken(target))) orelse return false;
+    if (syntax.isBuiltinNamed(ast, target, "@This")) return mode;
+    if (ast.nodeTag(target) != .identifier) return .none;
+    if (std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(target)), owner.name)) return mode;
+    const alias_id = lookup(items, owner_id, ast.tokenSlice(ast.nodeMainToken(target))) orelse return .none;
     const alias = items.get(alias_id).*;
-    if (alias.kind != .alias) return false;
-    const value = alias.alias_of orelse return false;
-    return syntax.isBuiltinNamed(ast, value, "@This") or isSelfName(ast, value, owner.name);
+    if (alias.kind != .alias) return .none;
+    const value = alias.alias_of orelse return .none;
+    return if (syntax.isBuiltinNamed(ast, value, "@This") or isSelfName(ast, value, owner.name)) mode else .none;
 }
 
 const testing = std.testing;
@@ -248,7 +262,7 @@ const thing_source =
 
 const pair_source = "a: u8,\nb: u8,\npub fn sum(self: Pair) u8 {\n    return self.a + self.b;\n}\n";
 
-const Row = struct { path: []const u8, kind: Kind, plain: Plain = .no, takes_self: bool = false, holds_nothing: bool = false };
+const Row = struct { path: []const u8, kind: Kind, plain: Plain = .no, receiver: Receiver = .none, holds_nothing: bool = false };
 
 const thing_rows = [_]Row{
     .{ .path = "std", .kind = .alias },
@@ -274,16 +288,16 @@ const thing_rows = [_]Row{
     .{ .path = "Holder.empty", .kind = .field, .plain = .nothing, .holds_nothing = true },
     .{ .path = "Holder.Kind", .kind = .type },
     .{ .path = "Holder.make", .kind = .function },
-    .{ .path = "Holder.get", .kind = .function, .takes_self = true },
-    .{ .path = "Holder.owned", .kind = .function, .takes_self = true },
-    .{ .path = "Holder.viaThis", .kind = .function, .takes_self = true },
+    .{ .path = "Holder.get", .kind = .function, .receiver = .const_pointer },
+    .{ .path = "Holder.owned", .kind = .function, .receiver = .value },
+    .{ .path = "Holder.viaThis", .kind = .function, .receiver = .pointer },
     .{ .path = "Holder.other", .kind = .function },
     .{ .path = "ns", .kind = .namespace },
     .{ .path = "ns.helper", .kind = .function },
     .{ .path = "Ring", .kind = .type },
     .{ .path = "Ring.item", .kind = .field },
     .{ .path = "Ring.len", .kind = .field, .plain = .scalar },
-    .{ .path = "Ring.push", .kind = .function, .takes_self = true },
+    .{ .path = "Ring.push", .kind = .function, .receiver = .pointer },
 };
 
 fn itemAt(items: *const Items, file: ItemId, dotted: []const u8) ItemId {
@@ -298,7 +312,7 @@ fn expectRow(items: *const Items, file: ItemId, row: Row) !void {
     errdefer std.debug.print("row: {s}\n", .{row.path});
     try testing.expectEqual(row.kind, item.kind);
     try testing.expectEqual(row.plain, item.plain);
-    try testing.expectEqual(row.takes_self, item.takes_self);
+    try testing.expectEqual(row.receiver, item.receiver);
     try testing.expectEqual(row.holds_nothing, item.holds_nothing);
 }
 
@@ -332,7 +346,7 @@ test "per-declaration table" {
     try testing.expectEqual(Kind.type, items.get(pair).kind);
     try expectRow(&items, pair, .{ .path = "a", .kind = .field, .plain = .scalar });
     try expectRow(&items, pair, .{ .path = "b", .kind = .field, .plain = .scalar });
-    try expectRow(&items, pair, .{ .path = "sum", .kind = .function, .takes_self = true });
+    try expectRow(&items, pair, .{ .path = "sum", .kind = .function, .receiver = .value });
 
     const util = items.files[@backingInt(sources.findFile("src/util.zig").?)];
     try testing.expectEqual(Kind.namespace, items.get(util).kind);
