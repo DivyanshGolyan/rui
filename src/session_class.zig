@@ -131,7 +131,8 @@ pub const Band = struct {
 
 /// The one provider trouble to tell the person about, or null. A failure is current until its provider and model answer
 /// again: a visible, unarchived row on both whose answered state (a finished turn, or a tool call it proposed) began at or
-/// after it. Rows on another provider or model say nothing about this one's quota or sign-in. Sign-in and key failures end
+/// after it. Rows on another provider say nothing about this one's quota or sign-in, and rows on another model say nothing about its
+/// sign-in, key or plan (a usage limit is the connection's, so any model's answer ends it). Sign-in and key failures end
 /// at the viewer's last sign-in, a quota failure at its reset; the order of `Trouble` is the order of precedence, with
 /// rate limits last.
 pub fn trouble(rows: Rows, viewer: Viewer) ?Band {
@@ -156,7 +157,7 @@ pub fn trouble(rows: Rows, viewer: Viewer) ?Band {
         if (found == .rate_limit) break;
         const held = held_or_null orelse continue;
         const failed = held.failed;
-        if (reachedSince(rows, held.row, failed.since, viewer)) continue;
+        if (reachedSince(rows, held.row, failed.since, viewer, failure_class.of(failed.code.slice()) == .quota)) continue;
         if (found.clearedBySignIn()) if (viewer.login_at) |at| if (failed.since <= at) continue;
         if (found.endsAtReset()) if (failed.resets_at) |at| if (at <= viewer.now_ms / 1000) continue;
         return .{ .trouble = found, .resets_at = failed.resets_at, .provider = rows.get(held.row).provider };
@@ -169,11 +170,14 @@ fn listedAndLive(facts: Facts, viewer: Viewer) bool {
     return facts.archive != .archived and classify(facts, viewer).visible;
 }
 
-fn reachedSince(rows: Rows, failed_row: usize, since: u64, viewer: Viewer) bool {
+/// `account_wide` is a usage limit, which every model of the connection shares, so an answer from any of them ends it; a
+/// credential or plan failure is only answered by the same model.
+fn reachedSince(rows: Rows, failed_row: usize, since: u64, viewer: Viewer, account_wide: bool) bool {
     const failed = rows.get(failed_row);
     for (0..rows.count) |index| {
         const facts = rows.get(index);
-        if (!listedAndLive(facts, viewer) or !connection.Name.eqlOptional(facts.provider, failed.provider) or !std.mem.eql(u8, facts.model, failed.model)) continue;
+        if (!listedAndLive(facts, viewer) or !connection.Name.eqlOptional(facts.provider, failed.provider)) continue;
+        if (!account_wide and !std.mem.eql(u8, facts.model, failed.model)) continue;
         const work = facts.state.asOf(viewer.now_ms);
         if (std.meta.activeTag(work).answered() and work.since() >= since) return true;
     }
@@ -282,6 +286,7 @@ test "SUI-170 provider trouble follows failures, answers since, sign-in and rese
     const sign_in = failedWork("provider_http_401", 100, null);
     const api_key = failedWork("provider_api_key_rejected", 100, null);
     const quota = failedWork("provider_quota", 100, now_s + 60);
+    const plan = failedWork("provider_plan", 100, now_s + 60);
     const spent_quota = failedWork("provider_quota", 100, now_s - 1);
     const other_failure = failedWork("provider_policy", 100, null);
     const newer_sign_in = failedWork("provider_http_401", 120, null);
@@ -319,6 +324,10 @@ test "SUI-170 provider trouble follows failures, answers since, sign-in and rese
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&thinking, "codex", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&answered_before, "codex", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&answered_later, "codex", "other") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
+        // A usage limit belongs to the connection: another model's answer ends it, another provider's does not; a plan failure stays per model.
+        .{ .rows = &.{ listedFacts(&quota, "codex", "m"), listedFacts(&answered_later, "codex", "other") }, .expected = null },
+        .{ .rows = &.{ listedFacts(&quota, "codex", "m"), listedFacts(&answered_later, "openai", "m") }, .expected = .{ .trouble = .quota, .resets_at = now_s + 60, .provider = connection.Name.parse("codex") } },
+        .{ .rows = &.{ listedFacts(&plan, "codex", "m"), listedFacts(&answered_later, "codex", "other") }, .expected = .{ .trouble = .quota, .resets_at = now_s + 60, .provider = connection.Name.parse("codex") } },
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&answered_later, "openai", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), archived_answer }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), unlisted_answer }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },
