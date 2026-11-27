@@ -61,7 +61,6 @@ fn readPart(bytes: []const u8, escape: codec_abi.Escape, part: *failure_report.P
 }
 
 fn decodeInto(source: *SliceSource, escape: codec_abi.Escape, part: *failure_report.Part) !void {
-    const text = &part.text;
     while (!source.done()) {
         var scalar: [4]u8 = undefined;
         const count = switch (escape) {
@@ -71,13 +70,7 @@ fn decodeInto(source: *SliceSource, escape: codec_abi.Escape, part: *failure_rep
             },
             .json_string_v1 => try output_format.decodeScalar(source, &scalar),
         };
-        const kept = @min(count, text.bytes.len - text.len);
-        @memcpy(text.bytes[text.len..][0..kept], scalar[0..kept]);
-        text.len += kept;
-        if (kept < count) {
-            part.cutShort();
-            return;
-        }
+        if (!part.append(scalar[0..count])) return;
     }
 }
 

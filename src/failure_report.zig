@@ -23,10 +23,16 @@ pub const Part = struct {
         self.cut = false;
     }
 
-    /// Stop at the bound: keep the longest valid prefix and say it was cut.
-    pub fn cutShort(self: *Part) void {
+    /// Add bytes while they fit. When they do not, keep what fits up to the longest valid prefix, mark the part
+    /// cut and return false.
+    pub fn append(self: *Part, bytes: []const u8) bool {
+        const kept = @min(bytes.len, self.text.bytes.len - self.text.len);
+        @memcpy(self.text.bytes[self.text.len..][0..kept], bytes[0..kept]);
+        self.text.len += kept;
+        if (kept == bytes.len) return true;
         self.text.len = utf8_validation.validPrefix(self.text.slice()).len;
         self.cut = true;
+        return false;
     }
 
     /// End of reading: drop a part that is not UTF-8 and make the rest one line.
@@ -91,6 +97,20 @@ test "joined puts the separator only between two parts and marks each cut part" 
     try std.testing.expectEqualStrings("c…: m…", report.joined(&out));
     report.message.clear();
     try std.testing.expectEqualStrings("c…", report.joined(&out));
+}
+
+test "append keeps a whole scalar or none of it and marks the cut" {
+    var part: Part = .{};
+    for (0..max_part_bytes / 2) |_| try std.testing.expect(part.append("é"));
+    try std.testing.expect(!part.cut);
+    try std.testing.expect(!part.append("é"));
+    try std.testing.expect(part.cut);
+    try std.testing.expectEqual(@as(usize, max_part_bytes), part.text.len);
+    var odd: Part = .{};
+    try std.testing.expect(odd.append("x"));
+    for (0..max_part_bytes / 2 - 1) |_| try std.testing.expect(odd.append("é"));
+    try std.testing.expect(!odd.append("é"));
+    try std.testing.expectEqual(@as(usize, max_part_bytes - 1), odd.text.len);
 }
 
 test "finish makes a part one line and drops one that is not UTF-8" {
