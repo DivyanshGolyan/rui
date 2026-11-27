@@ -93,11 +93,12 @@ pub fn col(comptime alias: []const u8, comptime name: []const u8) Expr {
 pub fn field(comptime name: []const u8) Expr {
     return col("", name);
 }
-pub fn int(comptime value: i64) Expr {
-    return .{ .int = value };
-}
-pub fn text(comptime value: []const u8) Expr {
-    return .{ .text = value };
+/// A constant: an integer (`literal(1)`) or a string (`literal("x")`).
+pub fn literal(comptime value: anytype) Expr {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .comptime_int, .int => .{ .int = value },
+        else => .{ .text = value },
+    };
 }
 pub const null_value: Expr = .null_value;
 
@@ -105,26 +106,34 @@ pub const null_value: Expr = .null_value;
 pub fn compare(comptime op: Expr.Op, comptime left: Expr, comptime right: Expr) Expr {
     return .{ .cmp = .{ .op = op, .left = &left, .right = &right } };
 }
+/// A node over one operand, which every single-operand constructor builds the same way.
+fn around(comptime tag: std.meta.Tag(Expr), comptime inner: Expr) Expr {
+    return @unionInit(Expr, @tagName(tag), &inner);
+}
 pub fn isNull(comptime value: Expr) Expr {
-    return .{ .is_null = &value };
+    return around(.is_null, value);
 }
 pub fn isNotNull(comptime value: Expr) Expr {
-    return .{ .is_not_null = &value };
+    return around(.is_not_null, value);
 }
 pub fn not(comptime value: Expr) Expr {
-    return .{ .not = &value };
+    return around(.not, value);
+}
+/// A node over a list of operands, which every list constructor builds the same way.
+fn amongst(comptime tag: std.meta.Tag(Expr), comptime operands: []const Expr) Expr {
+    return @unionInit(Expr, @tagName(tag), operands);
 }
 pub fn all(comptime parts: []const Expr) Expr {
-    return .{ .all = parts };
+    return amongst(.all, parts);
 }
 pub fn any(comptime parts: []const Expr) Expr {
-    return .{ .any = parts };
+    return amongst(.any, parts);
 }
 pub fn oneOf(comptime value: Expr, comptime set: []const []const u8) Expr {
     return .{ .one_of = .{ .value = &value, .set = set } };
 }
 pub fn coalesce(comptime parts: []const Expr) Expr {
-    return .{ .coalesce = parts };
+    return amongst(.coalesce, parts);
 }
 pub fn between(comptime value: Expr, comptime low: Expr, comptime high: Expr) Expr {
     return .{ .between = .{ .value = &value, .low = &low, .high = &high } };
@@ -133,7 +142,7 @@ pub fn inList(comptime value: Expr, comptime items: []const Expr) Expr {
     return .{ .in_list = .{ .value = &value, .items = items } };
 }
 pub fn group(comptime inner: Expr) Expr {
-    return .{ .group = &inner };
+    return around(.group, inner);
 }
 pub fn call(comptime name: Expr.Call.Name, comptime args: []const Expr) Expr {
     comptime if (args.len != name.arity()) @compileError("rule: " ++ name.spelling() ++ " takes a different number of arguments");
@@ -264,7 +273,7 @@ fn selectText(comptime projection: []const u8, comptime query: Select) []const u
 
 test "a comparison, a null test and a set render as portable Rui SQL" {
     try std.testing.expectEqualStrings("t.a=1 AND t.b IS NULL AND t.c IN ('x','y')", comptime render(all(&.{
-        compare(.eq, col("t", "a"), int(1)),
+        compare(.eq, col("t", "a"), literal(1)),
         isNull(col("t", "b")),
         oneOf(col("t", "c"), &.{ "x", "y" }),
     })));
@@ -273,10 +282,10 @@ test "a comparison, a null test and a set render as portable Rui SQL" {
 
 test "SH-181 a disjunction inside a conjunction keeps its parentheses, and a negation binds its whole operand" {
     try std.testing.expectEqualStrings("t.a=1 AND (t.b=2 OR t.c=3)", comptime render(all(&.{
-        compare(.eq, col("t", "a"), int(1)),
-        any(&.{ compare(.eq, col("t", "b"), int(2)), compare(.eq, col("t", "c"), int(3)) }),
+        compare(.eq, col("t", "a"), literal(1)),
+        any(&.{ compare(.eq, col("t", "b"), literal(2)), compare(.eq, col("t", "c"), literal(3)) }),
     })));
-    try std.testing.expectEqualStrings("NOT (t.a=1 AND t.b=2)", comptime render(not(all(&.{ compare(.eq, col("t", "a"), int(1)), compare(.eq, col("t", "b"), int(2)) }))));
+    try std.testing.expectEqualStrings("NOT (t.a=1 AND t.b=2)", comptime render(not(all(&.{ compare(.eq, col("t", "a"), literal(1)), compare(.eq, col("t", "b"), literal(2)) }))));
 }
 
 test "a boolean comparison renders both sides in parentheses" {
@@ -286,25 +295,25 @@ test "a boolean comparison renders both sides in parentheses" {
 test "SH-181 every node kind used as an operand keeps its own structure" {
     const q = comptime Select{ .table = "c", .alias = "c", .where = compare(.eq, col("c", "p"), col("p", "id")) };
     const x = comptime col("t", "a");
-    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id))=1", comptime render(compare(.eq, notExists(q), int(1))));
+    try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id))=1", comptime render(compare(.eq, notExists(q), literal(1))));
     try std.testing.expectEqualStrings("(NOT EXISTS(SELECT 1 FROM c c WHERE c.p=p.id)) IS NULL", comptime render(isNull(notExists(q))));
     try std.testing.expectEqualStrings("(t.a IS NULL) IN ('x')", comptime render(oneOf(isNull(x), &.{"x"})));
-    try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ compare(.eq, x, int(1)), compare(.eq, x, int(2)) }), &.{ "x", "y", "z" })));
-    try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(compare(.eq, compare(.eq, x, int(1)), compare(.eq, x, int(2)))));
+    try std.testing.expectEqualStrings("((t.a=1 AND t.a=2)='x' OR (t.a=1 AND t.a=2)='y' OR (t.a=1 AND t.a=2)='z')", comptime render(oneOf(all(&.{ compare(.eq, x, literal(1)), compare(.eq, x, literal(2)) }), &.{ "x", "y", "z" })));
+    try std.testing.expectEqualStrings("(t.a=1)=(t.a=2)", comptime render(compare(.eq, compare(.eq, x, literal(1)), compare(.eq, x, literal(2)))));
 }
 
 test "SH-181 a BETWEEN or an IN list used as an operand is parenthesised, a call and a group are not" {
     const x = comptime col("t", "a");
-    try std.testing.expectEqualStrings("(t.a BETWEEN 1 AND 3)=1", comptime render(compare(.eq, between(x, int(1), int(3)), int(1))));
-    try std.testing.expectEqualStrings("(t.a IN (1,2)) IS NULL", comptime render(isNull(inList(x, &.{ int(1), int(2) }))));
-    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(compare(.eq, call(.length, &.{x}), int(2))));
+    try std.testing.expectEqualStrings("(t.a BETWEEN 1 AND 3)=1", comptime render(compare(.eq, between(x, literal(1), literal(3)), literal(1))));
+    try std.testing.expectEqualStrings("(t.a IN (1,2)) IS NULL", comptime render(isNull(inList(x, &.{ literal(1), literal(2) }))));
+    try std.testing.expectEqualStrings("length(t.a)=2", comptime render(compare(.eq, call(.length, &.{x}), literal(2))));
 }
 
 test "SH-181 a conjunction inside a disjunction needs a group to keep its parentheses, and a call spells as its rsql macro" {
     const x = comptime col("t", "a");
-    const both = comptime all(&.{ compare(.eq, x, int(1)), compare(.eq, x, int(2)) });
-    try std.testing.expectEqualStrings("t.a=1 AND t.a=2 OR t.a=3", comptime render(any(&.{ both, compare(.eq, x, int(3)) })));
-    try std.testing.expectEqualStrings("(t.a=1 AND t.a=2) OR t.a=3", comptime render(any(&.{ group(both), compare(.eq, x, int(3)) })));
-    try std.testing.expectEqualStrings("@same(t.a,'x')", comptime render(call(.same, &.{ x, text("x") })));
-    try std.testing.expectEqualStrings("@initial(t.a,'a-z')", comptime render(call(.initial, &.{ x, text("a-z") })));
+    const both = comptime all(&.{ compare(.eq, x, literal(1)), compare(.eq, x, literal(2)) });
+    try std.testing.expectEqualStrings("t.a=1 AND t.a=2 OR t.a=3", comptime render(any(&.{ both, compare(.eq, x, literal(3)) })));
+    try std.testing.expectEqualStrings("(t.a=1 AND t.a=2) OR t.a=3", comptime render(any(&.{ group(both), compare(.eq, x, literal(3)) })));
+    try std.testing.expectEqualStrings("@same(t.a,'x')", comptime render(call(.same, &.{ x, literal("x") })));
+    try std.testing.expectEqualStrings("@initial(t.a,'a-z')", comptime render(call(.initial, &.{ x, literal("a-z") })));
 }

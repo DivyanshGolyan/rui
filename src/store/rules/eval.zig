@@ -244,7 +244,7 @@ fn find(world: World, name: []const u8) Error!Table {
 }
 
 const col = rule.col;
-const int = rule.int;
+const int = rule.literal;
 const n: Value = .null;
 
 fn i(value: i64) Value {
@@ -327,14 +327,14 @@ test "SH-180 between, in-list, length and the rsql macros follow SQL's answers f
     // 5 is in no member, and a NULL member makes that unknown rather than false.
     try std.testing.expectEqual(n, try evalRow(listed, &cols, &.{ i(5), n }));
     const same = comptime rule.call(.same, &.{ rule.field("n"), rule.null_value });
-    const distinct = comptime rule.call(.distinct, &.{ rule.field("s"), rule.text("x") });
+    const distinct = comptime rule.call(.distinct, &.{ rule.field("s"), rule.literal("x") });
     try std.testing.expectEqual(i(1), try evalRow(same, &cols, &.{ n, n }));
     try std.testing.expectEqual(i(0), try evalRow(same, &cols, &.{ i(1), n }));
     try std.testing.expectEqual(i(1), try evalRow(distinct, &cols, &.{ n, n }));
     try std.testing.expectEqual(i(0), try evalRow(distinct, &cols, &.{ n, .{ .text = "x" } }));
     const octets = comptime rule.compare(.eq, rule.call(.octets, &.{rule.field("s")}), int(2));
     try std.testing.expectEqual(i(1), try evalRow(octets, &cols, &.{ n, .{ .text = "\xc3\xa9" } }));
-    const shape = comptime rule.all(&.{ rule.call(.initial, &.{ rule.field("s"), rule.text("a-z") }), rule.call(.charset, &.{ rule.field("s"), rule.text("a-z0-9") }) });
+    const shape = comptime rule.all(&.{ rule.call(.initial, &.{ rule.field("s"), rule.literal("a-z") }), rule.call(.charset, &.{ rule.field("s"), rule.literal("a-z0-9") }) });
     try std.testing.expectEqual(i(1), try evalRow(shape, &cols, &.{ n, .{ .text = "ab1" } }));
     try std.testing.expectEqual(i(0), try evalRow(shape, &cols, &.{ n, .{ .text = "1ab" } }));
 }
@@ -345,10 +345,10 @@ fn evalRow(comptime expr: Expr, columns: []const []const u8, row: []const Value)
 
 test "SH-180 an integer against a text is refused, never answered one engine's way" {
     const cols = [_][]const u8{ "a", "s" };
-    try std.testing.expectError(error.TypeMismatch, checks(comptime rule.compare(.eq, col("t", "a"), rule.text("x")), &cols, &.{ i(1), n }));
+    try std.testing.expectError(error.TypeMismatch, checks(comptime rule.compare(.eq, col("t", "a"), rule.literal("x")), &cols, &.{ i(1), n }));
     try std.testing.expectError(error.TypeMismatch, checks(comptime rule.oneOf(col("t", "a"), &.{"x"}), &cols, &.{ i(1), n }));
     // NULL against anything is still unknown, whatever the other side's type.
-    try std.testing.expectEqual(n, try checks(comptime rule.compare(.eq, col("t", "a"), rule.text("x")), &cols, &.{ n, n }));
+    try std.testing.expectEqual(n, try checks(comptime rule.compare(.eq, col("t", "a"), rule.literal("x")), &cols, &.{ n, n }));
 }
 
 test "SH-180 an inner alias shadows an outer one, a later join reads an earlier miss, and a count sees every joined row" {
@@ -389,7 +389,7 @@ test "SH-180 an inner alias shadows an outer one, a later join reads an earlier 
 test "SH-180 NOT, a set and coalesce answer unknown for NULL and nothing else" {
     const cols = [_][]const u8{ "a", "s" };
     const negated = comptime rule.not(rule.compare(.eq, col("t", "a"), int(1)));
-    const first = comptime rule.coalesce(&.{ col("t", "a"), rule.int(9) });
+    const first = comptime rule.coalesce(&.{ col("t", "a"), rule.literal(9) });
     try std.testing.expectEqual(n, try checks(negated, &cols, &.{ n, n }));
     try std.testing.expectEqual(i(1), try checks(negated, &cols, &.{ i(2), n }));
     try std.testing.expectEqual(i(0), try checks(negated, &cols, &.{ i(1), n }));

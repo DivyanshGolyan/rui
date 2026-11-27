@@ -193,6 +193,40 @@ fn bindValue(statement: *c.sqlite3_stmt, index: c_int, column: schema.Column, va
     }
 }
 
+fn stated(value: evaluator.Value) Value {
+    return switch (value) {
+        .null => .null,
+        .int => |number| .{ .int = number },
+        .text => |bytes| .{ .octets = bytes },
+    };
+}
+
+/// The Host's answer over the same row, bound in the reverse order and held once as a table rule and once as a column rule: it refuses exactly
+/// what SQLite's CHECK refuses (an answer of 0, never NULL), and leaves the rule to the engine when a column it reads has no stated value
+/// or is not bound at all.
+fn admission(comptime rule: rules.Expr, comptime text: []const u8, comptime names: []const []const u8, row: []const evaluator.Value, answer: evaluator.Value) !void {
+    const refused = answer == .int and answer.int == 0;
+    const reversed = comptime blk: {
+        var out: [names.len][]const u8 = undefined;
+        for (0..names.len) |at| out[at] = names[names.len - 1 - at];
+        break :blk out;
+    };
+    var values: [names.len]?Value = undefined;
+    for (row, 0..) |value, at| values[names.len - 1 - at] = stated(value);
+    const as_table = .{ .checks = &[_]rules.Expr{rule}, .columns = &[_]struct { check: ?rules.Expr }{} };
+    const as_column = .{ .checks = &[_]rules.Expr{}, .columns = &[_]struct { check: ?rules.Expr }{.{ .check = rule }} };
+    std.testing.expectEqual(!refused, column_rules.acceptsRow(as_table, &reversed, &values)) catch |failure| {
+        std.debug.print("Host disagrees with SQLite on {s} over {any}\n", .{ text, row });
+        return failure;
+    };
+    try std.testing.expectEqual(!refused, column_rules.acceptsRow(as_column, &reversed, &values));
+    if (names.len == 0) return;
+    var unstated = values;
+    unstated[0] = null;
+    try std.testing.expect(column_rules.acceptsRow(as_table, &reversed, &unstated));
+    try std.testing.expect(column_rules.acceptsRow(as_table, reversed[1..], values[1..]));
+}
+
 /// Every row over the small domains of the columns `rule` reads: the evaluator never errors and answers what SQLite answers.
 fn agreeWithSqlite(database: *c.sqlite3, comptime table: schema.Table, comptime rule: rules.Expr, checked: *usize) !void {
     const text = comptime rules.render(rule);
@@ -246,6 +280,7 @@ fn agreeWithSqlite(database: *c.sqlite3, comptime table: schema.Table, comptime 
             std.debug.print("rule {s} disagrees with SQLite on row {any}\n", .{ text, row });
             return failure;
         };
+        try admission(rule, text, &names, &row, normal);
         checked.* += 1;
         var at: usize = read.len;
         while (at > 0) {
@@ -286,6 +321,27 @@ test "SH-180 a call with the wrong shape is an error whatever the row holds" {
     try std.testing.expectError(error.BadCall, evaluator.eval(&not_a_set, evaluator.Scope.ofRow(.{}, "", &.{"s"}, &.{n})));
     const length_of_int = comptime rules.call(.length, &.{rules.field("s")});
     try std.testing.expectError(error.BadCall, evaluator.eval(&length_of_int, evaluator.Scope.ofRow(.{}, "", &.{"s"}, &.{.{ .int = 1 }})));
+}
+
+test "SH-179 an inserted row a cross-column rule of its table refuses fails before anything is sent, and a rule over a column the statement does not bind is left to the engine" {
+    const Part = struct { content: u64, ordinal: u64, part: u64 };
+    const Insert = rsql.Write(.{
+        .sql = "INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(?1,?2,?3)",
+        .Args = Part,
+        .expect = .{ .at_most = 1 },
+    });
+    var part: Part = .{ .content = 1, .ordinal = 0, .part = 2 };
+    try admit(Insert, &part);
+    part.part = 1;
+    try std.testing.expectError(error.ColumnRuleRefused, admit(Insert, &part));
+    // The same table written without binding part_content_id: the rule reads a column the statement does not bind.
+    const Partial = rsql.Write(.{
+        .sql = "INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(?1,?2,7)",
+        .Args = struct { content: u64, ordinal: u64 },
+        .expect = .{ .at_most = 1 },
+    });
+    var partial: Partial.Args = .{ .content = 7, .ordinal = 0 };
+    try admit(Partial, &partial);
 }
 
 const key_fits: [128]u8 = @splat('k');

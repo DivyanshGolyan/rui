@@ -135,7 +135,7 @@ def store_boundary(root):
             if target.startswith(STORE_WIRE):
                 continue
             if source == "src/logic_tests.zig" and target in ("src/store/command_replay.zig", "src/store/engine/mysql_commit.zig", "src/store/engine/mysql_refusal.zig", "src/store/page_slots.zig", "src/store/pass_plan.zig",
-                                                                 "src/store/round_order.zig", "src/store/rules/char_set.zig", "src/store/rules/eval.zig", "src/store/rules/rule.zig", "src/store/write_batch.zig"):
+                                                                 "src/store/round_order.zig", "src/store/rules/char_set.zig", "src/store/rules/eval.zig", "src/store/rules/row.zig", "src/store/rules/rule.zig", "src/store/write_batch.zig"):
                 continue
             if target.startswith(STORE_DIRECTORY) and not source.startswith(STORE_DIRECTORY) and source != STORE_FACADE:
                 raise ValueError(f"{source} imports {target}; import {STORE_FACADE} instead")
