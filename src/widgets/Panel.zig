@@ -840,6 +840,8 @@ pub const KeyList = struct {
     fields: []const Field,
     ground: vaxis.Style = .{},
     strong: vaxis.Style = .{ .bold = true },
+    /// Draw one field per row, never in pairs: for a list whose rows read down the page (the Connections reference).
+    single_column: bool = false,
     row_offset: usize = 0,
     total_rows: usize = 0,
     viewport_height: usize = 0,
@@ -865,7 +867,7 @@ pub const KeyList = struct {
         const column_gap = 2;
         const left_width = margin + key_widths[0] + key_gap + value_widths[0];
         const right_width = margin + key_widths[1] + key_gap + value_widths[1];
-        const columns: usize = if (self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
+        const columns: usize = if (!self.single_column and self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
         if (columns == 1) key_widths[0] = @max(key_widths[0], key_widths[1]);
         self.total_rows = (self.fields.len + columns - 1) / columns;
         self.viewport_height = size.height;

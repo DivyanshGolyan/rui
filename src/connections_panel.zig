@@ -6,45 +6,52 @@ const connection = @import("connection.zig");
 const protocol = @import("protocol.zig");
 const Panel = @import("widgets/Panel.zig");
 
-const max_line = 160;
+const max_line = 96;
+const lines_per_connection = 4;
+const max_lines = connection.max_served * lines_per_connection;
 
 pub const Rows = struct {
-    fields: [connection.max_served]Panel.Field = undefined,
-    lines: [connection.max_served][max_line]u8 = undefined,
+    fields: [max_lines]Panel.Field = undefined,
+    lines: [max_lines][max_line]u8 = undefined,
     names: [connection.max_served][connection.max_name_bytes]u8 = undefined,
+    len: usize = 0,
+
+    fn add(self: *Rows, label: []const u8, comptime format: []const u8, args: anytype) void {
+        var out: std.Io.Writer = .fixed(&self.lines[self.len]);
+        out.print(format, args) catch {};
+        self.fields[self.len] = .{ .label = label, .value = out.buffered() };
+        self.len += 1;
+    }
 };
 
-/// The rows to draw for `facts` at Unix second `now`, in served order.
+/// The rows to draw for `facts` at Unix second `now`, in served order. Each connection takes a row with its name and sign-in,
+/// then one row per usage window, then one row for how old the reading is, so every row fits a narrow screen.
 pub fn build(rows: *Rows, facts: []const protocol.ConnectionFact, now: u64) []const Panel.Field {
-    const count = @min(facts.len, rows.fields.len);
-    for (facts[0..count], 0..) |fact, index| {
+    rows.len = 0;
+    for (facts[0..@min(facts.len, connection.max_served)], 0..) |fact, index| {
         const name = fact.name.slice();
         @memcpy(rows.names[index][0..name.len], name);
-        rows.fields[index] = .{ .label = rows.names[index][0..name.len], .value = line(&rows.lines[index], fact, now) };
+        rows.add(rows.names[index][0..name.len], "{s}", .{fact.label.slice()});
+        const reading = fact.usage orelse {
+            // A browser sign-in sends no usage headers; any other connection simply has not reported yet.
+            rows.add("", "{s}", .{if (fact.route == .chatgpt_plan) "no usage for browser sign-ins" else "no usage seen yet"});
+            continue;
+        };
+        inline for (.{ reading.primary, reading.secondary }) |maybe| if (maybe) |window| {
+            var buffer: [max_line]u8 = undefined;
+            var out: std.Io.Writer = .fixed(&buffer);
+            writeWindow(&out, window, now) catch {};
+            rows.add("", "{s}", .{out.buffered()});
+        };
+        var buffer: [max_line]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        writeAge(&out, now -| reading.observed_at) catch {};
+        rows.add("", "as of {s}", .{out.buffered()});
     }
-    return rows.fields[0..count];
-}
-
-fn line(buffer: *[max_line]u8, fact: protocol.ConnectionFact, now: u64) []const u8 {
-    var out: std.Io.Writer = .fixed(buffer);
-    write(&out, fact, now) catch {};
-    return out.buffered();
-}
-
-fn write(out: *std.Io.Writer, fact: protocol.ConnectionFact, now: u64) std.Io.Writer.Error!void {
-    try out.writeAll(fact.label.slice());
-    const reading = fact.usage orelse {
-        // A browser sign-in sends no usage headers; any other connection simply has not reported yet.
-        try out.writeAll(if (fact.route == .chatgpt_plan) " · usage not shown for browser sign-ins" else " · no usage seen yet");
-        return;
-    };
-    inline for (.{ reading.primary, reading.secondary }) |maybe| if (maybe) |window| try writeWindow(out, window, now);
-    try out.writeAll(" · as of ");
-    try writeAge(out, now -| reading.observed_at);
+    return rows.fields[0..rows.len];
 }
 
 fn writeWindow(out: *std.Io.Writer, window: protocol.UsageWindow, now: u64) std.Io.Writer.Error!void {
-    try out.writeAll(" · ");
     try writeName(out, window.minutes);
     if (window.used_percent >= 100) {
         try out.writeAll(" limit reached");
@@ -100,10 +107,22 @@ test "SUI-182 the Connections reference names each window by its length and says
     };
     var rows: Rows = .{};
     const shown = build(&rows, &facts, now);
-    try std.testing.expectEqual(@as(usize, 4), shown.len);
-    try std.testing.expectEqualStrings("work", shown[0].label);
-    try std.testing.expectEqualStrings("ChatGPT (device code) · weekly 25% used · resets in 3 d 4 h · 5-hour limit reached · resets in 7 m · as of 12 m ago", shown[0].value);
-    try std.testing.expectEqualStrings("ChatGPT · usage not shown for browser sign-ins", shown[1].value);
-    try std.testing.expectEqualStrings("ChatGPT (device code) · no usage seen yet", shown[2].value);
-    try std.testing.expectEqualStrings("ChatGPT (device code) · 90-minute 3% used · as of just now", shown[3].value);
+    const expected = [_][2][]const u8{
+        .{ "work", "ChatGPT (device code)" },
+        .{ "", "weekly 25% used · resets in 3 d 4 h" },
+        .{ "", "5-hour limit reached · resets in 7 m" },
+        .{ "", "as of 12 m ago" },
+        .{ "home", "ChatGPT" },
+        .{ "", "no usage for browser sign-ins" },
+        .{ "lab", "ChatGPT (device code)" },
+        .{ "", "no usage seen yet" },
+        .{ "odd", "ChatGPT (device code)" },
+        .{ "", "90-minute 3% used" },
+        .{ "", "as of just now" },
+    };
+    try std.testing.expectEqual(expected.len, shown.len);
+    for (expected, shown) |want, got| {
+        try std.testing.expectEqualStrings(want[0], got.label);
+        try std.testing.expectEqualStrings(want[1], got.value);
+    }
 }

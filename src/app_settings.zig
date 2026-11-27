@@ -383,10 +383,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.reference_open) {
         const caps = if (self.backend) |backend| backend.caps(backend.context) else view.Caps{};
         var reference = keys_panel.panel(caps);
-        if (self.reference == .connections) reference.fields = if (self.connection_facts) |snapshot|
-            connections_panel.build(&self.connection_rows, snapshot.facts.slice(), snapshot.now)
-        else
-            &unavailable_rows;
+        if (self.reference == .connections) {
+            reference.single_column = true;
+            reference.fields = if (self.connection_facts) |snapshot|
+                connections_panel.build(&self.connection_rows, snapshot.facts.slice(), snapshot.now)
+            else
+                &unavailable_rows;
+        }
         reference.row_offset = self.reference_offset;
         var surface = try reference.widget().draw(ctx);
         self.reference_offset = reference.row_offset;
@@ -1231,7 +1234,7 @@ test "SUI-182 App settings Connections opens a read-only reference of each serve
         if (read != null) {
             try std.testing.expect(std.mem.indexOf(u8, text.written(), "work") != null);
             try std.testing.expect(std.mem.indexOf(u8, text.written(), "weekly 40% used · resets in 1 d 0 h") != null);
-            try std.testing.expect(std.mem.indexOf(u8, text.written(), "usage not shown for browser sign-ins") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "no usage for browser sign-ins") != null);
         } else try std.testing.expect(std.mem.indexOf(u8, text.written(), "the Host cannot be read") != null);
         // The reference is read-only: Enter changes nothing and Escape-free input keeps it open.
         try press(&page, &ctx, vaxis.Key.enter);

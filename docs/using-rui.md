@@ -15,7 +15,7 @@ The [Host guide](host.md#run-in-the-foreground) covers signing in from scripts.
 ## Connections and usage
 
 Open **Settings › Connections** to see each connection the Host serves, how it is signed in and how much of its limits it has used, for example `weekly 25% used · resets in 3 d 4 h · as of 12 m ago`.
-Usage is shown for device-code sign-ins and appears after the connection has answered a turn; a browser sign-in shows `usage not shown for browser sign-ins` until a limit is hit.
+Usage is shown for device-code sign-ins and appears after the connection has answered a turn; a browser sign-in shows `no usage for browser sign-ins` until a limit is hit.
 The list is read-only: Esc returns to Settings.
 
 ## Keys

@@ -4267,7 +4267,7 @@
     },
     {
       "name": "settings-connections",
-      "note": "Settings Connections reference: each served connection, its sign-in and usage line; the fixture's endpoint route has no readable usage so it reads no usage seen yet",
+      "note": "Settings Connections reference: each served connection, its sign-in and usage rows; the fixture's endpoint route has no readable usage so it reads no usage seen yet",
       "open": "overview",
       "steps": [
         {
