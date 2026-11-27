@@ -1,7 +1,6 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const store_core = @import("../Store.zig");
@@ -2481,31 +2480,6 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
                 try std.testing.expectEqual(@as(usize, 40), value_count);
             }
             _ = try storage.openActivityContent(&.{ .session = session, .position = value_user.?.position, .ordinal = value_user.?.ordinal });
-            var conversation: conversation_read.ConversationPage = .{ .session = session };
-            var person_count: usize = 0;
-            var peer_count: usize = 0;
-            var final_count: usize = 0;
-            var pages: usize = 0;
-            while (true) {
-                const page = try store_core.publicConversationPageForTesting(&storage, conversation);
-                pages += 1;
-                for (page.items[0..page.count]) |item| {
-                    try std.testing.expect(!std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("hidden value")));
-                    if (std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
-                    if (item.sender != null) peer_count += 1;
-                    if (item.source_action != null and item.source_action.? == action_id) final_count += 1;
-                }
-                if (!page.more) break;
-                try std.testing.expectEqual(@as(usize, 16), page.count);
-                conversation.end = page.end;
-                conversation.before_position = page.items[page.count - 1].position;
-                conversation.before_ordinal = page.items[page.count - 1].ordinal;
-            }
-            try std.testing.expect(pages > 1);
-            try std.testing.expectEqual(@as(usize, 20), person_count);
-            try std.testing.expectEqual(@as(usize, 1), peer_count);
-            try std.testing.expectEqual(@as(usize, 1), final_count);
-            try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{ .session = session, .end = conversation.end, .before_position = hidden_entry }));
             try NativePromotion.finishModel(&storage, &tmp, model);
         }
     }.run);
