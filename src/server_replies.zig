@@ -184,7 +184,6 @@ pub const Replies = struct {
             .read_action_call_id => |*command| Replies.deliverActionContent(self, reply, command, true),
             .inspect_session => |*request_value| try Replies.replyInspectSession(self, reply, request_value, number),
             .list_sessions => |*request_value| try Replies.replyListSessions(self, reply, request_value, number),
-            .conversation_content => |*command| try Replies.prepareConversationContent(self, reply, command),
             .activity_page => |*command| try Replies.replyActivityPage(self, reply, command),
             .activity_search => |*command| try Replies.replyActivitySearch(self, reply, command),
             .public_parts => |*command| try Replies.replyPublicParts(self, reply, command, number),
@@ -615,20 +614,12 @@ pub const Replies = struct {
         try replyJson(fd, 200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{ self.instance, rows[0..count] });
     }
 
-    fn deliverConversationContent(self: *Replies, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
+    fn deliverActivityContent(self: *Replies, fd: std.posix.fd_t, command: @FieldType(wire_request.Request, "activity_content")) !void {
         var reply: Reply = undefined;
         reply.init(self.io, self.allocator, null);
         defer reply.deinit();
-        try Replies.prepareConversationContent(self, &reply, &command);
+        try Replies.replyActivityContent(self, &reply, &command);
         sendReply(self.io, fd, &reply) catch |err| self.fenceIfStoreFailed("public content", err);
-    }
-
-    noinline fn prepareConversationContent(self: *Replies, fd: *Reply, command: *const protocol.ConversationContent) !void {
-        const location = self.store.openPublicConversationContent(command) catch |err| switch (err) {
-            error.ContentNotFound, error.RangeOutOfBounds, error.ContentIsParts => return refuse(fd, 409, .conversation_unavailable, @errorName(err)),
-            else => return Replies.refuseRead(self, fd, "conversation content", err),
-        };
-        return Replies.deliverPublicContent(self, fd, location, command.start, command.stream);
     }
 
     fn deliverPublicContent(self: *Replies, fd: *Reply, location: store_module.ContentLocation, start: u64, stream: bool) !void {
@@ -872,7 +863,7 @@ fn replyJsonGrowing(fd: *Reply, status: u16, max_bytes: usize, comptime render: 
     _ = try fd.start(try Answer.json(server_reply.allocatorOf(fd), status, max_bytes, .growing, render, args), .{});
 }
 
-test "Conversation stream native delivery reads each byte once and closes on failed handoff" {
+test "Activity content stream native delivery reads each byte once and closes on failed handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -883,11 +874,11 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
     const expected = @as([8189]u8, @splat('x')) ++ @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail";
-    var command = try store_module.testingPublicProjection(&storage, &tmp, &.{
+    const projected = try store_module.testingPublicProjection(&storage, &tmp, &.{
         .{ .encoded = &@as([8189]u8, @splat('x')), .decoded = &@as([8189]u8, @splat('x')) },
         .{ .encoded = @as([257 * "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @bitCast(@as([257]["\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @splat("\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".*)))) ++ "tail", .decoded = @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail" },
     });
-    command.stream = true;
+    const command: @FieldType(wire_request.Request, "activity_content") = .{ .session = projected.session, .position = projected.position };
     var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
@@ -954,7 +945,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
             thread.join();
         }
         var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
-        try Replies.deliverConversationContent(&replies, sockets[0], command);
+        try Replies.deliverActivityContent(&replies, sockets[0], command);
     }
     try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
@@ -964,7 +955,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     try std.testing.expectEqualStrings(expected, peer.received[body_start..peer.used]);
     storage.testing_content_work = .{};
     var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
-    try Replies.deliverConversationContent(&replies, -1, command);
+    try Replies.deliverActivityContent(&replies, -1, command);
     try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());

@@ -344,23 +344,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/conversation-content": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** The content of one conversation item. */
-        post: operations["conversationContent"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/public-parts": {
         parameters: {
             query?: never;
@@ -387,7 +370,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** The exact bytes of one part of an owner's parts value, framed as conversation content. */
+        /** The exact bytes of one part of an owner's parts value, framed as activity content. */
         post: operations["publicPartContent"];
         delete?: never;
         options?: never;
@@ -1177,27 +1160,13 @@ export interface components {
             sha256: string;
             owner: components["schemas"]["PartOwner"];
         };
-        ConversationContentRequest: {
-            /** @constant */
-            version: "33";
-            /** @constant */
-            kind: "conversation_content";
-            store: string;
-            session: string;
-            position: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"];
-            /** @constant */
-            start: "0";
-            /** @constant */
-            stream?: true;
-        };
         /** @description An unsigned 64-bit integer in decimal. */
         Decimal: string;
         ErrorReply: {
             /** @constant */
             version: "33";
             /** @enum {string} */
-            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
+            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
             code: string;
         };
         FirstMessage: {
@@ -4559,44 +4528,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ListSessionsReply"];
-                };
-            };
-            /** @description A refusal or failure. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorReply"];
-                };
-            };
-        };
-    };
-    conversationContent: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description The wire version this document describes. Any other version is refused. */
-                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
-                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
-                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ConversationContentRequest"];
-            };
-        };
-        responses: {
-            /** @description The content bytes, from the requested offset. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/octet-stream": string;
                 };
             };
             /** @description A refusal or failure. */

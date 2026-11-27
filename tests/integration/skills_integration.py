@@ -195,7 +195,7 @@ def main():
         def conversation(session):
             rows = []
             for item in conversation_rows(host.rui_ready_fields["socket"], store, session):
-                content = subprocess.run([str(fixture.RUI), "session", "read-conversation", "--store", str(store),
+                content = subprocess.run([str(fixture.RUI), "session", "read-content", "--store", str(store),
                     "--session", session, "--position", item["position"], "--ordinal", item["ordinal"]],
                     capture_output=True, timeout=15, env=environment)
                 assert content.returncode == 0, content.stderr

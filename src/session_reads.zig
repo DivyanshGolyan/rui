@@ -584,7 +584,7 @@ fn scanAt(job: *Job, task: *Task, reads: client.SessionReads, plan: FeedPolicy.P
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
         const open = if (toggled) |one| one.open else job.opened.has(key);
         var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .watch_key = job.local_message_key, .cap_target = switch (item.value) {
-            .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = .{ .text = answer.content } },
+            .assistant => |answer| .{ .position = item.position, .ordinal = item.ordinal, .row = false, .content = .{ .text = answer.content } },
             else => null,
         } };
         row.provisional = try View.renderWith(reads, job.files.parts, job.sessionProvider(), item, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
@@ -878,7 +878,7 @@ test "session_reads a Message page past the display limit keeps what fits and sa
     defer scratch.close(io);
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const target: View.Collapsed = .{ .source = .conversation, .position = 7, .ordinal = 0, .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .row = true };
+    const target: View.Collapsed = .{ .position = 7, .ordinal = 0, .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .row = true };
     const page = try std.testing.allocator.alloc(u8, Viewport.capacity + 4096);
     defer std.testing.allocator.free(page);
     const Case = struct { body: []const u8, lines: u64, kept: []const u8, notice: []const u8 };
@@ -966,7 +966,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         {
             defer file.close(task.io);
             var sink: Sink = .{ .io = task.io, .file = file, .code = null };
-            if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
+            if (try requests.readActivityContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
             if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
         }
         try directory.rename(temporary, directory, path, task.io);
@@ -980,7 +980,7 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
     }
     try job.files.scratch.setLength(task.io, 0);
     var sink: Sink = .{ .io = task.io, .file = job.files.scratch, .code = if (copy == .code) .{} else null };
-    if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
+    if (try requests.readActivityContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
     if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
     const range: AnswerRenderer.LastCode.Range = if (sink.code) |*code|
         code.finish() orelse {
@@ -2246,14 +2246,14 @@ test "session_reads row heads are bounded with ordered exact collapsed targets" 
     var row: RenderedRow = .{ .key = .{ .position = 1 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
     var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
     try capture.feed("head\n");
-    for (0..20) |index| try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = false, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
+    for (0..20) |index| try capture.collapsedSummary(.{ .position = index + 1, .ordinal = 0, .row = false, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
     for (row.collapsed_targets[0..row.collapsed_count], 1..) |target, position| try std.testing.expectEqual(@as(u64, position), target.position);
     const large = try std.testing.allocator.alloc(u8, 2 * feed_window.row_capacity);
     defer std.testing.allocator.free(large);
     @memset(large, 'x');
     try capture.feed(large);
-    try capture.collapsedSummary(.{ .source = .activity, .position = 99, .ordinal = 0, .row = false, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ late" ++ View.Mark.reset);
+    try capture.collapsedSummary(.{ .position = 99, .ordinal = 0, .row = false, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ late" ++ View.Mark.reset);
     try capture.feed("tail");
     try capture.finish();
     const shown = large[0..try file.readPositionalAll(io, large, 0)];
@@ -2325,7 +2325,7 @@ test "capped stop row reports the exact excluded identity without changing its p
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 'x');
     var task: Task = .{ .io = io };
-    const earlier: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = FakeHost.textValue(), .row = false };
+    const earlier: View.Collapsed = .{ .position = 1, .ordinal = 0, .content = FakeHost.textValue(), .row = false };
     var baseline_row: RenderedRow = .{ .key = .{ .position = 9 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
     var baseline: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &baseline_row };
     try baseline.feed("earlier stopped input\n");
@@ -2382,7 +2382,7 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
         if (count > 16) try std.testing.expect(std.mem.endsWith(u8, document.text(), "┄ 1 more summary\n"));
         for (row.collapsed_targets[0..row.collapsed_count], 1..) |target, position| {
             try std.testing.expectEqual(@as(u64, position), target.position);
-            try std.testing.expectEqual(View.Collapsed{ .source = .activity, .position = position, .ordinal = 0, .row = false, .content = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } } }, target);
+            try std.testing.expectEqual(View.Collapsed{ .position = position, .ordinal = 0, .row = false, .content = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } } }, target);
         }
     }
 }
@@ -2617,10 +2617,10 @@ test "session_reads cap target follows prior collapsed markers without mispairin
     for (0..17) |prior| {
         try file.setLength(io, 0);
         var row: RenderedRow = .{ .key = .{ .position = 99 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
-        const target: View.Collapsed = .{ .source = .activity, .position = 99, .ordinal = 7, .row = false, .content = FakeHost.textValue() };
+        const target: View.Collapsed = .{ .position = 99, .ordinal = 7, .row = false, .content = FakeHost.textValue() };
         var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row, .cap_target = target };
         for (0..prior) |index| {
-            try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
+            try capture.collapsedSummary(.{ .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
         }
         try capture.feed(large);
         try capture.finish();
@@ -2646,7 +2646,7 @@ test "session_reads summary byte overflow retains neither partial mark nor targe
     const bytes = try std.testing.allocator.alloc(u8, feed_window.row_capacity);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 'x');
-    for ([_]View.Collapsed{ .{ .source = .activity, .position = 37, .ordinal = 2, .row = false, .content = FakeHost.textValue() }, .{ .source = .conversation, .position = 39, .ordinal = 3, .row = true, .content = FakeHost.textValue() } }) |source| {
+    for ([_]View.Collapsed{ .{ .position = 37, .ordinal = 2, .row = false, .content = FakeHost.textValue() }, .{ .position = 39, .ordinal = 3, .row = true, .content = FakeHost.textValue() } }) |source| {
         try file.setLength(io, 0);
         @memset(bytes, 'x');
         var row: RenderedRow = .{ .key = .{ .position = source.position }, .offset = 0, .length = 0, .tight = false, .provisional = false };

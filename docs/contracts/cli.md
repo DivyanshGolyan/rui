@@ -22,7 +22,7 @@ The CLI uses shallow resource-first commands with one canonical spelling per ope
 
 | Resource | Operations |
 | --- | --- |
-| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-conversation`, `list-parts`, `read-part`, human `resume` |
+| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-content`, `list-parts`, `read-part`, human `resume` |
 | `request` | `inspect`, `wait`, `recover`, `read-result`, `list` |
 | `action` | `inspect`, `allow`, `deny`, `background`, `stop`, `publish`, `list-parts`, `read-part`, explicit saved-content reads |
 | `host` | `start`, `stop`, `status`, `serve` |

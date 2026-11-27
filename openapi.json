@@ -1088,53 +1088,6 @@
         }
       }
     },
-    "/v1/conversation-content": {
-      "post": {
-        "operationId": "conversationContent",
-        "summary": "The content of one conversation item.",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/WireVersion"
-          },
-          {
-            "$ref": "#/components/parameters/HostInstance"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConversationContentRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The content bytes, from the requested offset.",
-            "content": {
-              "application/octet-stream": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "A refusal or failure.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorReply"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/public-parts": {
       "post": {
         "operationId": "publicParts",
@@ -1184,7 +1137,7 @@
     "/v1/public-part-content": {
       "post": {
         "operationId": "publicPartContent",
-        "summary": "The exact bytes of one part of an owner's parts value, framed as conversation content.",
+        "summary": "The exact bytes of one part of an owner's parts value, framed as activity content.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -4646,49 +4599,6 @@
           }
         ]
       },
-      "ConversationContentRequest": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "const": "33"
-          },
-          "kind": {
-            "const": "conversation_content"
-          },
-          "store": {
-            "type": "string",
-            "maxLength": 492,
-            "x-rui-max-bytes": 492
-          },
-          "session": {
-            "type": "string",
-            "maxLength": 128,
-            "x-rui-max-bytes": 128
-          },
-          "position": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "ordinal": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "start": {
-            "const": "0"
-          },
-          "stream": {
-            "const": true
-          }
-        },
-        "required": [
-          "version",
-          "kind",
-          "store",
-          "session",
-          "position",
-          "ordinal",
-          "start"
-        ],
-        "additionalProperties": false
-      },
       "Decimal": {
         "type": "string",
         "pattern": "^(0|[1-9][0-9]*)$",
@@ -4710,7 +4620,6 @@
               "host_unavailable",
               "result_unavailable",
               "action_unavailable",
-              "conversation_unavailable",
               "activity_unavailable",
               "failed_response_unavailable",
               "parts_unavailable"
