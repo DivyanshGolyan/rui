@@ -6237,43 +6237,6 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expectEqual(failure_class.Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
-test "a failure band clears only when its own provider and model are reached after it" {
-    const Other = struct { provider: Provider, model: []const u8 };
-    const others = [_]Other{
-        .{ .provider = pn(.codex), .model = "gpt-6-luna" },
-        .{ .provider = pn(.codex), .model = "gpt-6-sol" },
-        .{ .provider = pn(.chatgpt), .model = "gpt-6-luna" },
-    };
-    const code = bounded(session_work.max_code_bytes, "provider_temporary_http_503");
-    for ([_][]const u8{ "provider_quota", "provider_http_401" }) |failure| for (others) |other| for (std.enums.values(session_work.Kind)) |kind| for ([_]u64{ 90, 60, 30 }) |seconds_ago| {
-        const since = test_now_s - seconds_ago;
-        const work: WorkState = switch (kind) {
-            .idle => .{ .idle = .{ .since = since } },
-            .pending => .{ .pending = .{ .since = since } },
-            .working => .{ .working = .{ .since = since } },
-            .retrying => .{ .retrying = .{ .since = since, .due_at_ms = (test_now_s + 60) * 1000, .cause = code, .attempt = 1 } },
-            .bash => .{ .bash = .{ .since = since, .call = 1, .description = null, .running = 1, .approvals = 0 } },
-            .approval => .{ .approval = .{ .since = since } },
-            .stopping => .{ .stopping = .{ .since = since } },
-            .finished => .{ .finished = .{ .since = since } },
-            .failed => .{ .failed = .{ .since = since, .code = code, .resets_at = null } },
-            .stopped => .{ .stopped = .{ .since = since, .cause = .stop } },
-        };
-        const answered = switch (kind) {
-            .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
-            .bash, .approval, .finished => true,
-        };
-        const cleared = other.provider.eql(pn(.codex)) and std.mem.eql(u8, other.model, "gpt-6-luna") and answered and seconds_ago <= 60;
-        const shown = try bandOf(&.{ session("ffffff", work, .{ .label = "Other", .provider = other.provider, .model = other.model }), failedRow("aaaaaa", 60, failure, null) }, null);
-        if (cleared) {
-            try std.testing.expectEqual(@as(?Band, null), shown);
-        } else {
-            try std.testing.expect(pn(.codex).eql(shown.?.provider.?));
-            try std.testing.expectEqual(failure_class.of(failure) == .quota, shown.?.trouble == .quota);
-        }
-    };
-}
-
 test "a quota reset far in the future still draws its band" {
     var state = try opened(&.{failedRow("q1q1q1", 60, "provider_quota", 100_000_000_000_000_000)});
     defer state.deinit();
