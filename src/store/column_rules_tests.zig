@@ -487,7 +487,8 @@ fn cellSql(arena: std.mem.Allocator, column: schema.Column, cell: Cell) ![]const
         .int => |number| return std.fmt.allocPrint(arena, "{d}", .{number}),
         .text => |bytes| {
             const hex = try std.fmt.allocPrint(arena, "{x}", .{bytes});
-            return std.fmt.allocPrint(arena, if (column.type == .bytes) "x'{s}'" else "CAST(x'{s}' AS TEXT)", .{hex});
+            if (column.type == .bytes) return std.fmt.allocPrint(arena, "x'{s}'", .{hex});
+            return std.fmt.allocPrint(arena, "CAST(x'{s}' AS TEXT)", .{hex});
         },
     }
 }
