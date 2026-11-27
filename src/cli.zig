@@ -321,6 +321,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
                 store_schema.mysql_schema;
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
+        .store_check => try checkStore(init, parsed.get("store")),
         .host_start, .host_pause, .host_reload_tools, .host_status => try host(init, command, parsed),
         .host_restart => try @import("host_coordinator.zig").restartAll(init),
         .host_serve => unreachable,
@@ -4670,6 +4671,100 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
             try protocol_reply.checkCanonicalFailure(reply.command);
             return readFailureError(failure);
         },
+    }
+}
+
+/// `rui store check`: the one line per broken rule goes to stdout, the reason a check could not run to stderr.
+fn checkStore(init: std.process.Init, store: ?[]const u8) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, store, &selected_buffer);
+    var out_buffer: [4096]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(init.io, &out_buffer);
+    var refusal_buffer: [512]u8 = undefined;
+    var refusal = std.Io.File.stderr().writerStreaming(init.io, &refusal_buffer);
+    const status = try runStoreCheck(init.io, selected, &out.interface, &refusal.interface);
+    out.interface.flush() catch return error.Reported;
+    refusal.interface.flush() catch return error.Reported;
+    if (status == .done) return;
+    recordExit(status);
+    return error.Reported;
+}
+
+/// The command without its process: which Store file the selected Host directory's saved placement names, what the
+/// check printed, and how it ended (`done` only when no rule or reference is broken).
+fn runStoreCheck(io: std.Io, selected: []const u8, out: *std.Io.Writer, refusal: *std.Io.Writer) !caller_exit.Status {
+    const paths = try platform.resolveClientPaths(io, selected);
+    if (paths.kind == .mysql) {
+        try refusal.writeAll("rui: store check does not support a MySQL Store yet\n");
+        return .environment;
+    }
+    var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{paths.database.slice()}, 0) catch return error.InvalidArguments;
+    switch (try @import("store.zig").check_run.checkSqlite(path, out, refusal)) {
+        .checked => |result| {
+            if (result.breaking == 0) return .done;
+            try refusal.print("rui: store check: {d} of {d} rules and references are broken by {d} rows\n", .{ result.breaking, result.checked, result.rows });
+            return .refused;
+        },
+        .open_failed => try refusal.writeAll("rui: store check could not open the Store's SQLite file read-only; stop the Host first\n"),
+        .check_failed => try refusal.writeAll("rui: store check could not run a statement; the Store file is damaged or not a Rui Store\n"),
+        .format_mismatch => {},
+    }
+    return .environment;
+}
+
+test "SH-186 store check reads the Store its saved placement names, reports a broken one and refuses a MySQL one" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var memory: std.heap.ArenaAllocator = .init(gpa);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &memory, .gpa = gpa, .io = io, .environ_map = &environment, .preopens = .empty };
+    const check_run = @import("store.zig").check_run;
+    var clean_tmp = std.testing.tmpDir(.{});
+    defer clean_tmp.cleanup();
+    const clean_file = try check_run.storeFileForTesting(&clean_tmp, io, @import("store.zig").schema_version, false);
+    defer gpa.free(clean_file);
+    var broken_tmp = std.testing.tmpDir(.{});
+    defer broken_tmp.cleanup();
+    const broken_file = try check_run.storeFileForTesting(&broken_tmp, io, @import("store.zig").schema_version, true);
+    defer gpa.free(broken_file);
+    const broken_lines = check_run.broken_row_lines;
+    for ([_][]const u8{ "default", "moved", "mysql" }) |kind| {
+        errdefer std.debug.print("placement {s}\n", .{kind});
+        const dir = try std.fs.path.join(arena, &.{ tmp.root[0..tmp.root_len], kind });
+        const data = try std.fs.path.join(arena, &.{ dir, "data" });
+        var failure: start_report.Failure = undefined;
+        try host_start.savedEdit(init, dir, "providers", "{}", &failure);
+        const moved = std.mem.eql(u8, kind, "moved");
+        if (moved) try host_start.savedEdit(init, dir, "store.sqlite.dir", data, &failure);
+        if (std.mem.eql(u8, kind, "mysql")) try host_start.savedEdit(init, dir, "store.mysql.url", "env:PR5B_NEVER_RESOLVE_LOGIN", &failure);
+        if (moved) (try std.Io.Dir.cwd().createDirPathOpen(io, data, .{ .permissions = .fromMode(0o700) })).close(io);
+        // The Host directory always holds a broken decoy, so a check that ignored placement would report it.
+        const decoy = try std.fs.path.join(arena, &.{ dir, "rui.sqlite3" });
+        if (!std.mem.eql(u8, kind, "mysql")) try std.Io.Dir.copyFileAbsolute(broken_file, decoy, io, .{});
+        if (moved) try std.Io.Dir.copyFileAbsolute(clean_file, try std.fs.path.join(arena, &.{ data, "rui.sqlite3" }), io, .{});
+        var out_buffer: [1024]u8 = undefined;
+        var refusal_buffer: [1024]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&out_buffer);
+        var refusal: std.Io.Writer = .fixed(&refusal_buffer);
+        const status = try runStoreCheck(io, dir, &out, &refusal);
+        if (std.mem.eql(u8, kind, "default")) {
+            try std.testing.expectEqual(caller_exit.Status.refused, status);
+            try std.testing.expectEqualStrings(broken_lines, out.buffered());
+        } else if (moved) {
+            try std.testing.expectEqual(caller_exit.Status.done, status);
+            try std.testing.expectEqualStrings("", out.buffered());
+            try std.testing.expectEqualStrings("", refusal.buffered());
+        } else {
+            try std.testing.expectEqual(caller_exit.Status.environment, status);
+            try std.testing.expectEqualStrings("", out.buffered());
+            try std.testing.expect(std.mem.indexOf(u8, refusal.buffered(), "MySQL") != null);
+        }
     }
 }
 

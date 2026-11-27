@@ -19,6 +19,7 @@ ALLOWED = {
     "sqlite_tests.zig",
     "rsql.zig",
     "column_rules_tests.zig",
+    "check_run.zig",
 }
 ALLOWED_DIRECTORIES = ("sqlite_tests/",)
 
