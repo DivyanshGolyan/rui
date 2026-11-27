@@ -1,6 +1,7 @@
 //! What a column's own value rules accept. `schema.Column` owns each rule once: it renders the CHECK a test database
 //! enforces and `accepts` evaluates the same value, so the two cannot disagree; `engine.bind` calls it before a statement is sent.
 const std = @import("std");
+const char_set = @import("rules/char_set.zig");
 
 /// A bound value as a rule sees it.
 pub const Value = union(enum) { null, int: i64, octets: []const u8 };
@@ -30,10 +31,10 @@ pub fn accepts(comptime column: anytype, value: Value) bool {
         if (value.int < range.min) return false;
         if (range.max) |max| if (value.int > max) return false;
     }
-    if (column.initial) |set| if (value != .octets or value.octets.len == 0 or !inSet(set, value.octets[0])) return false;
+    if (column.initial) |set| if (value != .octets or value.octets.len == 0 or !char_set.inSet(set, value.octets[0])) return false;
     if (column.charset) |set| {
         if (value != .octets) return false;
-        for (value.octets) |byte| if (!inSet(set, byte)) return false;
+        for (value.octets) |byte| if (!char_set.inSet(set, byte)) return false;
     }
     return true;
 }
@@ -44,21 +45,5 @@ fn within(length: usize, bounds: anytype) bool {
 
 fn oneOf(values: []const []const u8, text: []const u8) bool {
     for (values) |value| if (std.mem.eql(u8, value, text)) return true;
-    return false;
-}
-
-/// Whether `byte` is in a character set written as ranges and literals, as `@charset` writes it (`a-z0-9_-`):
-/// `x-y` is a range except where the `-` leads or ends the set.
-pub fn inSet(comptime set: []const u8, byte: u8) bool {
-    var at: usize = 0;
-    while (at < set.len) {
-        if (at + 2 < set.len and set[at + 1] == '-') {
-            if (byte >= set[at] and byte <= set[at + 2]) return true;
-            at += 3;
-        } else {
-            if (byte == set[at]) return true;
-            at += 1;
-        }
-    }
     return false;
 }

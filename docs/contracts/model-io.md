@@ -603,12 +603,13 @@ Native same-model qualification exists for exact `gpt-6-luna` on Linux x86-64 an
 
 The V1 model adapter owns Codex request grammar, output interpretation, managed-route headers and authentication policy; the shared transport owns the HTTP/2 Client, sealed bytes and caller-selected response-header observations.
 Core stores no credentials; Host schedules acquisition and holds an opaque credential lease through the final launch check without interpreting its contents.
-The hidden foreground Host option `--observe-allowance` defaults off and captures only the six numeric primary and secondary used-percent, window-minutes and reset-at headers for managed signed-in native responses.
+A managed signed-in native response's six numeric primary and secondary used-percent, window-minutes and reset-at headers are captured as an allowance observation; the hidden foreground Host option `--observe-allowance` (default off) only adds the stderr line after completion.
 The Transfer codec manifest names the observed headers. The existing native-provider gate is transitional diagnostic scope, not connection or account identity.
 A Transfer freezes its issued Attempt and provider, then captures one complete final head with its observation time; interim heads and trailers do not change it.
 Missing, malformed or conflicting fields remain unavailable without refusing the model stream.
 The execution owner emits only bounded numeric fields through optional stderr after completion, with account identity unconfirmed and prior diagnostic loss marked; absent or dropped output is unavailable.
 The observation neither establishes a current account nor proves provider usage availability.
+The Host keeps the latest readable observation per served connection name in memory (`ConnectionUsage`): a window counts only with a numeric used percent and window length, a reply without one leaves the previous reading in place, and nothing is persisted. host_info reports each connection's reading as `usage` (`observed_at`, `primary`, `secondary`, each window `used_percent`, `minutes`, `reset_at`), `null` until one was read; a client names a window by its `minutes`, never by its slot.
 Resume uses persisted provider binding, without fixture/provider substitution.
 Refresh preserves account binding; decoded trusted-TLS-peer token claims are routing metadata, not independently verified identity.
 Encode provider strings with one bounded JSON encoder including all required control escapes and worst-case expansion.

@@ -708,7 +708,7 @@ def main():
                 "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "started_at": started_at, "custody_occupied": "0", "paused": False,
-                "capabilities": {"bash": True, "connections": [{"name": "codex", "label": "ChatGPT (device code)", "route": "chatgpt_device"}]},
+                "capabilities": {"bash": True, "connections": [{"name": "codex", "label": "ChatGPT (device code)", "route": "chatgpt_device", "usage": None}]},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             for paused in (True, False):

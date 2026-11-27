@@ -182,6 +182,12 @@ def help_case():
             dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
 
 
+# These Hosts start against a catalog that refuses every connection, so no result depends on reaching models.dev.
+# The one line a refused catalog may print is the whole of what startup is allowed to write to stderr.
+OFFLINE_CATALOG = ("--set", "models.catalogUrl=" + host_process.UNREACHABLE_CATALOG)
+CATALOG_ONLY_NOTICE = re.compile(r"(rui: models\.dev catalog unavailable \(\w+\); the saved catalog stands\n)?")
+
+
 def compiled_model_cases():
     import host_launch_fixture as launch
     models = tuple(model for model, row in CATALOG.items() if row.openai_listed)
@@ -242,7 +248,7 @@ def compiled_model_cases():
             shown = provider_prompt(master)
             assert "invalid model" not in shown and listing.strip() not in shown, shown
         assert saved.read_bytes() == original
-        started = launch.run_start(store, env)
+        started = launch.run_start(store, env, *OFFLINE_CATALOG)
         assert started.returncode == 0, started.stderr
         assert "retired-model" not in started.stderr, started.stderr
         assert saved.read_bytes() == original, "startup substituted or rewrote the pin"
@@ -277,8 +283,8 @@ def compiled_model_cases():
         for flags in (("--model", "gpt-6-sol"), ("--clear-model",)):
             defaults(home, *flags)
             retained = saved.read_bytes()
-            started = launch.run_start(store, env)
-            assert started.returncode == 0 and not started.stderr, started
+            started = launch.run_start(store, env, *OFFLINE_CATALOG)
+            assert started.returncode == 0 and CATALOG_ONLY_NOTICE.fullmatch(started.stderr), started
             assert saved.read_bytes() == retained
             launch.forced_crash_cleanup(store)
         completed = True

@@ -141,6 +141,7 @@ test {
     _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");
     _ = @import("ModelLists.zig");
+    _ = @import("ConnectionUsage.zig");
     _ = @import("listing_slot.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
