@@ -251,12 +251,16 @@ fn bind(self: *Self) void {
         .quiet = widget_style.of(caps, .{ .colour = .quiet }),
         .rule = widget_style.line(caps, .horizontal),
     };
-    self.model_choice.unicode = caps.unicode;
-    self.model_choice.show_more = self.standalone == null;
-    self.model_choice.ground = look.ground;
-    self.model_choice.selection = look.selection;
-    self.model_choice.hover_style = look.hover;
-    self.model_choice.quiet = look.quiet;
+    self.model_choice.present(.{
+        .unicode = caps.unicode,
+        .show_more = self.standalone == null,
+        .userdata = self,
+        .on_pick = pickModel,
+        .ground = look.ground,
+        .selection = look.selection,
+        .hover_style = look.hover,
+        .quiet = look.quiet,
+    });
     // Draw sets show_title, stacked_actions and action_gap; keep them, since event routing reads them between draws.
     var next = self.panel.props;
     next.title = self.title();
@@ -335,8 +339,6 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
 
 fn openModel(self: *Self) void {
     self.model_choice.openSource(.{ .context = self.backend.context, .read = self.backend.models }, self.session.provider, self.session.model.slice());
-    self.model_choice.userdata = self;
-    self.model_choice.on_pick = pickModel;
     if (!self.model_choice.active) self.failures[model_row] = " · models unavailable";
 }
 
@@ -1242,7 +1244,7 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
             }
             const text = try dump(&page, arena.allocator(), width, 20);
             for (text) |byte| try std.testing.expect(byte < 0x80);
-            try std.testing.expect(!page.panel.props.unicode and !page.model_choice.unicode);
+            try std.testing.expect(!page.panel.props.unicode and !page.model_choice.props.unicode);
             try std.testing.expect(std.mem.indexOf(u8, text, "Fix retry deadline") != null);
             if (state == 2) try std.testing.expect(std.mem.indexOf(u8, text, "+ bash") != null);
             if (state >= 3) {
@@ -1760,7 +1762,7 @@ test "Chat info standalone choices reuse edits hide pending preserve failures an
             try std.testing.expect(child.origin.col + child.surface.size.width <= model_surface.size.width);
         }
     };
-    try std.testing.expect(!page.model_choice.show_more);
+    try std.testing.expect(!page.model_choice.props.show_more);
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     fixture.state_value = .saved;
     try page.widget().handleEvent(&ctx, .tick);
@@ -1770,7 +1772,7 @@ test "Chat info standalone choices reuse edits hide pending preserve failures an
     page.refresh();
     try std.testing.expect(!page.standaloneOpen());
     page.bind();
-    try std.testing.expect(page.model_choice.show_more);
+    try std.testing.expect(page.model_choice.props.show_more);
 }
 
 test "Chat info standalone draw invalidation never falls through to enclosing page" {
@@ -2039,7 +2041,7 @@ test "Chat info standalone lifetime domain closes every phase without cancelling
             try std.testing.expectEqual(saves, fixture.save_calls);
             try std.testing.expect(page.standaloneField() == null);
             page.bind();
-            try std.testing.expect(page.model_choice.show_more);
+            try std.testing.expect(page.model_choice.props.show_more);
         }
     }
 }

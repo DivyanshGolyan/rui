@@ -169,14 +169,7 @@ field-leak line_intake.Pool.subscriber
 field-leak model_adapter.Preparation.page
 field-leak model_adapter.Preparation.request
 field-leak model_adapter.Preparation.settings
-field-leak model_choice.model_choice.ground
-field-leak model_choice.model_choice.hover_style
-field-leak model_choice.model_choice.on_pick
-field-leak model_choice.model_choice.quiet
-field-leak model_choice.model_choice.selection
-field-leak model_choice.model_choice.show_more
-field-leak model_choice.model_choice.unicode
-field-leak model_choice.model_choice.userdata
+field-leak model_choice.model_choice.props
 field-leak model_picker.Menu.entries
 field-leak mysql_url.mysql_url.database
 field-leak output_format.OutputMetadataReader.length
