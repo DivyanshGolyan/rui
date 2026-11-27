@@ -4268,7 +4268,7 @@ test "an unadmitted effort cycle emits no update and cannot refuse an Operation 
     const request = try prepareMemoForTesting(&setup, binding, null, .{});
     defer std.testing.allocator.free(request.bytes);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, request.bytes, "configuration_update"));
-    try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+    try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = .ofMessage("unsupported_value: reasoning.effort") } }, .effort_change_refused, .{});
     try std.testing.expect(try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort);
 }
@@ -4317,7 +4317,7 @@ test "Operation effort emission and refused restoration agree after a compaction
             const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
             previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
         }
-        try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+        try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = .ofMessage("unsupported_value: reasoning.effort") } }, .effort_change_refused, .{});
         const genuine = std.mem.eql(u8, chosen, "xhigh");
         const expected: protocol.ReasoningEffort = if (std.mem.eql(u8, chosen, "low")) .low else .high;
         try std.testing.expectEqual(@as(?protocol.ReasoningEffort, expected), (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort);
@@ -4367,7 +4367,7 @@ test "a refused top-level effort remains an ordinary provider failure without a 
         try std.testing.expectEqualStrings("model-a", parsed.value.object.get("model").?.string);
         try std.testing.expectEqualStrings(@tagName(effort), parsed.value.object.get("reasoning").?.object.get("effort").?.string);
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, request.bytes, "configuration_update"));
-        try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported effort" } }, .effort_change_refused, .{});
+        try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = .ofMessage("unsupported effort") } }, .effort_change_refused, .{});
         try std.testing.expect(try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
         try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort);
         var page_request: protocol.ActivityPage = .{ .session = session, .kinds = .initOne(.session_changed) };
@@ -4432,8 +4432,9 @@ test "a refused effort change retries without the update and later Operations ke
         const decision = execution.transferDecision(.{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 400 } }, classified);
         try std.testing.expectEqual(execution.FailureKind.effort_change_refused, decision.fail.kind);
         const provider_text = "unsupported_value: high is not supported";
-        try std.testing.expectEqualStrings(provider_text, provider_failure.report.slice());
-        const failure: store.ModelFailure = .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = provider_text } };
+        var provider_report: [protocol.max_report_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(provider_text, provider_failure.report.joined(&provider_report));
+        const failure: store.ModelFailure = .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = provider_failure.report } };
         try setup.storage.settleModelAttemptFailure(second, failure, .effort_change_refused, .{});
         const revision = (try setup.storage.inspectSessionForTesting(session.slice())).revision;
         try std.testing.expectEqual(changed.accepted.revision + @intFromBool(unrelated_revision), revision);
