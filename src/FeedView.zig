@@ -660,6 +660,7 @@ fn drawHover(self: *Self, ctx: vxfw.DrawContext, surface: vxfw.Surface) !void {
     self.hover.targets = &.{};
     const handler = self.handler orelse return;
     if (surface.size.width == 0) return;
+    var peer_hover: selecting.PeerHover = .{};
     var targets: std.ArrayList(Hover.Rect) = .empty;
     const scratch = try ctx.cell_arena.alloc(vaxis.Cell, surface.size.width);
     var rows = self.laidRows();
@@ -684,14 +685,9 @@ fn drawHover(self: *Self, ctx: vxfw.DrawContext, surface: vxfw.Surface) !void {
                 cell.style = Hover.underlined(cell.style);
             };
         }
-        if (handler.on_open != null) for (try selecting.peers(&self.window.document, cells, arena)) |span| {
-            const rect: Hover.Rect = .{ .row = @intCast(row), .col = span.start, .width = span.end - span.start };
-            try targets.append(arena, rect);
-            if (self.hover.contains(rect)) for (cells[span.start..span.end]) |*cell| {
-                cell.style = Hover.underlined(cell.style);
-            };
-        };
+        if (handler.on_open != null) try peer_hover.row(&self.window.document, cells, row, &self.hover, &targets, arena);
     }
+    peer_hover.paint(surface);
     self.hover.targets = targets.items;
 }
 
@@ -1172,7 +1168,13 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
             const hovered = try testFrame(&view, arena.allocator(), width, 12);
             if (is_summary) {
                 try std.testing.expectEqual(view.hover_style.bg, hovered.readCell(0, @intCast(rect.row)).style.bg);
-            } else for (@as(usize, @intCast(rect.col))..@as(usize, @intCast(rect.col)) + rect.width) |col| try std.testing.expectEqual(.single, hovered.readCell(col, @intCast(rect.row)).style.ul_style);
+            } else {
+                var underlined: usize = 0;
+                for (hovered.buffer) |cell| if (cell.style.ul_style == .single) {
+                    underlined += 1;
+                };
+                try std.testing.expectEqual(@as(usize, "Review this plan".len), underlined);
+            }
             try std.testing.expect(view.selection == null and actions.messages == 0 and actions.opened == 0);
             try view.widget().handleEvent(&ctx, .mouse_leave);
         }

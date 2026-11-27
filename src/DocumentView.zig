@@ -108,16 +108,14 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
     self.hover.targets = &.{};
     const handler = self.handler orelse return;
     var targets: std.ArrayList(Hover.Rect) = .empty;
-    if (handler.on_open != null) for (0..self.drawn.height) |row| {
-        const cells = surface.buffer[row * surface.size.width ..][0..surface.size.width];
-        for (try selecting.peers(self.document, cells, arena)) |span| {
-            const rect: Hover.Rect = .{ .row = @intCast(row), .col = span.start, .width = span.end - span.start };
-            try targets.append(arena, rect);
-            if (self.hover.contains(rect)) for (cells[span.start..span.end]) |*cell| {
-                cell.style = Hover.underlined(cell.style);
-            };
+    if (handler.on_open != null) {
+        var peer_hover: selecting.PeerHover = .{};
+        for (0..self.drawn.height) |row| {
+            const cells = surface.buffer[row * surface.size.width ..][0..surface.size.width];
+            try peer_hover.row(self.document, cells, row, &self.hover, &targets, arena);
         }
-    };
+        peer_hover.paint(surface);
+    }
     if (handler.on_click != null) if (handler.action_at) |action_at| {
         var rows = self.document.rowsFrom(self.layout(), self.laidFirst());
         for (0..self.drawn.height) |row| {
@@ -723,6 +721,48 @@ test "a drag over cells drawn before the text changed copies the text they showe
     try h.send(.drag, 4, 1);
     try h.send(.release, 4, 1);
     try std.testing.expectEqualStrings("third", h.copies(&copied));
+}
+
+test "SUI-182 peer hover underlines one complete visible Session link" {
+    const link = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end;
+    const separated = "See " ++ link ++ "One two" ++ TerminalText.link_close ++ " / " ++ link ++ "Again" ++ TerminalText.link_close ++ "\n";
+    const adjacent = "See " ++ link ++ "One two" ++ TerminalText.link_close ++ link ++ "Again" ++ TerminalText.link_close ++ "\n";
+    for ([_]struct { width: u16, text: []const u8, other: Hover.Rect }{
+        .{ .width = 24, .text = separated, .other = .{ .row = 0, .col = 14, .width = 5 } },
+        .{ .width = 24, .text = adjacent, .other = .{ .row = 0, .col = 11, .width = 5 } },
+        .{ .width = 7, .text = separated, .other = .{ .row = 2, .width = 5 } },
+    }) |case| {
+        const h = try Harness.init(case.text, .{ .width = case.width, .height = 4 });
+        defer h.deinit();
+        const wrapped = case.width == 7;
+        const first: Hover.Rect = .{ .row = 0, .col = 4, .width = if (wrapped) 3 else 7 };
+        const last: Hover.Rect = .{ .row = 1, .width = 3 };
+        const PointCase = struct { col: i16, row: i16, active: enum { first, other, none } };
+        for ([_]PointCase{
+            .{ .col = 4, .row = 0, .active = .first },
+            .{ .col = if (wrapped) 0 else 8, .row = if (wrapped) 1 else 0, .active = .first },
+            .{ .col = @intCast(case.other.col), .row = @intCast(case.other.row), .active = .other },
+            .{ .col = if (wrapped) 3 else 7, .row = if (wrapped) 1 else 0, .active = .none },
+        }) |target| {
+            try h.send(.motion, target.col, target.row);
+            const frame = try h.frame();
+            for (0..frame.size.height) |row| for (0..case.width) |col| {
+                const x: i17 = @intCast(col);
+                const y: i17 = @intCast(row);
+                const expected = switch (target.active) {
+                    .first => first.contains(x, y) or (wrapped and last.contains(x, y)),
+                    .other => case.other.contains(x, y),
+                    .none => false,
+                };
+                errdefer std.debug.print("width={d}, row={d}, col={d}\n", .{ case.width, row, col });
+                try std.testing.expectEqual(expected, frame.readCell(col, row).style.ul_style == .single);
+            };
+            try h.send(.press, target.col, target.row);
+            try h.send(.release, target.col, target.row);
+            try std.testing.expectEqualStrings(if (target.active == .none) "" else "k7m2qx", h.opened.items);
+            h.opened.clearRetainingCapacity();
+        }
+    }
 }
 
 test "DocumentView peer links and continuation hover only painted actionable spans" {
