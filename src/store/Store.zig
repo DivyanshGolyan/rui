@@ -37,6 +37,7 @@ const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const action_read_domain = @import("domain/action_read.zig");
 const reads_domain = @import("domain/reads.zig");
+const outcome_code = @import("../outcome_code.zig");
 const report_domain = @import("domain/report.zig");
 const session_list_read = @import("domain/session_list_read.zig");
 const session_report_read = @import("domain/session_report_read.zig");
@@ -1856,7 +1857,8 @@ pub const Store = struct {
         }
         const entry = try enter(self, .fromControl(faults.control_trace));
         defer entry.release();
-        var settlement: model_settlement_domain.SettleFailure = .{ .input = .{ .entry = &entry, .floor = self.reportScratch(@import("domain/history_floor.zig").FloorSearch), .prepared = prepared, .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition } };
+        var report_line: [outcome_code.max_report_bytes]u8 = undefined;
+        var settlement: model_settlement_domain.SettleFailure = .{ .input = .{ .report_line = &report_line, .entry = &entry, .floor = self.reportScratch(@import("domain/history_floor.zig").FloorSearch), .prepared = prepared, .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition } };
         entry.finishTransaction(model_settlement_domain.SettleFailure.Ordinary, faults, transition.run(&entry, model_settlement_domain.SettleFailure, &settlement, faults)) catch |err| {
             if (err == error.FloorPreparationRequired) return false;
             return err;

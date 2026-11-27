@@ -385,7 +385,17 @@ pub const SettleFailure = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .refusal;
-    pub const Input = struct { entry: *const store_core.Entry, floor: *history_floor_domain.FloorSearch, prepared: ?*const history_floor_domain.Prepared = null, io: std.Io, binding: AttemptBinding, failure: *const ModelFailure, disposition: *const ModelFailureClass };
+    pub const Input = struct {
+        entry: *const store_core.Entry,
+        floor: *history_floor_domain.FloorSearch,
+        prepared: ?*const history_floor_domain.Prepared = null,
+        io: std.Io,
+        binding: AttemptBinding,
+        failure: *const ModelFailure,
+        disposition: *const ModelFailureClass,
+        /// Where the report is written as one line: queued statements read it in place, so the caller's frame keeps it.
+        report_line: *[outcome_code.max_report_bytes]u8,
+    };
     pub const Result = void;
     pub const Ordinary = store_core.Ordinary.attempt_binding || error{FloorPreparationRequired};
     pub const Guards = store_core.Ordinary.attempt_binding;
@@ -397,11 +407,8 @@ pub const SettleFailure = struct {
     facts: attempt_facts.Result = undefined,
     content: FailureContent = .{ .diagnostic = null, .report = null },
     reads: union { source: refused_effort_source.Result, floor: *history_floor_domain.FloorSearch, context: context_changed.Result } = undefined,
-    /// The report as one line. Queued statements read it in place, so it lives as long as the settlement.
-    report_line: [outcome_code.max_report_bytes]u8 = undefined,
-
-    fn reportBytes(t: *SettleFailure) []const u8 {
-        return t.input.failure.report().joined(&t.report_line);
+    fn reportBytes(t: *const SettleFailure) []const u8 {
+        return t.input.failure.report().joined(t.input.report_line);
     }
 
     fn disposition(t: *const SettleFailure) ModelFailureClass {
