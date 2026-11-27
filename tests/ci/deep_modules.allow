@@ -187,7 +187,6 @@ field-leak overview_view.State.next_list_ms
 field-leak overview_view.State.notice
 field-leak overview_view.State.requests
 field-leak overview_view.State.sidebar_rule
-field-leak protocol_reply.CommandObservation.target
 field-leak protocol_reply.SessionListPage.rows
 field-leak provider.Reactor.credentials
 field-leak provider.Reactor.wake
@@ -208,7 +207,6 @@ field-leak store/domain/configuration.ConfigurationReads.next
 field-leak store/domain/configuration.ConfigurationReads.saved_command
 field-leak store/domain/configuration.ConfigurationReads.saved_loaded
 field-leak store/domain/configuration.ConfigurationReads.saved_tools
-field-leak store/domain/configuration.CurrentConfiguration.app_lane
 field-leak store/domain/configuration.CurrentConfiguration.label
 field-leak store/domain/configuration.CurrentConfiguration.model
 field-leak store/domain/configuration.CurrentConfiguration.workspace

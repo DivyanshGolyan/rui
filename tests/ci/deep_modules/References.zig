@@ -309,7 +309,7 @@ const Pass = struct {
     ast: *const Ast,
     stats: *Stats,
     access: std.AutoHashMapUnmanaged(Ast.Node.Index, Access) = .empty,
-    /// The call that a receiver expression is called through.
+    /// The call that a field of a place is called through, at any depth of the place.
     called: std.AutoHashMapUnmanaged(Ast.Node.Index, Ast.Node.Index) = .empty,
     expected: std.AutoHashMapUnmanaged(Ast.Node.Index, TypeRef) = .empty,
 
@@ -330,11 +330,12 @@ const Pass = struct {
         for (0..self.ast.nodes.len) |i| {
             var buffer: [1]Ast.Node.Index = undefined;
             const place = placeOf(self.ast, nodeAt(i), &buffer) orelse continue;
-            if (place.access == .call and place.roots.len == 1) try self.called.put(self.arena, place.roots[0], nodeAt(i));
             for (place.roots) |root| {
                 var cur: ?Ast.Node.Index = root;
                 while (cur) |node| : (cur = suffixBase(self.ast, node)) {
-                    if (self.ast.nodeTag(node) == .field_access) try self.access.put(self.arena, node, place.access);
+                    if (self.ast.nodeTag(node) != .field_access) continue;
+                    try self.access.put(self.arena, node, place.access);
+                    if (place.access == .call) try self.called.put(self.arena, node, nodeAt(i));
                 }
             }
         }
