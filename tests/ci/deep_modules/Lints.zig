@@ -17,8 +17,10 @@ const Wrappers = @import("Wrappers.zig");
 
 /// Every lint's findings over `sources`, limited to `scope` when it is set, sorted by lint and then by key.
 pub fn run(arena: Allocator, sources: *const Sources, items: *const Items.Items, scope: ?Sources.NodeId) Allocator.Error![]Diagnostic.Diagnostic {
-    const refs = try TestCode.production(arena, sources, items, try References.collect(arena, sources, items));
-    var wrappers = try Wrappers.find(arena, items, sources, refs);
+    const all = try References.collect(arena, sources, items);
+    const refs = try TestCode.production(arena, sources, items, all);
+    // A wrapper is a wrapper wherever it is called from, so its shape is read with every reference.
+    var wrappers = try Wrappers.find(arena, items, sources, all);
     const graph = try Graph.build(arena, items, refs, &wrappers);
     var found: std.ArrayList(Diagnostic.Diagnostic) = .empty;
     try found.appendSlice(arena, try ModuleCycle.check(arena, sources, items, refs, scope));
@@ -41,6 +43,7 @@ fn lessThan(_: void, a: Diagnostic.Diagnostic, b: Diagnostic.Diagnostic) bool {
 }
 
 const testing = std.testing;
+const Fixture = @import("Fixture.zig");
 
 fn diagnostic(lint: Diagnostic.Lint, key: []const u8) Diagnostic.Diagnostic {
     return .{ .lint = lint, .key = key, .message = "", .location = null, .notes = &.{}, .picture = .{ .lists = .{ .shown = 0, .hidden = 0, .lists = &.{} } } };
@@ -75,4 +78,34 @@ test "sorted of nothing is nothing" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     try testing.expectEqual(@as(usize, 0), (try sorted(arena_state.allocator(), &.{})).len);
+}
+
+test "a wrapper only tests call is still a wrapper, so it does not hide a shallow module" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var store: std.ArrayList(u8) = .empty;
+    var app: std.ArrayList(u8) = .empty;
+    try store.appendSlice(a, "pub const Store = struct {\n    n: u8,\n");
+    try app.appendSlice(a, "const store = @import(\"store.zig\");\npub fn run(s: *store.Store) u8 {\n    var total: u8 = 0;\n");
+    for (0..8) |i| {
+        try store.print(a, "    pub fn m{d}(self: *Store) u8 {{\n        return self.n + {d};\n    }}\n", .{ i, i });
+        try app.print(a, "    total += s.m{d}();\n", .{i});
+    }
+    for (0..9) |i| try store.print(a, "    fn w{d}(self: *Store) u8 {{\n        return self.n;\n    }}\n", .{i});
+    try store.appendSlice(a, "};\ntest \"w\" {\n    var s: Store = undefined;\n");
+    for (0..9) |i| try store.print(a, "    _ = s.w{d}();\n", .{i});
+    try store.appendSlice(a, "}\n");
+    try app.appendSlice(a, "    return total;\n}\n");
+    const loaded = try Fixture.load(a, &.{
+        .{ .path = "src/main.zig", .text = "const store = @import(\"store.zig\");\nconst app = @import(\"app.zig\");\n" },
+        .{ .path = "src/store.zig", .text = store.items },
+        .{ .path = "src/app.zig", .text = app.items },
+    }, "src/main.zig");
+    const found = try run(a, &loaded.sources, &loaded.items, null);
+    var shallow: usize = 0;
+    for (found) |d| {
+        if (d.lint == .@"shallow-module") shallow += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), shallow);
 }
