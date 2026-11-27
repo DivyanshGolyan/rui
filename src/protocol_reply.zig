@@ -4829,3 +4829,30 @@ test "CM-68 a host info reply whose usage numbers are not in the Host's own form
         if (parseHostInfo(bad, "/sqlite")) |_| return error.TestUnexpectedResult else |_| {}
     }
 }
+
+test "CM-68 every used percent a Host admits is shown in a form its own client reads" {
+    const host_reply = @import("host_reply.zig");
+    const codex = connection.Name.parse("codex").?;
+    var entries: [1]provider_route.Entry = undefined;
+    entries[0] = .{ .name = codex, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true };
+    const negative_zero = -@as(f64, 0);
+    const cases = [_]struct { used: f64, shown: f64 }{
+        .{ .used = 0, .shown = 0 },
+        .{ .used = negative_zero, .shown = 0 },
+        .{ .used = 0.04, .shown = 0 },
+        .{ .used = 25.55, .shown = 25.6 },
+        .{ .used = 99.95, .shown = 100 },
+        .{ .used = 100, .shown = 100 },
+        .{ .used = protocol.max_usage_percent, .shown = protocol.max_usage_percent },
+        .{ .used = 1e12, .shown = protocol.max_usage_percent },
+        .{ .used = std.math.floatMax(f64), .shown = protocol.max_usage_percent },
+    };
+    for (cases) |case| {
+        const readings = [_]?protocol.UsageReading{.{ .observed_at = 1, .primary = .{ .used_percent = case.used, .minutes = 60, .reset_at = null }, .secondary = null }};
+        const info: host_reply.HostInfo = .{ .store = "/sqlite", .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .connections = &entries, .usage = &readings, .doublewrite = null, .settings_digest = null };
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(host_reply.renderHostInfo, .{info});
+        const facts = (try parseHostInfo(response.slice(), "/sqlite")).ready;
+        try std.testing.expectApproxEqAbs(case.shown, facts.capabilities.connections.slice()[0].usage.?.primary.?.used_percent, 0.05);
+    }
+}

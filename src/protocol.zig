@@ -2776,6 +2776,12 @@ pub const max_usage_percent: f64 = 1_000_000;
 
 const usage_percent_bytes = 24;
 
+/// The percent a reply shows: never below zero (a signed zero is zero, so the Host's own output stays readable) and never above `max_usage_percent`.
+fn usagePercent(used: f64) f64 {
+    if (!(used > 0)) return 0;
+    return @min(used, max_usage_percent);
+}
+
 pub const UsageWindowJson = struct {
     value: UsageWindow,
 
@@ -2785,7 +2791,7 @@ pub const UsageWindowJson = struct {
 
     pub fn writeJson(self: *const UsageWindowJson, out: *std.Io.Writer) !void {
         var text: [usage_percent_bytes]u8 = undefined;
-        const percent = std.fmt.bufPrint(&text, "{d:.1}", .{@min(self.value.used_percent, max_usage_percent)}) catch unreachable;
+        const percent = std.fmt.bufPrint(&text, "{d:.1}", .{usagePercent(self.value.used_percent)}) catch unreachable;
         try writeShape(out, json_shape, .{ percent, self.value.minutes, self.value.reset_at });
     }
 };
