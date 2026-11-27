@@ -992,7 +992,7 @@ test "SUI-186 a model on a limited connection says so and names another connecti
     var choice: Self = .{};
     choice.openSource(.{ .context = &limits, .read = Limits.read }, work, "");
     const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} });
-    for (0..4) |y| {
+    for (0..drawn.size.height) |y| {
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..drawn.size.width) |x| try text.writer.writeAll(drawn.readCell(@intCast(x), @intCast(y)).char.grapheme);
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "limit reached") == null);
