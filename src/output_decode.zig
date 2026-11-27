@@ -814,7 +814,7 @@ fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
 test "an HTTP error body keeps its refusal and the provider's own words" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const cases = [_]struct { body: []const u8, status: u16, refusal: ?transport_policy.Refusal, report: []const u8 }{
+    const cases = [_]struct { body: []const u8, status: u16, refusal: ?transport_policy.Refusal, report: []const u8, cut: [2]bool = .{ false, false } }{
         .{ .body = "{\"error\":{\"message\":\"The model `gpt-x` does not exist.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"model_not_found\"}}", .status = 404, .refusal = .model_unavailable, .report = "model_not_found: The model `gpt-x` does not exist." },
         .{ .body = "{\"error\":{\"message\":\"Unsupported parameter.\",\"type\":\"invalid_request_error\",\"code\":null}}", .status = 400, .refusal = null, .report = "invalid_request_error: Unsupported parameter." },
         .{ .body = "{\"detail\":\"Unsupported model\"}", .status = 400, .refusal = null, .report = "Unsupported model" },
@@ -822,7 +822,7 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
         .{ .body = "{\"error\":{\"code\":\"cyber_policy\"},\"late\":[1,]}", .status = 403, .refusal = null, .report = "" },
         .{ .body = "not json", .status = 502, .refusal = null, .report = "" },
         .{ .body = "{\"error\":{\"code\":\"cyber_policy\"}}", .status = 200, .refusal = null, .report = "" },
-        .{ .body = "{\"error\":{\"code\":\"" ++ comptime repeat("c", 300) ++ "\",\"message\":\"m\"}}", .status = 400, .refusal = null, .report = comptime repeat("c", 256) ++ "…: m" },
+        .{ .body = "{\"error\":{\"code\":\"" ++ comptime repeat("c", 300) ++ "\",\"message\":\"m\"}}", .status = 400, .refusal = null, .report = comptime repeat("c", 256) ++ "…: m", .cut = .{ true, false } },
     };
     var classified: Classified = undefined;
     for (cases) |case| {
@@ -830,6 +830,7 @@ test "an HTTP error body keeps its refusal and the provider's own words" {
         try std.testing.expectEqual(case.refusal, classified.failure.refusal);
         if (case.refusal) |refusal| try std.testing.expectEqual(execution.ErrorResponse{ .refusal = refusal }, classified.response);
         try expectReport(case.report, &classified.failure.report);
+        try expectCuts(case.cut, &classified.failure.report);
     }
     const ordered = [_]struct { body: []const u8, status: u16, kind: std.meta.Tag(execution.ErrorResponse), report: []const u8 }{
         .{ .body = "{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Out.\"}}", .status = 429, .kind = .quota, .report = "insufficient_quota: Out." },
@@ -924,6 +925,10 @@ pub fn testingProviderFailure() *ProviderFailure {
 fn expectReport(expected: []const u8, report: *const failure_report.Report) !void {
     var out: [outcome_code.max_report_bytes]u8 = undefined;
     try std.testing.expectEqualStrings(expected, report.joined(&out));
+}
+
+fn expectCuts(expected: [2]bool, report: *const failure_report.Report) !void {
+    try std.testing.expectEqual(expected, [2]bool{ report.code.cut, report.message.cut });
 }
 
 const testing_item_event = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":";
@@ -1285,7 +1290,7 @@ test "a provider error event keeps its refusal and the provider's own words" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const long = comptime repeat("é", 200);
-    const cases = [_]struct { event: []const u8, err: anyerror, refusal: ?transport_policy.Refusal, report: []const u8 }{
+    const cases = [_]struct { event: []const u8, err: anyerror, refusal: ?transport_policy.Refusal, report: []const u8, cut: [2]bool = .{ false, false } }{
         .{ .event = "{\"type\":\"error\",\"code\":\"cyber_policy\",\"message\":\"This request has been flagged for potentially high-risk cyber activity.\",\"param\":null}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity." },
         .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"model_not_found\",\"message\":\"No such model.\"}}}", .err = error.PermanentProviderFailure, .refusal = .model_unavailable, .report = "model_not_found: No such model." },
         .{ .event = "{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"Overloaded,\\ntry\\tlater.\"}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "server_error: Overloaded, try later." },
@@ -1293,8 +1298,8 @@ test "a provider error event keeps its refusal and the provider's own words" {
         .{ .event = "{\"type\":\"error\",\"code\":\"insufficient_quota\",\"message\":7}", .err = error.PermanentProviderFailure, .refusal = .quota, .report = "insufficient_quota" },
         .{ .event = "{\"type\":\"error\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"Limit\"}}", .err = error.PermanentProviderFailure, .refusal = .quota, .report = "usage_limit_reached: Limit" },
         .{ .event = "{\"type\":\"error\",\"error\":{\"code\":\"\",\"type\":\"usage_limit_reached\",\"message\":\"Limit\"}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "usage_limit_reached: Limit" },
-        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: " ++ comptime repeat("é", 128) ++ "…" },
-        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"x" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: x" ++ comptime repeat("é", 127) ++ "…" },
+        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: " ++ comptime repeat("é", 128) ++ "…", .cut = .{ false, true } },
+        .{ .event = "{\"type\":\"error\",\"code\":\"bio_policy\",\"message\":\"x" ++ long ++ "\"}", .err = error.PermanentProviderFailure, .refusal = .policy, .report = "bio_policy: x" ++ comptime repeat("é", 127) ++ "…", .cut = .{ false, true } },
         .{ .event = "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}", .err = error.TemporaryProviderFailure, .refusal = null, .report = "" },
         .{ .event = "{\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"Too\\u007flong.\"}", .err = error.ContextOverflow, .refusal = null, .report = "context_length_exceeded: Too long." },
     };
@@ -1304,6 +1309,7 @@ test "a provider error event keeps its refusal and the provider's own words" {
         try std.testing.expectError(case.err, validateTestingSse(&tmp, sse, 4096));
         try std.testing.expectEqual(case.refusal, testingProviderFailure().refusal);
         try expectReport(case.report, &testingProviderFailure().report);
+        try expectCuts(case.cut, &testingProviderFailure().report);
     }
 }
 

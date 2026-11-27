@@ -84,42 +84,54 @@ pub const Report = struct {
     }
 };
 
-test "joined puts the separator only between two parts and marks each cut part" {
-    var out: [outcome_code.max_report_bytes]u8 = undefined;
+fn repeat(comptime unit: []const u8, comptime count: usize) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (0..count) |_| out = out ++ unit;
+        return out;
+    }
+}
+
+/// What reading a provider's code and message leaves: the parts as the decoder builds them.
+fn read(code: []const u8, message: []const u8) Report {
     var report: Report = .{};
-    try std.testing.expectEqualStrings("", report.joined(&out));
-    try report.message.text.set("m");
-    try std.testing.expectEqualStrings("m", report.joined(&out));
-    try report.code.text.set("c");
-    try std.testing.expectEqualStrings("c: m", report.joined(&out));
-    report.code.cut = true;
-    report.message.cut = true;
-    try std.testing.expectEqualStrings("c…: m…", report.joined(&out));
-    report.message.clear();
-    try std.testing.expectEqualStrings("c…", report.joined(&out));
+    for ([_]*Part{ &report.code, &report.message }, [_][]const u8{ code, message }) |part, bytes| {
+        _ = part.append(bytes);
+        part.finish();
+    }
+    return report;
 }
 
-test "append keeps a whole scalar or none of it and marks the cut" {
-    var part: Part = .{};
-    for (0..max_part_bytes / 2) |_| try std.testing.expect(part.append("é"));
-    try std.testing.expect(!part.cut);
-    try std.testing.expect(!part.append("é"));
-    try std.testing.expect(part.cut);
-    try std.testing.expectEqual(@as(usize, max_part_bytes), part.text.len);
-    var odd: Part = .{};
-    try std.testing.expect(odd.append("x"));
-    for (0..max_part_bytes / 2 - 1) |_| try std.testing.expect(odd.append("é"));
-    try std.testing.expect(!odd.append("é"));
-    try std.testing.expectEqual(@as(usize, max_part_bytes - 1), odd.text.len);
-}
-
-test "finish makes a part one line and drops one that is not UTF-8" {
-    var part: Part = .{};
-    try part.text.set("a\nb\tc\x7fd");
-    part.finish();
-    try std.testing.expectEqualStrings("a b c d", part.text.slice());
-    part.text.bytes[0] = 0xff;
-    part.text.len = 1;
-    part.finish();
-    try std.testing.expectEqual(@as(usize, 0), part.text.len);
+test "CM-69 a provider failure report keeps its code and message, each whole or cut, as one line" {
+    const cases = [_]struct { code: []const u8, message: []const u8, kept_code: []const u8, kept_message: []const u8, cut: [2]bool, line: []const u8 }{
+        // Absent parts: nothing, one part without a separator, both with one.
+        .{ .code = "", .message = "", .kept_code = "", .kept_message = "", .cut = .{ false, false }, .line = "" },
+        .{ .code = "", .message = "m", .kept_code = "", .kept_message = "m", .cut = .{ false, false }, .line = "m" },
+        .{ .code = "c", .message = "", .kept_code = "c", .kept_message = "", .cut = .{ false, false }, .line = "c" },
+        .{ .code = "c", .message = "m", .kept_code = "c", .kept_message = "m", .cut = .{ false, false }, .line = "c: m" },
+        // Each part is cut at its own bound, and the flags are independent.
+        .{ .code = repeat("c", 300), .message = "m", .kept_code = repeat("c", 256), .kept_message = "m", .cut = .{ true, false }, .line = repeat("c", 256) ++ "…: m" },
+        .{ .code = "c", .message = repeat("m", 300), .kept_code = "c", .kept_message = repeat("m", 256), .cut = .{ false, true }, .line = "c: " ++ repeat("m", 256) ++ "…" },
+        .{ .code = repeat("c", 257), .message = repeat("m", 257), .kept_code = repeat("c", 256), .kept_message = repeat("m", 256), .cut = .{ true, true }, .line = repeat("c", 256) ++ "…: " ++ repeat("m", 256) ++ "…" },
+        // A part exactly at the bound is whole.
+        .{ .code = "", .message = repeat("m", 256), .kept_code = "", .kept_message = repeat("m", 256), .cut = .{ false, false }, .line = repeat("m", 256) },
+        // A cut never splits a scalar: it keeps the longest valid prefix.
+        .{ .code = "", .message = repeat("é", 200), .kept_code = "", .kept_message = repeat("é", 128), .cut = .{ false, true }, .line = repeat("é", 128) ++ "…" },
+        .{ .code = "", .message = "x" ++ repeat("é", 200), .kept_code = "", .kept_message = "x" ++ repeat("é", 127), .cut = .{ false, true }, .line = "x" ++ repeat("é", 127) ++ "…" },
+        // An ellipsis the provider sent is text, not a cut.
+        .{ .code = "c…", .message = "wait…", .kept_code = "c…", .kept_message = "wait…", .cut = .{ false, false }, .line = "c…: wait…" },
+        // Control bytes become spaces, so a part is one line.
+        .{ .code = "a\nb", .message = "x\ty\x7fz", .kept_code = "a b", .kept_message = "x y z", .cut = .{ false, false }, .line = "a b: x y z" },
+        // A part that is not UTF-8 is dropped.
+        .{ .code = "c", .message = "\xff", .kept_code = "c", .kept_message = "", .cut = .{ false, false }, .line = "c" },
+    };
+    var out: [outcome_code.max_report_bytes]u8 = undefined;
+    for (cases) |case| {
+        const report = read(case.code, case.message);
+        try std.testing.expectEqualStrings(case.kept_code, report.code.text.slice());
+        try std.testing.expectEqualStrings(case.kept_message, report.message.text.slice());
+        try std.testing.expectEqual(case.cut, [2]bool{ report.code.cut, report.message.cut });
+        try std.testing.expectEqualStrings(case.line, report.joined(&out));
+        try std.testing.expectEqual(case.line.len == 0, report.isEmpty());
+    }
 }
