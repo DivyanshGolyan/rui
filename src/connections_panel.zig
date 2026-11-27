@@ -22,34 +22,34 @@ pub const Rows = struct {
         self.fields[self.len] = .{ .label = label, .value = out.buffered() };
         self.len += 1;
     }
-};
 
-/// The rows to draw for `facts` at Unix second `now`, in served order. Each connection takes a row with its name and sign-in,
-/// then one row per usage window, then one row for how old the reading is, so every row fits a narrow screen.
-pub fn build(rows: *Rows, facts: []const protocol.ConnectionFact, now: u64) []const Panel.Field {
-    rows.len = 0;
-    for (facts[0..@min(facts.len, connection.max_served)], 0..) |fact, index| {
-        const name = fact.name.slice();
-        @memcpy(rows.names[index][0..name.len], name);
-        rows.add(rows.names[index][0..name.len], "{s}", .{fact.label.slice()});
-        const reading = fact.usage orelse {
-            // A browser sign-in sends no usage headers; any other connection simply has not reported yet.
-            rows.add("", "{s}", .{if (fact.route == .chatgpt_plan) "no usage for browser sign-ins" else "no usage seen yet"});
-            continue;
-        };
-        inline for (.{ reading.primary, reading.secondary }) |maybe| if (maybe) |window| {
+    /// The rows to draw for `facts` at Unix second `now`, in served order. Each connection takes a row with its name and sign-in,
+    /// then one row per usage window, then one row for how old the reading is, so every row fits a narrow screen.
+    pub fn build(rows: *Rows, facts: []const protocol.ConnectionFact, now: u64) []const Panel.Field {
+        rows.len = 0;
+        for (facts[0..@min(facts.len, connection.max_served)], 0..) |fact, index| {
+            const name = fact.name.slice();
+            @memcpy(rows.names[index][0..name.len], name);
+            rows.add(rows.names[index][0..name.len], "{s}", .{fact.label.slice()});
+            const reading = fact.usage orelse {
+                // A browser sign-in sends no usage headers; any other connection simply has not reported yet.
+                rows.add("", "{s}", .{if (fact.route == .chatgpt_plan) "no usage for browser sign-ins" else "no usage seen yet"});
+                continue;
+            };
+            inline for (.{ reading.primary, reading.secondary }) |maybe| if (maybe) |window| {
+                var buffer: [max_line]u8 = undefined;
+                var out: std.Io.Writer = .fixed(&buffer);
+                writeWindow(&out, window, now) catch {};
+                rows.add("", "{s}", .{out.buffered()});
+            };
             var buffer: [max_line]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
-            writeWindow(&out, window, now) catch {};
-            rows.add("", "{s}", .{out.buffered()});
-        };
-        var buffer: [max_line]u8 = undefined;
-        var out: std.Io.Writer = .fixed(&buffer);
-        writeAge(&out, now -| reading.observed_at) catch {};
-        rows.add("", "as of {s}", .{out.buffered()});
+            writeAge(&out, now -| reading.observed_at) catch {};
+            rows.add("", "as of {s}", .{out.buffered()});
+        }
+        return rows.fields[0..rows.len];
     }
-    return rows.fields[0..rows.len];
-}
+};
 
 fn writeWindow(out: *std.Io.Writer, window: protocol.UsageWindow, now: u64) std.Io.Writer.Error!void {
     try writeName(out, window.minutes);
@@ -106,7 +106,7 @@ test "SUI-182 the Connections reference names each window by its length and says
         served("odd", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now - 5, .primary = odd, .secondary = null }),
     };
     var rows: Rows = .{};
-    const shown = build(&rows, &facts, now);
+    const shown = rows.build(&facts, now);
     const expected = [_][2][]const u8{
         .{ "work", "ChatGPT (device code)" },
         .{ "", "weekly 25% used · resets in 3 d 4 h" },

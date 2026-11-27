@@ -386,7 +386,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (self.reference == .connections) {
             reference.single_column = true;
             reference.fields = if (self.connection_facts) |snapshot|
-                connections_panel.build(&self.connection_rows, snapshot.facts.slice(), snapshot.now)
+                self.connection_rows.build(snapshot.facts.slice(), snapshot.now)
             else
                 &unavailable_rows;
         }
@@ -1225,9 +1225,9 @@ test "SUI-182 App settings Connections opens a read-only reference of each serve
         page.select(.connections);
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(page.reference_open);
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 120, .height = 6 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 120, .height = 12 }, .cell_size = .{} });
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
-        for (0..2) |row| {
+        for (0..drawn.size.height) |row| {
             for (0..drawn.size.width) |col| try text.writer.writeAll(drawn.readCell(@intCast(col), @intCast(row)).char.grapheme);
             try text.writer.writeByte('\n');
         }
