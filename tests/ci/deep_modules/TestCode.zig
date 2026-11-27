@@ -75,7 +75,10 @@ fn mark(arena: Allocator, sources: *const Sources, items: *const Items.Items, bo
             var from_code = false;
             const named = uses.get(item.name) orelse continue;
             for (named.items) |held| {
-                const holder = held orelse continue;
+                const holder = held orelse {
+                    from_test = true;
+                    continue;
+                };
                 if (holder == own) continue;
                 if (marked[@backingInt(holder)]) from_test = true else from_code = true;
             }
@@ -166,6 +169,14 @@ test "a test declaration nested in a production function does not make it test c
     defer arena.deinit();
     const a = arena.allocator();
     try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ "pub fn run(x: *q.Q) void {\n    const Local = struct {\n        test \"check\" {\n            try std.testing.expect(true);\n        }\n    };\n    _ = Local;\n    x.items = 1;\n}\n"));
+}
+
+test "a function only a test declaration calls is test code, and so is what it calls" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqual(@as(usize, 0), try leaks(a, header ++ "fn set(x: *q.Q) void {\n    x.items = 1;\n}\nfn outer(x: *q.Q) void {\n    set(x);\n}\ntest \"t\" {\n    var v: q.Q = undefined;\n    outer(&v);\n}\n"));
+    try testing.expectEqual(@as(usize, 1), try leaks(a, header ++ "fn set(x: *q.Q) void {\n    x.items = 1;\n}\npub fn run(x: *q.Q) void {\n    set(x);\n}\ntest \"t\" {\n    var v: q.Q = undefined;\n    set(&v);\n}\n"));
 }
 
 test "a function a production function names through an unknown receiver stays production" {
