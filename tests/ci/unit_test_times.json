@@ -2557,7 +2557,7 @@
   "session_work.test.a stop that selected the active Turn outranks its Operation": 0,
   "session_work.test.actions cover proposal and stopping combinations": 3.03859999917222e-05,
   "session_work.test.actions derive from work inputs": 0.00015710600001739294,
-  "session_work.test.SUI-182 attention and standing follow the work state alone across every state kind and optional ID": 2.1631999970850302e-05,
+  "session_work.test.SUI-182 attention and standing follow the work state and its served decision across every state kind and optional ID": 2.1631999970850302e-05,
   "session_work.test.inputs no writer produces are corrupt": 1.633499999798005e-05,
   "session_work.test.progress follows the work table": 5.537999982152542e-06,
   "session_work.test.saved MCP call lines survive pending, running and completed Actions at every boundary": 1.594400004023555e-05,

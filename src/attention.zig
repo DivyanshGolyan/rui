@@ -26,7 +26,7 @@ pub const Status = enum {
     failed,
 
     pub fn of(work: session_work.Work) Status {
-        return statusOf(session_work.standing(work.state), session_work.attention(work));
+        return statusOf(session_work.standing(work.state, work.actions.decide != null), session_work.attention(work));
     }
 
     pub fn next(held: ?Status, was: ?Reading, now: Reading, opening: bool) ?Status {
