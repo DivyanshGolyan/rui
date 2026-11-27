@@ -421,18 +421,6 @@ fn runCounts(a: *ReadAccess) !void {
     return store_access.runNamed(a, report_domain.session_count_failures ++ report_domain.work_failures, error.CorruptStore);
 }
 
-pub fn openPublicConversationContent(a: *ReadAccess, request: *const conversation_read.ConversationContent) !ContentLocation {
-    if (request.position == 0 or request.position > std.math.maxInt(i64) or
-        request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
-    const content = try publicConversationContent(a, request.session.slice(), request.position, request.ordinal);
-    const reference = switch (content.value) {
-        .text => |reference| reference,
-        .parts => return error.ContentIsParts,
-    };
-    if (request.start > reference.length) return error.RangeOutOfBounds;
-    return .{ .store = a.store, .content_id = content.id, .reference = reference };
-}
-
 const answer_entry = blk: {
     const Phase = codec_abi.Phase;
     const final_answer = std.fmt.comptimePrint("{d}", .{@backingInt(Phase.final_answer)});

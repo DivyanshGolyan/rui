@@ -3915,7 +3915,7 @@ test "cleanup publication follows complete execution retirement" {
         .encoded = "{\\\"description\\\":\\\"Print test marker\\\",\\\"cmd\\\":\\\"printf x\\\",\\\"timeout_ms\\\":1000}",
         .decoded = arguments,
     }});
-    const arguments_location = try storage.openPublicConversationContent(&content);
+    const arguments_location = try storage.openActivityContent(&content);
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
     var used: std.atomic.Value(u64) = .init(0);

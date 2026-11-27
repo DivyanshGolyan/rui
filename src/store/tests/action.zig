@@ -355,7 +355,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             const proposed = try store_core.activityPageForTesting(&storage, .{ .session = session, .direction = .backward, .kinds = rows });
             try std.testing.expectEqual(@as(usize, 1), proposed.count);
             try std.testing.expect(proposed.items[0].value == .user);
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{
                 .session = session,
                 .position = proposed.end,
             }));
@@ -449,7 +449,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
             };
             try std.testing.expectEqual(@as(usize, 2), results);
             var result_reader: ContentReader = undefined;
-            result_reader.open(try storage.openPublicConversationContent(&.{
+            result_reader.open(try storage.openActivityContent(&.{
                 .session = session,
                 .position = settled_page.items[0].position,
                 .ordinal = 2,
@@ -2435,7 +2435,7 @@ test "APV-10 Activity keeps Action values and public Conversation omits them" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const hidden_entry = try store_testing.queryU64(&storage, "SELECT min(e.session_position) FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id WHERE m.session_ref=?1 AND m.source_kind=4", .{session.slice()});
             _ = try storage.openActivityContent(&.{ .session = session, .position = value_at.?.position, .ordinal = value_at.?.ordinal });
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = session, .position = hidden_entry }));
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_entry }));
             const found = try std.testing.allocator.create(protocol.ActivitySearchFacts);
             defer std.testing.allocator.destroy(found);
             var search: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.received), .limit = 4 };

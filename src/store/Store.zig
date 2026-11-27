@@ -997,18 +997,6 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
     }
 
-    pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
-        return self.queue().run(openPublicConversationContentHeld, .{ self, request });
-    }
-
-    fn openPublicConversationContentHeld(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContent(&access, request));
-    }
-
     pub fn activityPage(self: *Store, request: *const activity_read.ActivityPage, out: *activity_facts.Page) !void {
         try request.validate();
         if (self.unchangedSession(activitySince(request))) |token| {
@@ -2085,7 +2073,6 @@ pub const Ordinary = struct {
     const content = error{ContentNotFound};
     const activity_content = content || error{ContentIsParts};
     /// A text route on a parts value refuses it as ordinary: the parts routes serve it.
-    const public_content = error{ ContentNotFound, RangeOutOfBounds, ContentIsParts };
     const public_parts = error{ ContentNotFound, ContentIsText };
     const public_part = public_parts || error{RangeOutOfBounds};
     pub const action = error{ActionNotFound};

@@ -639,7 +639,7 @@ test "a web search call shows as its line, in the conversation and the activity,
             const older = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), older.count);
             try std.testing.expectEqualStrings(expected[2][0], older.items[0].value.hosted_call.presentation.line.?.words.slice());
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
 
             // The facts each search saved, newest first: its action, every target in provider order, how many, and the pattern.
             const Facts = struct { kind: @import("../../hosted_action.zig").HostedAction, targets: []const []const u8, pattern: ?[]const u8 = null };
