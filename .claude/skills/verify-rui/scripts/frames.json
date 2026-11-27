@@ -4266,6 +4266,62 @@
       ]
     },
     {
+      "name": "settings-connections",
+      "note": "Settings Connections reference: each served connection, its sign-in and usage line; the fixture's endpoint route has no readable usage so it reads no usage seen yet",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "+ New chat"
+        },
+        {
+          "wait": "What shall we work on?",
+          "min_columns": 100
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "What shall we work on?"
+        },
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "no usage seen yet"
+        }
+      ],
+      "expect": [
+        "codex",
+        "no usage seen yet"
+      ],
+      "absent": [
+        "Browsing",
+        "earlier message",
+        "ctrl+x   stop"
+      ],
+      "absent_sidebar_regex": ["^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"]
+    },
+    {
       "name": "slash",
       "note": "Listed commands omit redundant descriptions; plain panel between the input rules",
       "open": "Fix retry deadline",

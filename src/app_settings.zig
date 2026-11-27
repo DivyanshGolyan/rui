@@ -10,6 +10,7 @@ const ModelChoice = @import("model_choice.zig");
 const picker = @import("model_picker.zig");
 const Footer = @import("widgets/Footer.zig");
 const keys_panel = @import("keys_panel.zig");
+const connections_panel = @import("connections_panel.zig");
 const preferences = @import("preferences.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
@@ -34,16 +35,26 @@ pub const Backend = struct {
     memory: ?*const fn (*anyopaque) ?view.Memory = null,
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
     sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
+    /// The Host's served connections with the usage each last reported, and the Unix second they are read at; null when the Host cannot be read.
+    connections: ?*const fn (*anyopaque) ?ConnectionsSnapshot = null,
 };
 
-pub const Row = enum { model, effort, permissions, notifications, sign_in, version, memory, keys };
+pub const ConnectionsSnapshot = struct { facts: protocol.Connections, now: u64 };
+
+/// The read-only reference a Settings row opens in place of the list: the shared key list over its own rows.
+const Reference = enum { keys, connections };
+
+pub const Row = enum { model, effort, permissions, notifications, sign_in, version, memory, keys, connections };
 const row_count = std.enums.values(Row).len;
 
 backend: ?Backend = null,
-keys_open: bool = false,
-keys_offset: usize = 0,
-keys_rows: usize = 0,
-keys_height: usize = 0,
+reference_open: bool = false,
+reference: Reference = .keys,
+connection_rows: connections_panel.Rows = .{},
+connection_facts: ?ConnectionsSnapshot = null,
+reference_offset: usize = 0,
+reference_rows: usize = 0,
+reference_height: usize = 0,
 values: preferences.Values = .{},
 read_failed: bool = false,
 panel: Panel = .{ .title = "Rui", .top_rule = false, .natural_height = true },
@@ -82,7 +93,7 @@ fn cancelEdit(self: *Self) void {
 
 pub fn takesKey(self: *const Self, key: vaxis.Key) bool {
     if (@import("keypress.zig").named(key)) |name| {
-        if (self.keys_open and (name == .page_up or name == .page_down)) return true;
+        if (self.reference_open and (name == .page_up or name == .page_down)) return true;
         if (@import("app_input.zig").keys.get(name) != null) return true;
     }
     return (self.model_choice.active and ModelChoice.takesKey(key)) or Panel.takesKey(key);
@@ -101,6 +112,8 @@ pub fn upgradeTakesEscape(self: *const Self) bool {
 pub fn select(self: *Self, row: Row) void {
     self.panel.selected = @backingInt(row);
 }
+
+const unavailable_rows = [_]Panel.Field{.{ .label = "Connections", .value = "unavailable: the Host cannot be read" }};
 
 pub fn refresh(self: *Self) !void {
     try self.readValues();
@@ -140,7 +153,7 @@ fn permissionMode(self: *const Self) protocol.PermissionMode {
 }
 
 fn value(self: *const Self, row: Row) []const u8 {
-    if (row == .keys or row == .memory) return "";
+    if (row == .keys or row == .memory or row == .connections) return "";
     if (row == .version) return self.version;
     if (self.read_failed) return "unavailable";
     return switch (row) {
@@ -149,7 +162,7 @@ fn value(self: *const Self, row: Row) []const u8 {
         .permissions => setting_words.permission(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
         .sign_in => if (self.provider()) |saved| provider_route.signInOf(saved) orelse "unavailable" else "unavailable",
-        .version, .memory, .keys => unreachable,
+        .version, .memory, .keys, .connections => unreachable,
     };
 }
 
@@ -177,6 +190,7 @@ fn bind(self: *Self) void {
             .permissions => "Permissions",
             .notifications => "Notifications",
             .sign_in => "Sign-in",
+            .connections => "Connections",
             .version => "Version",
             .memory => "Memory",
             .keys => "Keys",
@@ -209,9 +223,14 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const row: Row = @fromBackingInt(@intCast(index));
     if (row == .memory) return;
-    if (row == .keys) {
-        self.keys_open = true;
-        self.keys_offset = 0;
+    if (row == .keys or row == .connections) {
+        self.reference = if (row == .keys) .keys else .connections;
+        self.connection_facts = null;
+        if (row == .connections) if (self.backend) |backend| if (backend.connections) |read| {
+            self.connection_facts = read(backend.context);
+        };
+        self.reference_open = true;
+        self.reference_offset = 0;
         ctx.consumeAndRedraw();
         return;
     }
@@ -232,7 +251,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             };
             return;
         },
-        .memory, .keys => unreachable,
+        .memory, .keys, .connections => unreachable,
         .model, .effort, .permissions, .notifications => {
             try self.readValues();
             if (self.read_failed) {
@@ -268,7 +287,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         },
         .permissions => self.panel.openChoice(&setting_words.permission_labels, setting_words.permissionChoice(self.permissionMode())),
         .notifications => try self.save(ctx, row, .{ .notifications = !self.values.notifications }),
-        .sign_in, .version, .memory, .keys => {},
+        .sign_in, .version, .memory, .keys, .connections => {},
     }
     ctx.redraw = true;
 }
@@ -283,7 +302,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
             },
         },
         .permissions => .{ .permission_mode = .{ .set = setting_words.permissionAt(choice) } },
-        .model, .notifications, .sign_in, .version, .memory, .keys => unreachable,
+        .model, .notifications, .sign_in, .version, .memory, .keys, .connections => unreachable,
     });
 }
 
@@ -334,16 +353,16 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         if (was_saving) ctx.redraw = true;
         return;
     }
-    if (self.keys_open) {
+    if (self.reference_open) {
         if (input == .key_press) {
             const name = @import("keypress.zig").named(input.key_press) orelse return;
-            const maximum = self.keys_rows -| self.keys_height;
-            const page = @max(self.keys_height, 1);
+            const maximum = self.reference_rows -| self.reference_height;
+            const page = @max(self.reference_height, 1);
             switch (name) {
-                .up => self.keys_offset -|= 1,
-                .down => self.keys_offset = @min(self.keys_offset + 1, maximum),
-                .page_up => self.keys_offset -|= page,
-                .page_down => self.keys_offset = @min(self.keys_offset + page, maximum),
+                .up => self.reference_offset -|= 1,
+                .down => self.reference_offset = @min(self.reference_offset + 1, maximum),
+                .page_up => self.reference_offset -|= page,
+                .page_down => self.reference_offset = @min(self.reference_offset + page, maximum),
                 else => return,
             }
             ctx.consumeAndRedraw();
@@ -361,13 +380,18 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.keys_open) {
-        var reference = keys_panel.panel(if (self.backend) |backend| backend.caps(backend.context) else .{});
-        reference.row_offset = self.keys_offset;
+    if (self.reference_open) {
+        const caps = if (self.backend) |backend| backend.caps(backend.context) else view.Caps{};
+        var reference = keys_panel.panel(caps);
+        if (self.reference == .connections) reference.fields = if (self.connection_facts) |snapshot|
+            connections_panel.build(&self.connection_rows, snapshot.facts.slice(), snapshot.now)
+        else
+            &unavailable_rows;
+        reference.row_offset = self.reference_offset;
         var surface = try reference.widget().draw(ctx);
-        self.keys_offset = reference.row_offset;
-        self.keys_rows = reference.total_rows;
-        self.keys_height = reference.viewport_height;
+        self.reference_offset = reference.row_offset;
+        self.reference_rows = reference.total_rows;
+        self.reference_height = reference.viewport_height;
         surface.widget = self.widget();
         return surface;
     }
@@ -398,11 +422,16 @@ const Fixture = struct {
     fail_save: bool = false,
     home: ?[]const u8 = null,
     upgrades: usize = 0,
+    snapshot: ?ConnectionsSnapshot = null,
     last_edit: ?preferences.Edit = null,
     status: ?upgrade_status.Run = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } },
 
     fn backend(self: *Fixture) Backend {
-        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory };
+        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory, .connections = connections };
+    }
+    fn connections(raw: *anyopaque) ?ConnectionsSnapshot {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return self.snapshot;
     }
     fn read(raw: *anyopaque) !preferences.Values {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -606,7 +635,7 @@ test "App settings and nested Keys share Composer input lines and preserve the d
     defer arena.deinit();
     for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
         for ([_]bool{ false, true }) |keys| {
-            page.keys_open = keys;
+            page.reference_open = keys;
             const shown = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
             const composer = shown.children[0].surface;
             try std.testing.expect(composer.widget.eql(input.composer.widget()));
@@ -943,8 +972,9 @@ test "App settings mouse hover and click use the same field choices as Enter" {
     }
 }
 
-test "App settings Keys is last and opens by Enter or click without a backend" {
-    try std.testing.expectEqual(row_count - 1, @as(usize, @backingInt(Row.keys)));
+test "App settings Keys and Connections are last and Keys opens by Enter or click without a backend" {
+    try std.testing.expectEqual(row_count - 2, @as(usize, @backingInt(Row.keys)));
+    try std.testing.expectEqual(row_count - 1, @as(usize, @backingInt(Row.connections)));
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 140, 46 }) |width| for ([_]bool{ false, true }) |click| {
@@ -961,13 +991,13 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
             page.select(.keys);
             try press(&page, &ctx, vaxis.Key.enter);
         }
-        try std.testing.expect(page.keys_open);
+        try std.testing.expect(page.reference_open);
         try std.testing.expect(ctx.consume_event);
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
         try std.testing.expect(drawn.widget.eql(page.widget()));
         try press(&page, &ctx, vaxis.Key.enter);
-        try std.testing.expect(page.keys_open);
+        try std.testing.expect(page.reference_open);
         try std.testing.expect(page.saving_row == null);
     };
 }
@@ -1089,7 +1119,7 @@ test "Keys scrolls every shortcut within the retained draft viewport" {
     for ([_]u16{ 46, 140 }) |width| for ([_]u16{ 12, 20 }) |height| for ([_][]const u8{ "", "one\ntwo\nthree\nfour\nfive\nsix" }) |draft| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        var page: Self = .{ .keys_open = true };
+        var page: Self = .{ .reference_open = true };
         var storage: [128]u8 = undefined;
         var editor: @import("DraftEditor.zig") = .initText(&storage, draft, draft.len);
         var input: @import("InputArea.zig") = .{
@@ -1105,13 +1135,13 @@ test "Keys scrolls every shortcut within the retained draft viewport" {
         while (true) {
             const shown = try input.widget().draw(draw_ctx);
             const surface = shown.children[0].surface.children[0].surface;
-            try std.testing.expect(page.keys_height > 0);
-            const columns: usize = if (page.keys_rows == keymap.list.len) 1 else 2;
-            for (0..page.keys_height) |row| {
+            try std.testing.expect(page.reference_height > 0);
+            const columns: usize = if (page.reference_rows == keymap.list.len) 1 else 2;
+            for (0..page.reference_height) |row| {
                 var line: std.Io.Writer.Allocating = .init(arena.allocator());
                 for (0..surface.size.width) |col| try line.writer.writeAll(surface.readCell(@intCast(col), @intCast(row)).char.grapheme);
                 for (0..columns) |column| {
-                    const index = (page.keys_offset + row) * columns + column;
+                    const index = (page.reference_offset + row) * columns + column;
                     if (index >= keymap.list.len) continue;
                     try std.testing.expect(std.mem.indexOf(u8, line.written(), keymap.list[index].key) != null);
                     try std.testing.expect(std.mem.indexOf(u8, line.written(), keymap.list[index].meaning) != null);
@@ -1120,24 +1150,24 @@ test "Keys scrolls every shortcut within the retained draft viewport" {
             }
             try std.testing.expectEqualStrings(draft, editor.text());
             try std.testing.expectEqual(draft.len, editor.cursor());
-            if (page.keys_offset == page.keys_rows -| page.keys_height) break;
+            if (page.reference_offset == page.reference_rows -| page.reference_height) break;
             try press(&page, &events, vaxis.Key.down);
             try std.testing.expect(events.consume_event);
         }
         for (seen) |visible| try std.testing.expect(visible);
-        const bottom = page.keys_offset;
+        const bottom = page.reference_offset;
         try press(&page, &events, vaxis.Key.down);
-        try std.testing.expectEqual(bottom, page.keys_offset);
+        try std.testing.expectEqual(bottom, page.reference_offset);
         try press(&page, &events, vaxis.Key.page_up);
-        try std.testing.expectEqual(bottom -| page.keys_height, page.keys_offset);
+        try std.testing.expectEqual(bottom -| page.reference_height, page.reference_offset);
         try press(&page, &events, vaxis.Key.page_down);
-        try std.testing.expectEqual(bottom, page.keys_offset);
+        try std.testing.expectEqual(bottom, page.reference_offset);
         try press(&page, &events, vaxis.Key.up);
-        try std.testing.expectEqual(bottom -| 1, page.keys_offset);
+        try std.testing.expectEqual(bottom -| 1, page.reference_offset);
         try press(&page, &events, vaxis.Key.page_up);
-        while (page.keys_offset != 0) try press(&page, &events, vaxis.Key.page_up);
+        while (page.reference_offset != 0) try press(&page, &events, vaxis.Key.page_up);
         try press(&page, &events, vaxis.Key.up);
-        try std.testing.expectEqual(@as(usize, 0), page.keys_offset);
+        try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
         try std.testing.expectEqualStrings(draft, editor.text());
         try std.testing.expectEqual(draft.len, editor.cursor());
     };
@@ -1151,25 +1181,61 @@ test "Keys reclamps on resize and starts at the top when reopened" {
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     page.select(.keys);
     try press(&page, &events, vaxis.Key.enter);
-    try std.testing.expect(page.keys_open);
+    try std.testing.expect(page.reference_open);
     const narrow: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 4 }, .cell_size = .{} };
     const wide: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
     const tall: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 20 }, .cell_size = .{} };
     _ = try page.widget().draw(narrow);
-    while (page.keys_offset < page.keys_rows -| page.keys_height) try press(&page, &events, vaxis.Key.page_down);
-    const narrow_bottom = page.keys_offset;
+    while (page.reference_offset < page.reference_rows -| page.reference_height) try press(&page, &events, vaxis.Key.page_down);
+    const narrow_bottom = page.reference_offset;
     try std.testing.expect(narrow_bottom > 0);
     _ = try page.widget().draw(wide);
-    try std.testing.expect(page.keys_rows -| page.keys_height < narrow_bottom);
-    try std.testing.expectEqual(page.keys_rows -| page.keys_height, page.keys_offset);
+    try std.testing.expect(page.reference_rows -| page.reference_height < narrow_bottom);
+    try std.testing.expectEqual(page.reference_rows -| page.reference_height, page.reference_offset);
     _ = try page.widget().draw(tall);
-    try std.testing.expectEqual(@as(usize, 0), page.keys_offset);
+    try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
     _ = try page.widget().draw(narrow);
     try press(&page, &events, vaxis.Key.down);
-    try std.testing.expectEqual(@as(usize, 1), page.keys_offset);
-    page.keys_open = false;
+    try std.testing.expectEqual(@as(usize, 1), page.reference_offset);
+    page.reference_open = false;
     page.select(.keys);
     try press(&page, &events, vaxis.Key.enter);
-    try std.testing.expect(page.keys_open);
-    try std.testing.expectEqual(@as(usize, 0), page.keys_offset);
+    try std.testing.expect(page.reference_open);
+    try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
+}
+
+test "SUI-182 App settings Connections opens a read-only reference of each served connection and its usage" {
+    const now: u64 = 1_800_000_000;
+    var snapshot: ConnectionsSnapshot = .{ .facts = .{}, .now = now };
+    snapshot.facts.items[0] = .{ .name = connection.Name.parse("work").?, .label = provider_route.Label.parse("ChatGPT (device code)").?, .route = .chatgpt_device, .usage = .{ .observed_at = now - 120, .primary = .{ .used_percent = 40, .minutes = 10080, .reset_at = now + 86400 }, .secondary = null } };
+    snapshot.facts.items[1] = .{ .name = connection.Name.parse("home").?, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan };
+    snapshot.facts.len = 2;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?ConnectionsSnapshot{ snapshot, null }) |read| {
+        var fixture: Fixture = .{ .snapshot = read };
+        var page: Self = .{ .backend = fixture.backend() };
+        try page.refresh();
+        page.bind();
+        try std.testing.expectEqualStrings("Connections", page.fields[@backingInt(Row.connections)].label);
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.select(.connections);
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.reference_open);
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 120, .height = 6 }, .cell_size = .{} });
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..2) |row| {
+            for (0..drawn.size.width) |col| try text.writer.writeAll(drawn.readCell(@intCast(col), @intCast(row)).char.grapheme);
+            try text.writer.writeByte('\n');
+        }
+        if (read != null) {
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "work") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "weekly 40% used · resets in 1 d 0 h") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "usage not shown for browser sign-ins") != null);
+        } else try std.testing.expect(std.mem.indexOf(u8, text.written(), "the Host cannot be read") != null);
+        // The reference is read-only: Enter changes nothing and Escape-free input keeps it open.
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.reference_open);
+        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+    }
 }
