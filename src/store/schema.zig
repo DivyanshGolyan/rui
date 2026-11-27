@@ -3439,7 +3439,7 @@ test "schema 89 migration leaves each saved tool record's remote name empty, its
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "INSERT INTO tool_record(tool_record_id,name,remote_name,owner,server,description_content_id,input_schema_content_id) SELECT 999999,'a__b','c d',owner,server,description_content_id,input_schema_content_id FROM tool_record LIMIT 1"));
 }
 
-test "the plain form drops every CHECK and FOREIGN KEY and keeps each table, column, key and index on both engines" {
+test "SH-182 the plain form drops every CHECK and FOREIGN KEY and keeps each table, column, key and index on both engines" {
     inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
         const strict = comptime objectsIn(dialect, .strict);
         const plain = comptime objectsIn(dialect, .plain);
@@ -3453,6 +3453,9 @@ test "the plain form drops every CHECK and FOREIGN KEY and keeps each table, col
         var kept: usize = 0;
         for (strict) |object| {
             if (object.kind == .foreign_key) continue;
+            if (object.kind == .table) for ([_][]const u8{ "PRIMARY KEY", "UNIQUE" }) |word| {
+                try std.testing.expectEqual(std.mem.count(u8, object.sql, word), std.mem.count(u8, plain[kept].sql, word));
+            };
             try std.testing.expectEqualStrings(object.name, plain[kept].name);
             try std.testing.expectEqual(object.kind, plain[kept].kind);
             if (object.kind == .index) try std.testing.expectEqualStrings(object.sql, plain[kept].sql);
@@ -3474,7 +3477,7 @@ fn plainTable(comptime objects_of: []const Object, comptime name: []const u8) []
     @compileError("schema: no plain table " ++ name);
 }
 
-test "a plain SQLite Store takes the rows its strict form refuses, and the strict form equals the stored DDL" {
+test "SH-182 a plain SQLite Store takes the rows its strict form refuses, and the strict form equals the stored DDL" {
     try std.testing.expectEqualStrings(ddl(.sqlite), ddlIn(.sqlite, .strict));
     const row = "INSERT INTO tool_set(tool_set_id,digest,member_count) VALUES(0,zeroblob(32),1000000)";
     inline for (.{ Form.strict, Form.plain }) |form| {
