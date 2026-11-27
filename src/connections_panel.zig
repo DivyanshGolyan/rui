@@ -119,10 +119,6 @@ fn served(name: []const u8, label: []const u8, route: protocol.Route, usage: ?pr
     return .{ .name = connection.Name.parse(name).?, .label = @import("provider_route.zig").Label.parse(label).?, .route = route, .usage = usage };
 }
 
-fn served(name: []const u8, label: []const u8, route: protocol.Route, usage: ?protocol.UsageReading) protocol.ConnectionFact {
-    return .{ .name = connection.Name.parse(name).?, .label = @import("provider_route.zig").Label.parse(label).?, .route = route, .usage = usage };
-}
-
 fn text(field: Panel.Field, buffer: []u8) []const u8 {
     return std.fmt.bufPrint(buffer, "{s}|{s}", .{ field.label, field.value }) catch unreachable;
 }
