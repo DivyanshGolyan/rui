@@ -11,6 +11,7 @@ const accepts = column_rules.accepts;
 const admit = engine.admit;
 const sqlite = @import("sqlite.zig");
 const mysql_testing = @import("mysql_testing.zig");
+const store_check = @import("store_check.zig");
 const c = sqlite.c;
 
 fn ruleSql(comptime table: []const u8, comptime column: schema.Column) ?[]const u8 {
@@ -405,4 +406,56 @@ test "SH-178 a byte set holds its ranges and literals, a leading or trailing das
     try std.testing.expect(char_set.inSet("a-c-", '-'));
     try std.testing.expect(char_set.inSet("0-9", '0') and char_set.inSet("0-9", '9') and !char_set.inSet("0-9", ':'));
     try std.testing.expect(!char_set.inSet("", 'a'));
+}
+
+/// One content_part row that breaks a column rule (ordinal below 0), a cross-column rule (a part that is its own
+/// container) and both references (no content row 5), so every kind of check has exactly one violator to find.
+const broken_part = "INSERT INTO content_part(content_id,ordinal,part_content_id) VALUES(5,-1,5)";
+
+fn violatorsOf(name: []const u8, broken: bool) u32 {
+    if (!broken) return 0;
+    const hit = [_][]const u8{ "content_part.ordinal", "content_part#0", "content_part(content_id)->content", "content_part(part_content_id)->content" };
+    for (hit) |each| if (std.mem.eql(u8, name, each)) return 1;
+    return 0;
+}
+
+test "SH-183 store check counts the rows that break a column rule, a cross-column rule and a reference in a plain SQLite Store" {
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, schema.ddlIn(.sqlite, .plain));
+    const all = comptime store_check.checks(.sqlite);
+    var seen: [3]bool = @splat(false);
+    for (all) |check| {
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, check.sql));
+        seen[@backingInt(check.kind)] = true;
+    }
+    try std.testing.expectEqual([_]bool{ true, true, true }, seen);
+    try sqlite.exec(database, broken_part);
+    for (all) |check| try std.testing.expectEqual(violatorsOf(check.name, true), try sqlite.pragmaInt(database, check.sql));
+}
+
+test "SH-183 store check's statements run on MySQL and count the rows that break each kind of rule" {
+    if (!try mysql_testing.available()) return;
+    try std.testing.expect(try mysql_testing.takes("DROP DATABASE IF EXISTS rui_store_check_probe"));
+    try std.testing.expect(try mysql_testing.takes("CREATE DATABASE rui_store_check_probe DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_0900_bin"));
+    defer _ = mysql_testing.takes("DROP DATABASE IF EXISTS rui_store_check_probe") catch false;
+    try std.testing.expect(try mysql_testing.takes("USE rui_store_check_probe"));
+    inline for (comptime schema.plainObjects(.mysql)) |object| try std.testing.expect(try mysql_testing.takes(object.sql));
+    const all = comptime store_check.checks(.mysql);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for ([_]bool{ false, true }) |broken| {
+        if (broken) try std.testing.expect(try mysql_testing.takes(broken_part));
+        for (all) |check| {
+            // A scalar subquery that finds two rows is refused, so the statement is taken exactly when the count is the one expected.
+            const asks = try std.fmt.allocPrint(arena, "SELECT IF(({s})={d},1,(SELECT 1 UNION SELECT 2))", .{ check.sql, violatorsOf(check.name, broken) });
+            if (!try mysql_testing.takes(asks)) {
+                std.debug.print("store check {s} did not count {d}\n", .{ check.name, violatorsOf(check.name, broken) });
+                return error.WrongViolatorCount;
+            }
+        }
+    }
 }
