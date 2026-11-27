@@ -180,11 +180,13 @@ test "SUI-183 every Connections row fits the narrowest dialog for the longest na
         served("long", "ChatGPT (device code)", .chatgpt_device, .{ .observed_at = now, .primary = long_minutes, .secondary = unnamed }),
     };
     var rows: Rows = .{};
-    for ([_]bool{ true, false }) |unicode| for (rows.build(&facts, now, unicode)) |field| {
-        var cells: usize = 0;
-        var each = std.unicode.Utf8View.initUnchecked(field.value).iterator();
-        while (each.nextCodepoint()) |_| cells += 1;
-        if (!unicode) for (field.value) |byte| try std.testing.expect(byte < 0x80);
-        try std.testing.expect(1 + field.label.len + (if (field.label.len > 0 and field.value.len > 0) @as(usize, 3) else 0) + cells <= width);
+    for ([_]bool{ true, false }) |unicode| {
+        for (rows.build(&facts, now, unicode)) |field| {
+            var cells: usize = 0;
+            var each = std.unicode.Utf8View.initUnchecked(field.value).iterator();
+            while (each.nextCodepoint()) |_| cells += 1;
+            if (!unicode) for (field.value) |byte| try std.testing.expect(byte < 0x80);
+            try std.testing.expect(1 + field.label.len + (if (field.label.len > 0 and field.value.len > 0) @as(usize, 3) else 0) + cells <= width);
+        }
     }
 }
