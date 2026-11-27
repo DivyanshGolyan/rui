@@ -129,10 +129,10 @@ pub const Band = struct {
     provider: ?connection.Name = null,
 };
 
-/// The one provider trouble to tell the person about, or null. A failure is current until its provider and model answer
-/// again: a visible, unarchived row on both whose answered state (a finished turn, or a tool call it proposed) began at or
-/// after it. Rows on another provider say nothing about this one's quota or sign-in, and rows on another model say nothing about its
-/// sign-in, key or plan (a usage limit is the connection's, so any model's answer ends it). Sign-in and key failures end
+/// The one provider trouble to tell the person about, or null. A failure is current until its scope answers again: a
+/// visible, unarchived row on its connection for a usage limit, otherwise on its provider and model, whose answered state (a
+/// finished turn, or a tool call it proposed) began at or after it. Rows on another provider say nothing about this one's quota
+/// or sign-in. Sign-in and key failures end
 /// at the viewer's last sign-in, a quota failure at its reset; the order of `Trouble` is the order of precedence, with
 /// rate limits last.
 pub fn trouble(rows: Rows, viewer: Viewer) ?Band {
@@ -318,7 +318,7 @@ test "SUI-170 provider trouble follows failures, answers since, sign-in and rese
         .{ .rows = &.{listedFacts(&quota, "codex", "m")}, .expected = .{ .trouble = .quota, .resets_at = now_s + 60, .provider = connection.Name.parse("codex") } },
         .{ .rows = &.{listedFacts(&spent_quota, "codex", "m")}, .expected = null },
         .{ .rows = &.{listedFacts(&other_failure, "codex", "m")}, .expected = null },
-        // A later answer on the same provider and model clears it; an earlier one, another model, another provider or a row nobody lists does not.
+        // A later answer on the same provider and model clears a sign-in failure; an earlier one, another model, another provider or a row nobody lists does not.
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&answered_later, "codex", "m") }, .expected = null },
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&proposed, "codex", "m") }, .expected = null },
         .{ .rows = &.{ listedFacts(&sign_in, "codex", "m"), listedFacts(&thinking, "codex", "m") }, .expected = .{ .trouble = .sign_in, .provider = connection.Name.parse("codex") } },

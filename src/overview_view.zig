@@ -6237,7 +6237,7 @@ test "the band derives provider trouble from rows, in priority order" {
     try std.testing.expectEqual(failure_class.Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
 }
 
-test "a failure band clears only when its own provider and model are reached after it" {
+test "a usage limit clears when its connection answers on any model, other failures only on their own model" {
     const Other = struct { provider: Provider, model: []const u8 };
     const others = [_]Other{
         .{ .provider = pn(.codex), .model = "gpt-6-luna" },
@@ -6263,7 +6263,9 @@ test "a failure band clears only when its own provider and model are reached aft
             .idle, .pending, .working, .retrying, .stopping, .failed, .stopped => false,
             .bash, .approval, .finished => true,
         };
-        const cleared = other.provider.eql(pn(.codex)) and std.mem.eql(u8, other.model, "gpt-6-luna") and answered and seconds_ago <= 60;
+        const same_model = std.mem.eql(u8, other.model, "gpt-6-luna");
+        const reaches = other.provider.eql(pn(.codex)) and (same_model or failure_class.of(failure) == .quota);
+        const cleared = reaches and answered and seconds_ago <= 60;
         const shown = try bandOf(&.{ session("ffffff", work, .{ .label = "Other", .provider = other.provider, .model = other.model }), failedRow("aaaaaa", 60, failure, null) }, null);
         if (cleared) {
             try std.testing.expectEqual(@as(?Band, null), shown);
