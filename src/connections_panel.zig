@@ -97,7 +97,7 @@ fn served(name: []const u8, label: []const u8, route: protocol.Route, usage: ?pr
     return .{ .name = connection.Name.parse(name).?, .label = @import("provider_route.zig").Label.parse(label).?, .route = route, .usage = usage };
 }
 
-test "SUI-182 the Connections reference names each window by its length and says when a connection shows no usage" {
+test "SUI-183 the Connections reference names each window by its length and says when a connection shows no usage" {
     const now: u64 = 1_800_000_000;
     const week: protocol.UsageWindow = .{ .used_percent = 25.4, .minutes = 10080, .reset_at = now + 3 * 86400 + 4 * 3600 + 59 };
     const full: protocol.UsageWindow = .{ .used_percent = 100, .minutes = 300, .reset_at = now + 7 * 60 };
@@ -136,7 +136,7 @@ test "SUI-182 the Connections reference names each window by its length and says
     }
 }
 
-test "SUI-182 every Connections row fits the narrowest dialog for the longest name, label and window" {
+test "SUI-183 every Connections row fits the narrowest dialog for the longest name, label and window" {
     const now: u64 = 1_800_000_000;
     // The narrowest settings dialog is 40 columns wide (a 46-column terminal); a row is its own text plus a one-column margin.
     const width = 40;

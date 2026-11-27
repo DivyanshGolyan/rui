@@ -1207,7 +1207,7 @@ test "Keys reclamps on resize and starts at the top when reopened" {
     try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
 }
 
-test "SUI-182 App settings Connections opens a read-only reference of each served connection and its usage" {
+test "SUI-183 App settings Connections opens a read-only reference of each served connection and its usage" {
     const now: u64 = 1_800_000_000;
     var snapshot: ConnectionsSnapshot = .{ .facts = .{}, .now = now };
     snapshot.facts.items[0] = .{ .name = connection.Name.parse("work").?, .label = provider_route.Label.parse("ChatGPT (device code)").?, .route = .chatgpt_device, .usage = .{ .observed_at = now - 120, .primary = .{ .used_percent = 40, .minutes = 10080, .reset_at = now + 86400 }, .secondary = null } };
