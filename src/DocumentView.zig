@@ -763,27 +763,21 @@ test "SUI-182 peer hover underlines one complete visible Session link" {
             h.opened.clearRetainingCapacity();
         }
     }
+    try widePeerHoverWitness();
 }
 
-test "DocumentView peer links and continuation hover only painted actionable spans" {
-    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
-    const h = try Harness.init("See " ++ peer ++ " today\nsecond\nthird\nfourth\n", .{ .width = 24, .height = 3 });
+test "SUI-186 DocumentView continuation hovers and activates its painted row" {
+    const h = try Harness.init("first\nsecond\nthird\nfourth\n", .{ .width = 24, .height = 3 });
     defer h.deinit();
     h.document.top = .{};
     h.transcript.more = true;
     h.transcript.colours.selection = .{ .index = 2 };
     h.transcript.hover_style = .{ .bg = .{ .index = 5 } };
     _ = try h.frame();
-    try std.testing.expectEqual(@as(usize, 2), h.transcript.hover.targets.len);
-    try std.testing.expectEqual(Hover.Rect{ .row = 0, .col = 4, .width = 4 }, h.transcript.hover.targets[0]);
-    try h.transcript.widget().handleEvent(&h.ctx, .mouse_enter);
-    try h.send(.motion, 5, 0);
-    const peer_hover = try h.frame();
-    for (4..8) |col| try std.testing.expectEqual(.single, peer_hover.readCell(col, 0).style.ul_style);
-    try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
-    try std.testing.expect(h.transcript.selection == null and h.opened.items.len == 0 and h.clicks.items.len == 0);
-    try h.send(.motion, 8, 0);
-    try std.testing.expectEqual(vaxis.Mouse.Shape.default, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
+    try std.testing.expectEqualSlices(Hover.Rect, &.{.{ .row = 2, .width = 24 }}, h.transcript.hover.targets);
+    try h.send(.motion, 3, 1);
+    const outside = try h.frame();
+    try std.testing.expectEqual(h.transcript.style.bg, outside.readCell(3, 2).style.bg);
     try h.send(.motion, 3, 2);
     const continuation_hover = try h.frame();
     for (0..24) |col| try std.testing.expectEqual(h.transcript.hover_style.bg, continuation_hover.readCell(col, 2).style.bg);
@@ -801,7 +795,7 @@ test "DocumentView peer links and continuation hover only painted actionable spa
     try std.testing.expectEqual(@as(usize, 0), h.transcript.hover.targets.len);
 }
 
-test "DocumentView wide peer glyph continuation cells share hover and click geometry" {
+fn widePeerHoverWitness() !void {
     const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "設計" ++ TerminalText.link_close;
     const h = try Harness.init("See " ++ peer ++ " end\n", .{ .width = 16, .height = 1 });
     defer h.deinit();
