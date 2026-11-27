@@ -32,7 +32,10 @@ pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Item
         const field: ItemId = if (reference.sets and isFlag(items, reference.item)) blk: {
             if (setter_of.contains(reference.holder)) continue;
             break :blk reference.item;
-        } else if (setter_of.get(reference.item)) |field| field else continue;
+        } else if (setter_of.get(reference.item)) |field| blk: {
+            if (!isCall(sources, reference)) continue;
+            break :blk field;
+        } else continue;
         if (items.get(reference.holder).kind != .function) continue;
         const slot = try writers.getOrPut(arena, field);
         if (!slot.found_existing) slot.value_ptr.* = .empty;
@@ -48,6 +51,12 @@ pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Item
         try found.append(arena, try diagnostic(arena, sources, items, refs, setter_of, field, by_holder.values()));
     }
     return found.items;
+}
+
+/// Whether the name of `reference` is called: followed by an opening parenthesis, as in `x.mark()` and `Q.mark(x)`, and not passed or returned as a value.
+fn isCall(sources: *const Sources, reference: References.Reference) bool {
+    const tree = &sources.files[@backingInt(reference.file)].ast;
+    return reference.token + 1 < tree.tokens.len and tree.tokenTag(reference.token + 1) == .l_paren;
 }
 
 /// Whether `field` is a field of a type that holds something.

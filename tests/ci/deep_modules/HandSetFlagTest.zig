@@ -103,6 +103,9 @@ test "a function that only sets the flag is no writer: its callers are" {
     const got = try checked(a, try fixture(a, members, "x.mark();", 0, 2, ""));
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("src/user.zig:4:7: `user.u0` sets `dirty`, through `Q.mark`", got[0].notes[0]);
+    // A function that only names the setter as a value does not call it.
+    try testing.expectEqual(@as(usize, 0), try count(a, try fixture(a, members, "const f = q.Q.mark;", 0, 2, "")));
+    try testing.expectEqual(@as(usize, 1), try count(a, try fixture(a, members, "q.Q.mark(x);", 0, 2, "")));
     // A caller and a direct writer are two.
     try testing.expectEqual(@as(usize, 1), try count(a, try fixture(a, members, "x.mark();", 0, 1, "pub fn direct(x: *q.Q) void {\n    x.dirty = true;\n    _ = x;\n}\n")));
     // A setter that does more is a function like any other: it counts itself, and its callers do not.
