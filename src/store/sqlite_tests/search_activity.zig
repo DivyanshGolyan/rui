@@ -13,7 +13,7 @@ const submitTestMessage = store_testing.submitTestMessage;
 const testingPublicProjection = store_testing.testingPublicProjection;
 const testingStore = store_testing.testingSqliteStore;
 
-test "searchActivity streams window edges filters kinds and pages newest first" {
+fn windowEdgesKindsAndPaging() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -65,7 +65,7 @@ test "searchActivity streams window edges filters kinds and pages newest first" 
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity budget returns an empty page with a usable next cursor" {
+fn budgetEmptyPageKeepsUsableCursor() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -96,7 +96,7 @@ test "searchActivity budget returns an empty page with a usable next cursor" {
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity never searches private provider extras" {
+fn privateProviderExtrasAreNotSearched() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -122,43 +122,34 @@ test "searchActivity never searches private provider extras" {
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity fences private content substituted into a public message" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const session = try configureTestSession(&storage, "search-corruption");
-    try submitTestMessage(&storage, &tmp, "search-corrupt-message", "search-corrupt-message", session.slice(), "secret");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-corrupt-message')", .{});
-    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
-    var request: protocol.ActivitySearch = .{ .session = session };
-    try request.query.set("secret");
-    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
-    try std.testing.expect(storage.isFenced());
+/// Content the search reads is verified against the Store's own facts even when its text does not match: private content under a
+/// public message and damaged bytes fence the Store instead of being skipped.
+fn corruptContentFences() !void {
+    const Case = struct { config: []const u8, key: []const u8, text: []const u8, query: []const u8, damage: [:0]const u8 };
+    const cases = [_]Case{
+        .{ .config = "search-corruption", .key = "search-corrupt-message", .text = "secret", .query = "secret", .damage = "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-corrupt-message')" },
+        .{ .config = "search-digest", .key = "search-digest-message", .text = "correct", .query = "absent", .damage = "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-digest-message')" },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const session = try configureTestSession(&storage, case.config);
+        try submitTestMessage(&storage, &tmp, case.key, case.key, session.slice(), case.text);
+        try store_testing.sqlite_only.exec(&storage, case.damage, .{});
+        const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+        var request: protocol.ActivitySearch = .{ .session = session };
+        try request.query.set(case.query);
+        try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+        try std.testing.expect(storage.isFenced());
+    }
 }
 
-test "searchActivity verifies canonical content even when its text does not match" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const session = try configureTestSession(&storage, "search-digest");
-    try submitTestMessage(&storage, &tmp, "search-digest-message", "search-digest-message", session.slice(), "correct");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-digest-message')", .{});
-    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
-    var request: protocol.ActivitySearch = .{ .session = session };
-    try request.query.set("absent");
-    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
-    try std.testing.expect(storage.isFenced());
-}
-
-test "searchActivity exhausted exact-budget entry has no continuation" {
+fn exactBudgetEntryHasNoContinuation() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -180,7 +171,7 @@ test "searchActivity exhausted exact-budget entry has no continuation" {
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity fences missing assistant entries only in its scanned range" {
+fn missingAssistantFencesOnlyInScannedRange() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -204,7 +195,7 @@ test "searchActivity fences missing assistant entries only in its scanned range"
     try std.testing.expect(storage.isFenced());
 }
 
-test "INS-8 searchActivity matches Text parts, names each part and skips Image bytes" {
+fn textPartsAreSearchedEachAlone() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -290,7 +281,7 @@ test "INS-8 searchActivity matches Text parts, names each part and skips Image b
     try std.testing.expect(!storage.isFenced());
 }
 
-test "INS-8 searchActivity matches instruction, skill and hosted-search text" {
+fn instructionSkillAndHostedText() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -400,4 +391,21 @@ test "INS-8 searchActivity matches instruction, skill and hosted-search text" {
     try storage.searchActivity(&request, result);
     try std.testing.expectEqual(@as(usize, 1), result.count);
     try std.testing.expect(!storage.isFenced());
+}
+
+test "INS-8 searchActivity matches only documented public text with bounded snippets, budget and continuation" {
+    // Kinds, newest-first paging, window edges and ASCII case folding.
+    try windowEdgesKindsAndPaging();
+    // Text parts alone, each naming its part, Image bytes never, and the manifest charged to the budget.
+    try textPartsAreSearchedEachAlone();
+    // Instruction text, skill text and a hosted search's targets and pattern, and the filters that exclude them.
+    try instructionSkillAndHostedText();
+    // The budget: an empty page keeps a usable cursor, and an entry that exactly exhausts it has none.
+    try budgetEmptyPageKeepsUsableCursor();
+    try exactBudgetEntryHasNoContinuation();
+    // Private provider material is never searched; private or damaged content under a public entry fences.
+    try privateProviderExtrasAreNotSearched();
+    try corruptContentFences();
+    // Fencing a missing assistant entry only in the range the scan covered.
+    try missingAssistantFencesOnlyInScannedRange();
 }
