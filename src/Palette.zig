@@ -8,6 +8,7 @@ const Self = @This();
 const Hover = @import("widgets/Hover.zig");
 const widget_style = @import("widget_style.zig");
 const RowInset = @import("widgets/RowInset.zig");
+const description_gap = 2;
 
 menu: *slash_menu.Menu,
 caps: overview.Caps = .{ .width = .unicode },
@@ -99,7 +100,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const targets = try ctx.arena.alloc(Hover.Rect, if (self.on_select != null) count else 0);
     for (targets, 0..) |*rect, index| rect.* = placed.row(index);
     self.hover.targets = targets;
-    const column = list.descriptionColumn();
+    const bounds = RowInset.bounds(placed.content.width);
+    const description_column = descriptionColumn(list, bounds.width(), self.caps.width);
     const selected_style = widget_style.of(self.caps, .{ .background = .selection });
     const selected_matched = widget_style.of(self.caps, .{ .bold = true, .background = .selection });
     for (list.shown()[first..][0..count], first..) |entry, index| {
@@ -110,12 +112,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (hovered) style = Hover.look(style, self.hover_style);
         const start = @as(usize, @intCast(rect.row)) * width + @as(usize, @intCast(rect.col));
         if (selected or hovered) @memset(surface.buffer[start..][0..rect.width], .{ .style = style });
-        const bounds = RowInset.bounds(rect.width);
         const line = body.child(.{ .x_off = @intCast(bounds.start), .y_off = @intCast(index - first), .width = bounds.width(), .height = 1 });
         var matched = if (selected) selected_matched else self.matched;
         if (hovered) matched = Hover.look(matched, self.hover_style);
-        printMarked(line, entry.shown, entry.matches.name, style, matched);
-        if (column < bounds.width()) {
+        const name_width = line.gwidth(entry.shown);
+        const name = if (name_width <= bounds.width()) entry.shown else clipName(line, entry.shown);
+        printMarked(line, name, entry.matches.name, style, matched);
+        const column = @max(description_column, @as(usize, name_width) + description_gap);
+        if (entry.description.len != 0 and column < bounds.width()) {
             const source_span: ?overview.ByteSpan = if (entry.matches.description) |mark| .{ .start = mark.start, .len = mark.len } else null;
             const fitted = try overview.fittedMarked(ctx.arena, self.caps, entry.description, bounds.width() - column, .head, source_span);
             const span: ?commands.Span = if (fitted.span) |mark| .{ .start = mark.start, .len = mark.len } else null;
@@ -124,10 +128,38 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     if (count < list.count and count < placed.content.height) {
         const label = try std.fmt.allocPrint(ctx.arena, commands.more, .{list.count - count});
-        const bounds = RowInset.bounds(placed.content.width);
         _ = body.child(.{ .x_off = @intCast(bounds.start), .y_off = @intCast(count), .width = bounds.width(), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
     }
     return surface;
+}
+
+fn descriptionColumn(list: *const commands.List, width: u16, method: vaxis.gwidth.Method) usize {
+    const ordinary_limit = commands.conversation.description_column;
+    var shortest: usize = ordinary_limit;
+    var widest: usize = 0;
+    for (list.shown()) |entry| {
+        if (entry.description.len == 0) continue;
+        const after_name = @as(usize, vaxis.gwidth.gwidth(entry.shown, method)) + description_gap;
+        if (after_name > ordinary_limit) continue;
+        shortest = @min(shortest, after_name);
+        widest = @max(widest, after_name);
+    }
+    if (widest == 0) return 0;
+    const preferred = list.column orelse widest;
+    // Give descriptions room as the palette narrows, down to the shortest
+    // name's own gap. Longer names set only their own description's start.
+    return @max(shortest, @min(preferred, width -| preferred));
+}
+
+fn clipName(line: vaxis.Window, name: []const u8) []const u8 {
+    var room = line.width;
+    var clusters = vaxis.unicode.graphemeIterator(name);
+    while (clusters.next()) |cluster| {
+        const cells = line.gwidth(cluster.bytes(name));
+        if (cells > room) return name[0..cluster.start];
+        room -= cells;
+    }
+    return name;
 }
 
 /// Draw a row's matching bytes without changing its fitting or wrapping.
@@ -277,7 +309,7 @@ test "Palette selection uses the shared ink wash for plain and matching cells in
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} };
             const plain = widget_style.of(caps, .{ .background = .selection });
             const strong = widget_style.of(caps, .{ .bold = true, .background = .selection });
-            const column = shown.list.descriptionColumn();
+            const column = commands.conversation.description_column;
             // Moving onto the selected row never replaces its ink wash with hover.
             for ([_]i17{ 0, 1 }) |pointed| {
                 palette.hover.point = .{ .col = 2, .row = pointed };
@@ -320,13 +352,13 @@ test "Palette renders every chat command and description in the same normal styl
             try std.testing.expectEqualStrings(descriptions[row], shown.list.entries[row].description);
             if (descriptions[row].len == 0) try std.testing.expectEqualStrings(expected, line);
             if (descriptions[row].len != 0) {
-                const column = shown.list.descriptionColumn();
+                const column = commands.conversation.description_column;
                 try std.testing.expectEqualStrings(descriptions[row], line[column..]);
                 for (line[expected.len..column]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
             }
             if (shown.list.entries[row].description.len != 0) {
                 try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
-                try std.testing.expectEqual(surface.readCell(0, @intCast(row)).style, surface.readCell(@intCast(shown.list.descriptionColumn() + 2), @intCast(row)).style);
+                try std.testing.expectEqual(surface.readCell(0, @intCast(row)).style, surface.readCell(@intCast(commands.conversation.description_column + 2), @intCast(row)).style);
             }
         }
     }
@@ -348,12 +380,13 @@ test "Palette description clipping ends with the list row ellipsis at every widt
                 const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
                 const surface = try palette.widget().draw(ctx);
                 try std.testing.expect(surface.size.width <= width);
-                const column = shown.list.descriptionColumn();
-                const room = width -| 4 -| column;
-                if (room == 0) continue;
-                const clipped = description.len > room;
-                const kept = @min(description.len, room - @intFromBool(clipped));
                 for (0..2) |row| {
+                    const after_name: usize = if (row == 0) 10 else 8;
+                    const column = @max(after_name, @min(16, width -| 20));
+                    const room = width -| 4 -| column;
+                    if (room == 0) continue;
+                    const clipped = description.len > room;
+                    const kept = @min(description.len, room - @intFromBool(clipped));
                     for (description[0..kept], 0..) |byte, index| {
                         const cell = surface.readCell(@intCast(column + 2 + index), @intCast(row));
                         try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
@@ -390,9 +423,10 @@ test "Palette description fitting keeps whole wide and combining clusters" {
             var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listedForTests()) };
             const shown = &menu.shown.?;
             shown.list.count = 1;
+            shown.list.column = null;
             shown.list.entries[0].description = case.text;
             if (case.query) |query| shown.list.entries[0].matches = @import("skill_completion.zig").match(query, "archive", case.text).?.spans;
-            const column = shown.list.descriptionColumn();
+            const column: usize = 10; // /archive and a two-cell gap
             const width: u16 = @intCast(column + case.room + 4);
             var palette: Self = .{ .menu = &menu, .caps = .{ .unicode = case.unicode, .width = method } };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -400,7 +434,7 @@ test "Palette description fitting keeps whole wide and combining clusters" {
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
             const surface = try palette.widget().draw(ctx);
             var text: std.Io.Writer.Allocating = .init(arena.allocator());
-            var col = column + 2;
+            var col: usize = column + 2;
             while (col < width - 2) {
                 const cell = surface.readCell(@intCast(col), 0);
                 try std.testing.expect(col + cell.char.width <= width);
