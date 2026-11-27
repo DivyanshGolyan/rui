@@ -24,14 +24,14 @@ pub const Rows = struct {
     }
 
     /// The rows to draw for `facts` at Unix second `now`, in served order. Each connection takes a row with its name and sign-in,
-    /// then one row per usage window, then one row for how old the reading is, so every row fits a narrow screen.
+    /// then a row per usage window and one for when it resets, then one row for how old the reading is, so every row fits a narrow screen.
     pub fn build(rows: *Rows, facts: []const protocol.ConnectionFact, now: u64) []const Panel.Field {
         rows.len = 0;
         for (facts[0..@min(facts.len, connection.max_served)], 0..) |fact, index| {
             const name = fact.name.slice();
             @memcpy(rows.names[index][0..name.len], name);
             rows.add(rows.names[index][0..name.len], "", .{});
-        rows.add("", "  {s}", .{fact.label.slice()});
+            rows.add("", "  {s}", .{fact.label.slice()});
             const reading = fact.usage orelse {
                 // A browser sign-in sends no usage headers; any other connection simply has not reported yet.
                 rows.add("", "  {s}", .{if (fact.route == .chatgpt_plan) "no usage for browser sign-ins" else "no usage seen yet"});
@@ -41,7 +41,13 @@ pub const Rows = struct {
                 var buffer: [max_line]u8 = undefined;
                 var out: std.Io.Writer = .fixed(&buffer);
                 writeWindow(&out, window) catch {};
-                rows.add("", "{s}", .{out.buffered()});
+                rows.add("", "  {s}", .{out.buffered()});
+                if (window.reset_at) |at| {
+                    var span: [max_line]u8 = undefined;
+                    var spanned: std.Io.Writer = .fixed(&span);
+                    writeSpan(&spanned, at -| now) catch {};
+                    rows.add("", "    resets in {s}", .{spanned.buffered()});
+                }
             };
             var buffer: [max_line]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
