@@ -351,11 +351,11 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 
 The Host serves the work state and the valid actions, which depend on facts beyond the state.
 Nothing else about the work is served: what the state asks of the person is a pure function of `state`, so no reader is handed a second copy to disagree with it.
-A reader outside Zig derives it from `state.kind` and, for `bash`, `approvals`:
+A reader outside Zig derives it from `actions.decide` and `state.kind` and, for `bash`, `approvals`; a served `actions.decide` asks the person in every state, since a promoted background Action can outlive its Turn:
 
 | `state.kind` | Standing |
 | --- | --- |
-| `approval`, or `bash` with `approvals` above zero | needs you |
+| `actions.decide` served, `approval`, or `bash` with `approvals` above zero | needs you |
 | `working`, `retrying`, `stopping`, or `bash` with no approvals | working |
 | `pending` | queued |
 | `failed` | failed |

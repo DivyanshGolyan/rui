@@ -76,7 +76,7 @@ pub fn classify(facts: Facts, viewer: Viewer) Class {
         withStop(std.meta.activeTag(state), facts.stop_pending);
     // Standing follows the work as handed in. The overview advances each row's work with its clock on every tick, so a retry that has
     // fallen due arrives here as pending; `kind` also reads it so for a row not yet advanced.
-    const own: Standing = if (archived) .done else session_work.standing(facts.state.*);
+    const own: Standing = if (archived) .done else session_work.standing(facts.state.*, facts.decidable);
     const yours = !facts.first_message or facts.from_person;
     const visible = facts.in_list and viewer.filter.includes(facts.archive) and (facts.creator or facts.pinned or facts.first_message or facts.open);
     return .{
@@ -190,7 +190,8 @@ const Probe = struct {
 };
 
 // The work states with the standing each must have, written from the base client classification
-// independently of `session_work.standing`; a failed Turn is its own standing.
+// independently of `session_work.standing`; a failed Turn is its own standing, and a waiting decision (`decidable`) asks
+// the person in every state.
 const probes = [_]Probe{
     .{ .work = .{ .idle = .{ .since = 1 } }, .standing = .done },
     .{ .work = .{ .pending = .{ .since = 1 } }, .standing = .queued },
@@ -223,7 +224,7 @@ test "SUI-169 a Session's class follows its work, archive state, listing and the
                     const got = classify(facts, .{ .filter = filter, .now_ms = now_ms });
                     const archived = archive == .archived;
                     const due = probe.work == .retrying and now_ms >= probe.work.retrying.due_at_ms;
-                    const expected_standing: Standing = if (archived) .done else probe.standing;
+                    const expected_standing: Standing = if (archived) .done else if (decidable) .needs_you else probe.standing;
                     const expected_kind: Kind = if (archived) .stopped else if (stop_pending) .stopping else if (decidable) .approval else if (due) .pending else std.meta.activeTag(probe.work);
                     const listed = in_list and switch (filter) {
                         .active => !archived,

@@ -2192,7 +2192,7 @@ const Seen = struct {
 
 fn fixtureWork(value: protocol.session_work.Work) protocol.session_work.Work {
     var served = value;
-    const standing = protocol.session_work.standing(served.state);
+    const standing = protocol.session_work.standing(served.state, false);
     served.actions.stop = switch (standing) {
         .needs_you, .working, .queued => true,
         .failed, .done => false,
