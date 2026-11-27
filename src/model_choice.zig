@@ -331,35 +331,74 @@ fn press(choice: *Self, ctx: *vxfw.EventContext, key: u21) !void {
     try choice.widget().handleEvent(ctx, .{ .key_press = .{ .codepoint = key } });
 }
 
+/// How many of the two rows above the overflow line, or of three without it, are drawn in `style` at column 5.
+fn styledRows(surface: vxfw.Surface, style: vaxis.Style) usize {
+    var count: usize = 0;
+    for (0..surface.size.height) |at_row| {
+        if (std.meta.eql(surface.readCell(5, @intCast(at_row)).style, style)) count += 1;
+    }
+    return count;
+}
+
+const Second = struct {
+    picked: ?[]const u8 = null,
+    fn pickModel(raw: *anyopaque, _: *vxfw.EventContext, id: []const u8) !void {
+        const self: *Second = @ptrCast(@alignCast(raw));
+        self.picked = id;
+    }
+};
+
 test "SUI-185 a model choice uses the inputs it was last given, all of them at once" {
-    const entries = [_]picker.Entry{
-        .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) },
-    };
+    const ids = [_][]const u8{ "gpt-5.1", "gpt-5.2", "gpt-5.3", "gpt-5.4", "gpt-5.5" };
+    var entries: [ids.len]picker.Entry = undefined;
+    for (ids, &entries) |id, *entry| entry.* = .{ .id = id, .known = true, .catalogued = true, .providers = connection_names.NameSet.of(&provider_route.built_in_names) };
     const menu: picker.Menu = .{ .entries = &entries };
     var first: Fixture = .{};
-    var second: Fixture = .{};
+    var second: Second = .{};
     var choice: Self = .{};
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 3 }, .cell_size = .{} };
+    const ground: vaxis.Style = .{ .bg = .{ .index = 1 } };
+    const selection: vaxis.Style = .{ .bg = .{ .index = 2 } };
+    const quiet: vaxis.Style = .{ .bg = .{ .index = 4 } };
 
-    // A pick calls the callback and userdata it was last presented with.
-    choice.present(.{ .userdata = &first, .on_pick = Fixture.pickModel });
+    // Presented with a look, ASCII and overflow: the focused row, the other rows and the overflow line are drawn with it.
+    choice.present(.{ .unicode = false, .show_more = true, .userdata = &first, .on_pick = Fixture.pickModel, .ground = ground, .selection = selection, .quiet = quiet });
     choice.open(&menu, provider_route.nameOf(.codex), "gpt-5.5");
-    try press(&choice, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqualStrings("gpt-5.5", first.picked.?);
-    try std.testing.expect(second.picked == null);
-    choice.present(.{ .userdata = &second, .on_pick = Fixture.pickModel });
-    choice.open(&menu, provider_route.nameOf(.codex), "gpt-5.5");
-    try press(&choice, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqualStrings("gpt-5.5", second.picked.?);
+    try press(&choice, &ctx, vaxis.Key.up);
+    var drawn = try choice.widget().draw(draw_ctx);
+    try std.testing.expectEqual(@as(usize, 1), styledRows(drawn, selection));
+    try std.testing.expectEqual(@as(usize, 1), styledRows(drawn, ground));
+    try std.testing.expectEqualStrings("v", drawn.readCell(3, 2).char.grapheme);
+    try std.testing.expectEqual(quiet, drawn.readCell(3, 2).style);
 
-    // Presenting replaces every input: what an earlier present set and the next leaves out is back at its default.
-    choice.present(.{ .show_more = false, .unicode = false });
-    try std.testing.expect(!choice.props.show_more and !choice.props.unicode);
-    try std.testing.expect(choice.props.on_pick == null and choice.props.userdata == null);
-    choice.present(.{});
-    try std.testing.expect(choice.props.show_more and choice.props.unicode);
+    // A pick calls the callback and userdata it was last presented with, and presenting another replaces both.
+    const picked_first = menu.entries[choice.focus.selected().?].id;
+    try press(&choice, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqualStrings(picked_first, first.picked.?);
+    choice.present(.{ .userdata = &second, .on_pick = Second.pickModel });
+    choice.open(&menu, provider_route.nameOf(.codex), "gpt-5.2");
+    try press(&choice, &ctx, vaxis.Key.up);
+    const picked_second = menu.entries[choice.focus.selected().?].id;
+    try press(&choice, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqualStrings(picked_second, second.picked.?);
+    try std.testing.expectEqualStrings(picked_first, first.picked.?);
+
+    // Inputs the latest present leaves out are back at their defaults: Unicode overflow arrow, the default look.
+    choice.open(&menu, provider_route.nameOf(.codex), "gpt-5.5");
+    try press(&choice, &ctx, vaxis.Key.up);
+    drawn = try choice.widget().draw(draw_ctx);
+    try std.testing.expectEqualStrings("↓", drawn.readCell(3, 2).char.grapheme);
+    try std.testing.expectEqual((Props{}).quiet, drawn.readCell(3, 2).style);
+    try std.testing.expectEqual(@as(usize, 1), styledRows(drawn, (Props{}).selection));
+
+    // Without the overflow setting the last row is a row, not the overflow line.
+    choice.present(.{ .show_more = false, .userdata = &second, .on_pick = Second.pickModel });
+    drawn = try choice.widget().draw(draw_ctx);
+    try std.testing.expect(!std.mem.eql(u8, "↓", drawn.readCell(3, 2).char.grapheme));
+    try std.testing.expectEqual(@as(usize, 2), styledRows(drawn, (Props{}).ground));
 }
 
 test "Model choice shares picker rows filters never empty and picks only its provider" {
