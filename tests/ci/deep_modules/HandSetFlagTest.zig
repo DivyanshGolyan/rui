@@ -4,7 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Diagnostic = @import("Diagnostic.zig");
 const Fixture = @import("Fixture.zig");
-const HandSetFlag = @import("HandSetFlag.zig");
+const Setters = @import("Setters.zig");
 const References = @import("References.zig");
 const Sources = @import("Sources.zig");
 const TestCode = @import("TestCode.zig");
@@ -17,7 +17,7 @@ fn checked(arena: Allocator, entries: []const Sources.Memory.Entry) ![]const Dia
     const loaded = try Fixture.load(arena, entries, "src/main.zig");
     const all = try References.collect(arena, &loaded.sources, &loaded.items);
     const refs = try TestCode.production(arena, &loaded.sources, &loaded.items, all);
-    return HandSetFlag.check(arena, &loaded.sources, &loaded.items, refs, null);
+    return Setters.check(arena, &loaded.sources, &loaded.items, refs, null, .flag);
 }
 
 /// Each function ends in a second statement, so that none is itself a one-line setter.

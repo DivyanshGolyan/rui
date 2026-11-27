@@ -1,9 +1,11 @@
-//! `hand-set-flag`: a field that two or more production functions set to a fixed value, whatever
-//! it held (`x.f = true`, `x.f |= bits`). Each of those functions reports "something happened" by
-//! hand, so the rule for when it happens is copied into all of them, and a function that forgets is
-//! a stale screen or a missed wake. A function whose whole body is such an assignment (`fn
-//! markDirty(self) void { self.dirty = true; }`) is no writer itself: its callers are. A
-//! structural property, not a count: one setter is a decision, two copies of it are a braid.
+//! `hand-set-flag` and `scattered-transition`: a field that two or more production functions
+//! assign a value that ignores what it held. A flag is set to a fixed value (`x.f = true`,
+//! `x.f |= bits`); a state is an enum or tagged union literal (`x.f = .closed`) in a field that
+//! the type's own file branches on (`switch`, `==`, `!=`). Each of those functions decides by hand
+//! when it happens, so the rule is copied into all of them, and one that forgets is a stale screen,
+//! a missed wake or a transition the others never check. A function whose whole body is such an
+//! assignment (`fn markDirty(self) void { self.dirty = true; }`) is no writer itself: its callers
+//! are. A structural property, not a count: one writer is a decision, two copies are a braid.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -18,18 +20,61 @@ const NodeId = Sources.NodeId;
 /// The reference that sets a field, by index into the references, for each function that does.
 const Setters = std.AutoArrayHashMapUnmanaged(ItemId, u32);
 
-/// The hand-set-flag diagnostics of `refs`, limited to `scope` when it is set.
-pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Items, refs: []const References.Reference, scope: ?NodeId) Allocator.Error![]const Diagnostic.Diagnostic {
+pub const Kind = enum {
+    flag,
+    state,
+
+    fn lint(kind: Kind) Diagnostic.Lint {
+        return switch (kind) {
+            .flag => .@"hand-set-flag",
+            .state => .@"scattered-transition",
+        };
+    }
+
+    fn sets(kind: Kind) References.Sets {
+        return switch (kind) {
+            .flag => .fixed,
+            .state => .state,
+        };
+    }
+
+    fn message(kind: Kind) []const u8 {
+        return switch (kind) {
+            .flag => "is set by hand in",
+            .state => "is a state assigned in",
+        };
+    }
+
+    fn verb(kind: Kind) []const u8 {
+        return switch (kind) {
+            .flag => "sets",
+            .state => "moves",
+        };
+    }
+};
+
+/// The fields that the code of their own file branches on.
+fn branchedOn(arena: Allocator, items: *const Items.Items, refs: []const References.Reference) Allocator.Error!std.AutoHashMapUnmanaged(ItemId, void) {
+    var out: std.AutoHashMapUnmanaged(ItemId, void) = .empty;
+    for (refs) |reference| {
+        if (reference.branches and items.get(reference.holder).file == items.get(reference.item).file) try out.put(arena, reference.item, {});
+    }
+    return out;
+}
+
+/// The diagnostics of `kind` in `refs`, limited to `scope` when it is set.
+pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Items, refs: []const References.Reference, scope: ?NodeId, kind: Kind) Allocator.Error![]const Diagnostic.Diagnostic {
+    const branched = if (kind == .state) try branchedOn(arena, items, refs) else std.AutoHashMapUnmanaged(ItemId, void).empty;
     // A function whose whole body sets one field is a setter of it, not a writer.
     var setter_of: std.AutoHashMapUnmanaged(ItemId, ItemId) = .empty;
     for (refs) |reference| {
-        if (!reference.sets or !isFlag(items, reference.item)) continue;
+        if (reference.sets != kind.sets() or !isTarget(items, branched, kind, reference.item)) continue;
         if (wholeBody(sources, items, reference.holder)) try setter_of.put(arena, reference.holder, reference.item);
     }
 
     var writers: std.AutoArrayHashMapUnmanaged(ItemId, Setters) = .empty;
     for (refs, 0..) |reference, index| {
-        const field: ItemId = if (reference.sets and isFlag(items, reference.item)) blk: {
+        const field: ItemId = if (reference.sets == kind.sets() and isTarget(items, branched, kind, reference.item)) blk: {
             if (setter_of.contains(reference.holder)) continue;
             break :blk reference.item;
         } else if (setter_of.get(reference.item)) |field| blk: {
@@ -48,7 +93,7 @@ pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Item
         if (by_holder.count() < 2) continue;
         const owner = items.get(items.get(field).parent.?);
         if (!inScope(sources, scope, owner.home) and !anyFromInScope(sources, refs, by_holder.values(), scope)) continue;
-        try found.append(arena, try diagnostic(arena, sources, items, refs, setter_of, field, by_holder.values()));
+        try found.append(arena, try diagnostic(arena, sources, items, refs, setter_of, kind, field, by_holder.values()));
     }
     return found.items;
 }
@@ -57,6 +102,12 @@ pub fn check(arena: Allocator, sources: *const Sources, items: *const Items.Item
 fn isCall(sources: *const Sources, reference: References.Reference) bool {
     const tree = &sources.files[@backingInt(reference.file)].ast;
     return reference.token + 1 < tree.tokens.len and tree.tokenTag(reference.token + 1) == .l_paren;
+}
+
+/// Whether `field` is a flag or state of `kind`: a flag is any field that holds something, a
+/// state one that its own file branches on.
+fn isTarget(items: *const Items.Items, branched: std.AutoHashMapUnmanaged(ItemId, void), kind: Kind, field: ItemId) bool {
+    return isFlag(items, field) and (kind == .flag or branched.contains(field));
 }
 
 /// Whether `field` is a field of a type that holds something.
@@ -112,7 +163,7 @@ fn lessTally(_: void, a: Diagnostic.Tally, b: Diagnostic.Tally) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
-fn diagnostic(arena: Allocator, sources: *const Sources, items: *const Items.Items, refs: []const References.Reference, setter_of: std.AutoHashMapUnmanaged(ItemId, ItemId), field: ItemId, uses: []const u32) Allocator.Error!Diagnostic.Diagnostic {
+fn diagnostic(arena: Allocator, sources: *const Sources, items: *const Items.Items, refs: []const References.Reference, setter_of: std.AutoHashMapUnmanaged(ItemId, ItemId), kind: Kind, field: ItemId, uses: []const u32) Allocator.Error!Diagnostic.Diagnostic {
     const field_name = items.get(field).name;
     const sites = try arena.alloc(Site, uses.len);
     for (uses, sites) |index, *slot| {
@@ -126,10 +177,11 @@ fn diagnostic(arena: Allocator, sources: *const Sources, items: *const Items.Ite
         slot.* = .{
             .at = at,
             .from = reference.from,
-            .note = try std.fmt.allocPrint(arena, "{s}: `{s}.{s}` sets `{s}`{s}", .{
+            .note = try std.fmt.allocPrint(arena, "{s}: `{s}.{s}` {s} `{s}`{s}", .{
                 try Circle.clickable(arena, at),
                 Circle.moduleLabel(sources, holder.home),
                 try Circle.itemName(arena, items, reference.holder),
+                kind.verb(),
                 field_name,
                 through,
             }),
@@ -158,9 +210,9 @@ fn diagnostic(arena: Allocator, sources: *const Sources, items: *const Items.Ite
     const owner_name = try Circle.itemName(arena, items, owner_id);
     const qualified = try std.fmt.allocPrint(arena, "{s}.{s}", .{ Circle.moduleLabel(sources, items.get(owner_id).home), owner_name });
     return .{
-        .lint = .@"hand-set-flag",
+        .lint = kind.lint(),
         .key = try std.fmt.allocPrint(arena, "{s}.{s}", .{ qualified, field_name }),
-        .message = try std.fmt.allocPrint(arena, "`{s}.{s}` is set by hand in {s}", .{ owner_name, field_name, try Circle.counted(arena, sites.len, "function") }),
+        .message = try std.fmt.allocPrint(arena, "`{s}.{s}` {s} {s}", .{ owner_name, field_name, kind.message(), try Circle.counted(arena, sites.len, "function") }),
         .location = sites[0].at,
         .notes = notes.items,
         .picture = .{ .spread = .{

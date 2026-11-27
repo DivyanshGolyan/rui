@@ -9,8 +9,9 @@ test {
     _ = @import("FieldLeak.zig");
     _ = @import("FieldLeakTest.zig");
     _ = @import("Graph.zig");
-    _ = @import("HandSetFlag.zig");
+    _ = @import("Setters.zig");
     _ = @import("HandSetFlagTest.zig");
+    _ = @import("ScatteredTransitionTest.zig");
     _ = @import("TestCode.zig");
     _ = @import("Imports.zig");
     _ = @import("ItemSyntax.zig");

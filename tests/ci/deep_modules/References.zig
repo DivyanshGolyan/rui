@@ -41,9 +41,14 @@ pub const Reference = struct {
     access: Access,
     /// A field called through (`access == .call`): the method called on it, when it resolves.
     callee: ?ItemId = null,
-    /// A field assigned a fixed value, whatever it held: `x.f = true` or `x.f |= bits`.
-    sets: bool = false,
+    /// How a field is assigned a value that does not depend on what it held.
+    sets: Sets = .none,
+    /// The field is the subject of a `switch` or one side of `==` or `!=`: code that branches on it.
+    branches: bool = false,
 };
+
+/// A fixed assignment: `fixed` is `x.f = true` or `x.f |= bits`, `state` is `x.f = .name` or `x.f = .{ .name = ... }`.
+pub const Sets = enum { none, fixed, state };
 
 /// What `collectWithStats` met: production receivers (values whose field or method is
 /// named), how many had a known type, and how many of those named a field or method.
@@ -314,8 +319,10 @@ const Pass = struct {
     access: std.AutoHashMapUnmanaged(Ast.Node.Index, Access) = .empty,
     /// The call that a field of a place is called through, at any depth of the place.
     called: std.AutoHashMapUnmanaged(Ast.Node.Index, Ast.Node.Index) = .empty,
-    /// The fields that a context sets to a fixed value: the whole place of `x.f = true` or `x.f |= bits`.
-    sets: std.AutoHashMapUnmanaged(Ast.Node.Index, void) = .empty,
+    /// The fields that a context sets to a fixed value: the whole place of `x.f = true`, `x.f |= bits` or `x.f = .name`.
+    sets: std.AutoHashMapUnmanaged(Ast.Node.Index, Sets) = .empty,
+    /// The fields that code branches on: the subject of a `switch`, or a side of `==` or `!=`.
+    branches: std.AutoHashMapUnmanaged(Ast.Node.Index, void) = .empty,
     expected: std.AutoHashMapUnmanaged(Ast.Node.Index, TypeRef) = .empty,
 
     fn run(self: *Pass, refs: *std.ArrayList(Reference)) Allocator.Error!void {
@@ -334,10 +341,11 @@ const Pass = struct {
     fn markAccess(self: *Pass) Allocator.Error!void {
         for (0..self.ast.nodes.len) |i| {
             var buffer: [1]Ast.Node.Index = undefined;
+            try self.markBranch(nodeAt(i));
             const place = placeOf(self.ast, nodeAt(i), &buffer) orelse continue;
-            if (place.access == .assign and setsFixed(self.ast, nodeAt(i))) {
+            if (place.access == .assign and setsKind(self.ast, nodeAt(i)) != .none) {
                 const root = place.roots[0];
-                if (self.ast.nodeTag(root) == .field_access) try self.sets.put(self.arena, root, {});
+                if (self.ast.nodeTag(root) == .field_access) try self.sets.put(self.arena, root, setsKind(self.ast, nodeAt(i)));
             }
             for (place.roots) |root| {
                 var cur: ?Ast.Node.Index = root;
@@ -348,6 +356,23 @@ const Pass = struct {
                 }
             }
         }
+    }
+
+    /// Records the field that `node` branches on, when it is a `switch` or a comparison.
+    fn markBranch(self: *Pass, node: Ast.Node.Index) Allocator.Error!void {
+        switch (self.ast.nodeTag(node)) {
+            .@"switch", .switch_comma => try self.markSubject(self.ast.fullSwitch(node).?.ast.condition),
+            .equal_equal, .bang_equal => {
+                const lhs, const rhs = self.ast.nodeData(node).node_and_node;
+                try self.markSubject(lhs);
+                try self.markSubject(rhs);
+            },
+            else => {},
+        }
+    }
+
+    fn markSubject(self: *Pass, node: Ast.Node.Index) Allocator.Error!void {
+        if (self.ast.nodeTag(node) == .field_access) try self.branches.put(self.arena, node, {});
     }
 
     fn here(self: *const Pass, node: Ast.Node.Index) ?Here {
@@ -494,7 +519,7 @@ const Pass = struct {
             .field => {
                 self.stats.found += 1;
                 const access = self.access.get(node) orelse .copy;
-                try self.addCalled(refs, at, member, name, access, if (access == .call) self.calleeAt(at, node) else null, self.sets.contains(node));
+                try self.addCalled(refs, at, member, name, access, if (access == .call) self.calleeAt(at, node) else null, self.sets.get(node) orelse .none, self.branches.contains(node));
             },
             .function => {
                 self.stats.found += 1;
@@ -505,11 +530,11 @@ const Pass = struct {
     }
 
     fn add(self: *Pass, refs: *std.ArrayList(Reference), at: Here, item: ItemId, token: Ast.TokenIndex, access: Access) Allocator.Error!void {
-        try self.addCalled(refs, at, item, token, access, null, false);
+        try self.addCalled(refs, at, item, token, access, null, .none, false);
     }
 
-    fn addCalled(self: *Pass, refs: *std.ArrayList(Reference), at: Here, item: ItemId, token: Ast.TokenIndex, access: Access, callee: ?ItemId, sets: bool) Allocator.Error!void {
-        try refs.append(self.arena, .{ .from = self.from, .holder = at.holder, .item = item, .file = self.file, .token = token, .access = access, .callee = callee, .sets = sets });
+    fn addCalled(self: *Pass, refs: *std.ArrayList(Reference), at: Here, item: ItemId, token: Ast.TokenIndex, access: Access, callee: ?ItemId, sets: Sets, branches: bool) Allocator.Error!void {
+        try refs.append(self.arena, .{ .from = self.from, .holder = at.holder, .item = item, .file = self.file, .token = token, .access = access, .callee = callee, .sets = sets, .branches = branches });
     }
 
     /// The method called on the value `receiver` names, when that call resolves.
@@ -521,16 +546,20 @@ const Pass = struct {
     }
 };
 
-/// Whether the assignment `node` gives its place a fixed value, whatever the place held:
-/// `= true`, or `|=` of anything.
-fn setsFixed(ast: *const Ast, node: Ast.Node.Index) bool {
+/// What the assignment `node` gives its place, whatever the place held: `fixed` for `= true` or
+/// `|=` of anything, `state` for an enum literal or a tagged union literal, `none` otherwise.
+fn setsKind(ast: *const Ast, node: Ast.Node.Index) Sets {
     return switch (ast.nodeTag(node)) {
-        .assign_bit_or => true,
+        .assign_bit_or => .fixed,
         .assign => blk: {
             const value = ast.nodeData(node).node_and_node[1];
-            break :blk ast.nodeTag(value) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(value)), "true");
+            break :blk switch (ast.nodeTag(value)) {
+                .identifier => if (std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(value)), "true")) .fixed else .none,
+                .enum_literal, .struct_init_dot, .struct_init_dot_comma, .struct_init_dot_two, .struct_init_dot_two_comma => .state,
+                else => .none,
+            };
         },
-        else => false,
+        else => .none,
     };
 }
 
