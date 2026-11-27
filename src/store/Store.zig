@@ -82,7 +82,6 @@ const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const PrefixSeal = historical_domain.PrefixSeal;
-const PublicConversationPage = reads_domain.PublicConversationPage;
 const SessionObservation = reads_domain.SessionObservation;
 const SessionStopReply = command_domain.SessionStopReply;
 const SessionArchiveReply = command_domain.SessionArchiveReply;
@@ -996,21 +995,6 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, reads_domain.inspectSession(&access, session_ref, out));
-    }
-
-    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, row_allocator: std.mem.Allocator) !void {
-        // Allocated before entry: a failed allocation must not fence the Store.
-        const reads = try row_allocator.create([PublicConversationPage.capacity]reads_domain.PublicRowRead);
-        defer row_allocator.destroy(reads);
-        return self.queue().run(publicConversationPageHeld, .{ self, request, out, reads });
-    }
-
-    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage, reads: *[PublicConversationPage.capacity]reads_domain.PublicRowRead) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.publicConversationPage(&access, request, out, reads));
     }
 
     pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
@@ -2514,12 +2498,6 @@ pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentCon
 pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage) !activity_facts.Page {
     var page: activity_facts.Page = undefined;
     try self.activityPage(&request, &page);
-    return page;
-}
-
-pub fn publicConversationPageForTesting(self: *Store, request: conversation_read.ConversationPage) !PublicConversationPage {
-    var page: PublicConversationPage = undefined;
-    try self.publicConversationPage(&request, &page, std.testing.allocator);
     return page;
 }
 

@@ -165,25 +165,6 @@ pub const PermissionDecisionReply = union(enum) {
     infrastructure_failure,
 };
 
-pub const PublicConversationItem = struct {
-    position: u64,
-    ordinal: u64,
-    kind: conversation_read.ConversationItemKind,
-    content: content_value.Value,
-    presentation: ?tool_presentation.ToolPresentation = null,
-    admitted_at: ?u64 = null,
-    sender: ?protocol.NamedPeer = null,
-    source_action: ?u64 = null,
-};
-
-pub const PublicConversationPage = struct {
-    pub const capacity = conversation_read.public_conversation_page_items;
-    end: u64,
-    items: [capacity]PublicConversationItem = undefined,
-    count: usize = 0,
-    more: bool = false,
-};
-
 pub const MessageObservation = struct {
     content: content_value.Value,
     queue: ?AcceptedMessageQueue = null,
