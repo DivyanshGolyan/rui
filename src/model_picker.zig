@@ -530,7 +530,7 @@ test "model picker domain admits chat and unknown live IDs but not catalog-prove
     for (facts.non_chat_ids) |id| try std.testing.expect(Query.parse("").row(entryOf(&whole, id), .{}) == null);
 }
 
-test "SUI-184 a limited connection's row names it and the first other connection serving the model that is not limited" {
+test "SUI-186 a limited connection's row names it and the first other connection serving the model that is not limited" {
     const work = connection.Name.parse("work").?;
     const home = connection.Name.parse("home").?;
     const lab = connection.Name.parse("lab").?;

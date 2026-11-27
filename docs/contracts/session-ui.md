@@ -189,6 +189,8 @@ The short sign-in labels come from provider facts: "ChatGPT" for both `codex` an
 Every model list scopes to one sign-in: app settings and a new chat's Model choice list the models of the sign-in new Sessions use, which is the one logged in last, and chat info lists the Session's own, which is fixed for its life; so a person sees one ChatGPT, and a chat that signed in with a device code keeps its models while new chats use the browser (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in").
 Typing filters by account: `chatgpt` and `codex` both keep a ChatGPT sign-in's rows, either way in, and `api` keeps an API key's; `openai` stays a word of model IDs. `--connection codex` and every command that names a provider keep their meaning.
 Typing filters, Up and Down move, and Enter picks a model through app settings' typed backend.
+
+When the connection a Model choice lists for is at a usage limit, each of its rows ends with a quiet note: `limit reached on <name>` and, if another connection serves that model and is not limited, `· try <other>`. A connection is limited only while a window of its latest reading is at 100% and has not reset (`connection_limits.zig`, read when the Host is read); picking still uses the listed connection, and the other is reached through the chat's Account row. The note is cut at the row's edge like the rest of the row.
 An empty match keeps the field's choice open with feedback rather than saving an invalid model.
 Every successful pick saves the default for future Sessions through the same preferences writer as `rui defaults configure`; existing Sessions keep their settings.
 Esc closes the choice before app settings, and leaving without a pick writes nothing.

@@ -25,7 +25,7 @@ fn full(reset_at: ?u64) protocol.UsageWindow {
     return .{ .used_percent = 100, .minutes = 300, .reset_at = reset_at };
 }
 
-test "SUI-184 a connection is limited only while a window at its limit has not reset" {
+test "SUI-186 a connection is limited only while a window at its limit has not reset" {
     const now: u64 = 1_800_000_000;
     const open: protocol.UsageWindow = .{ .used_percent = 99.9, .minutes = 10080, .reset_at = now + 100 };
     try std.testing.expect(!limited(null, now));

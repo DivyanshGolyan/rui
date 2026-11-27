@@ -960,7 +960,7 @@ const Limits = struct {
     }
 };
 
-test "SUI-184 a model on a limited connection says so and names another connection that serves it" {
+test "SUI-186 a model on a limited connection says so and names another connection that serves it" {
     const work = connection.Name.parse("work").?;
     const home = connection.Name.parse("home").?;
     const entries = [_]picker.Entry{
