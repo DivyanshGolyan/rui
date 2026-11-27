@@ -23,9 +23,12 @@ const Row = struct { stmt: []const u8, expect: Access };
 
 /// Each statement puts `x.f` (or `x.f.g`) in one place. A context that uses no place gives copy.
 const rows = [_]Row{
-    .{ .stmt = "x.f = v;", .expect = .reach },
-    .{ .stmt = "x.f += 1;", .expect = .reach },
-    .{ .stmt = "x.f.g = v;", .expect = .reach },
+    .{ .stmt = "x.f = v;", .expect = .assign },
+    .{ .stmt = "x.f += 1;", .expect = .assign },
+    .{ .stmt = "x.f.g = v;", .expect = .assign },
+    .{ .stmt = "x.f[i] = v;", .expect = .assign },
+    .{ .stmt = "x.f[i] += 1;", .expect = .assign },
+    .{ .stmt = "x.f.g[i] = v;", .expect = .assign },
     .{ .stmt = "_ = x.f[i];", .expect = .reach },
     .{ .stmt = "_ = x.f[a..b];", .expect = .reach },
     .{ .stmt = "_ = &x.f;", .expect = .borrow },
@@ -35,17 +38,18 @@ const rows = [_]Row{
     .{ .stmt = "_ = x.f;", .expect = .copy },
     .{ .stmt = "_ = x.f.g;", .expect = .copy },
     .{ .stmt = "f(x.f);", .expect = .copy },
-    .{ .stmt = "x.f.* = v;", .expect = .reach },
+    .{ .stmt = "x.f.* = v;", .expect = .assign },
 };
 
-/// The access of the `x.f` access in the statement, taken from the first context that gives it a place.
+/// The access of the `x.f` access in the statement, taken from the last context that gives it a place, as `collect` does.
 fn accessIn(tree: *const Ast, field: Ast.Node.Index) Access {
+    var found: Access = .copy;
     for (0..tree.nodes.len) |i| {
         const context: Ast.Node.Index = @fromBackingInt(@intCast(i));
         const access = References.classify(tree, context, field);
-        if (access != .copy) return access;
+        if (access != .copy) found = access;
     }
-    return .copy;
+    return found;
 }
 
 /// The `x.f` node: the first field access on `x` whose name is `f`.
@@ -128,11 +132,11 @@ test "collect finds decls across files, methods on typed params, field writes th
     // A method call on a typed parameter: `c.bump()`.
     try testing.expectEqual(Access.copy, accessOf(refs, bump, loaded.item("src/main.zig", "g")).?);
     // A field write through self: `self.n += 1` in bump.
-    try testing.expectEqual(Access.reach, accessOf(refs, n, bump).?);
+    try testing.expectEqual(Access.assign, accessOf(refs, n, bump).?);
     // A read of self's field: `return self.n` in read.
     try testing.expectEqual(Access.copy, accessOf(refs, n, loaded.item("src/main.zig", "Cell.read")).?);
     // An index write through a typed param: `c.list[0] = 1` in idx.
-    try testing.expectEqual(Access.reach, accessOf(refs, list, loaded.item("src/main.zig", "idx")).?);
+    try testing.expectEqual(Access.assign, accessOf(refs, list, loaded.item("src/main.zig", "idx")).?);
     // A borrow: `return &c.n` in ptr.
     try testing.expectEqual(Access.borrow, accessOf(refs, n, loaded.item("src/main.zig", "ptr")).?);
     // Struct literal field names with a known result type, from the return type and a var annotation.

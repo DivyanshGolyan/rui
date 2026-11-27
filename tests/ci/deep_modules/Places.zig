@@ -6,8 +6,9 @@
 const std = @import("std");
 const Ast = std.zig.Ast;
 
-/// What the code does with a field it reaches: copies it, borrows it, calls a method on it, or writes or indexes it.
-pub const Access = enum { copy, borrow, call, reach };
+/// What the code does with a field it reaches: copies it, borrows it, calls a method on it,
+/// assigns it (or something inside it), or indexes or slices it.
+pub const Access = enum { copy, borrow, call, assign, reach };
 
 /// The place a context node uses, and what the context does with it. `roots` are the
 /// expressions whose suffixes are the place (`x.f` has the root `x.f`).
@@ -22,7 +23,7 @@ pub fn classify(ast: *const Ast, context: Ast.Node.Index, field: Ast.Node.Index)
     const place = placeOf(ast, context, &buffer) orelse return .copy;
     for (place.roots) |root| {
         var cur: ?Ast.Node.Index = root;
-        while (cur) |node| : (cur = suffixBase(ast, node)) {
+        while (cur) |node| : (cur = placeStep(ast, place.access, node)) {
             if (node == field) return place.access;
         }
     }
@@ -32,7 +33,7 @@ pub fn classify(ast: *const Ast, context: Ast.Node.Index, field: Ast.Node.Index)
 /// The place that `node` uses as a context, or null when it uses none.
 pub fn placeOf(ast: *const Ast, node: Ast.Node.Index, buffer: *[1]Ast.Node.Index) ?Place {
     switch (ast.nodeTag(node)) {
-        .assign_destructure => return .{ .roots = ast.assignDestructure(node).ast.variables, .access = .reach },
+        .assign_destructure => return .{ .roots = ast.assignDestructure(node).ast.variables, .access = .assign },
         .address_of => {
             buffer[0] = ast.nodeData(node).node;
             return .{ .roots = buffer[0..1], .access = .borrow };
@@ -55,9 +56,16 @@ pub fn placeOf(ast: *const Ast, node: Ast.Node.Index, buffer: *[1]Ast.Node.Index
         else => {
             if (!isAssign(ast.nodeTag(node))) return null;
             buffer[0] = ast.nodeData(node).node_and_node[0];
-            return .{ .roots = buffer[0..1], .access = .reach };
+            return .{ .roots = buffer[0..1], .access = .assign };
         },
     }
+}
+
+/// The next expression down a place: its suffix base, and for an assignment also an index,
+/// since `x.f[i] = v` assigns something inside `x.f`.
+pub fn placeStep(ast: *const Ast, access: Access, node: Ast.Node.Index) ?Ast.Node.Index {
+    if (access == .assign and ast.nodeTag(node) == .array_access) return ast.nodeData(node).node_and_node[0];
+    return suffixBase(ast, node);
 }
 
 /// The expression a place suffix is applied to, or null when `node` is not a suffix.

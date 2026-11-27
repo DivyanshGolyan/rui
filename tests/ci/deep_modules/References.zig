@@ -27,6 +27,7 @@ pub const classify = Places.classify;
 pub const Place = Places.Place;
 pub const placeOf = Places.placeOf;
 pub const suffixBase = Places.suffixBase;
+pub const placeStep = Places.placeStep;
 const isStructInit = Places.isStructInit;
 
 pub const Reference = struct {
@@ -332,7 +333,7 @@ const Pass = struct {
             const place = placeOf(self.ast, nodeAt(i), &buffer) orelse continue;
             for (place.roots) |root| {
                 var cur: ?Ast.Node.Index = root;
-                while (cur) |node| : (cur = suffixBase(self.ast, node)) {
+                while (cur) |node| : (cur = placeStep(self.ast, place.access, node)) {
                     if (self.ast.nodeTag(node) != .field_access) continue;
                     try self.access.put(self.arena, node, place.access);
                     if (place.access == .call) try self.called.put(self.arena, node, nodeAt(i));

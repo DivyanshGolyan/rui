@@ -178,14 +178,14 @@ fn copiesOf(items: *const Items.Items, wrappers: *const WrapperMap, reference: R
 }
 
 fn onlyReads(items: *const Items.Items, access: References.Access, fields: []const ItemId, callee: ?ItemId) bool {
-    if (access == .reach) return false;
+    if (access == .reach or access == .assign) return false;
     for (fields) |field| {
         const plain = items.get(field).plain;
         const reads = switch (access) {
             .copy => true,
             .borrow => plain != .no,
             .call => plain == .scalar or (callee != null and items.get(callee.?).readsReceiver()),
-            .reach => false,
+            .reach, .assign => false,
         };
         if (!reads) return false;
     }
