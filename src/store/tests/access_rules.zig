@@ -80,6 +80,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../catalog.zig"),
         @embedFile("../store_check.zig"),
         @embedFile("../check_run.zig"),
+        @embedFile("../gone.zig"),
         @embedFile("../rules/char_set.zig"),
         @embedFile("../rules/eval.zig"),
         @embedFile("../rules/rule.zig"),
