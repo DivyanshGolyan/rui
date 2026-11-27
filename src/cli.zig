@@ -24,6 +24,8 @@ const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
 const cli_invocation = @import("cli_invocation.zig");
 const store_target = @import("store_target.zig");
+const check_run = @import("store/check_run.zig");
+const store_path = @import("store_path.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
@@ -321,6 +323,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
                 store_schema.mysql_schema;
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
+        .store_check => try checkStore(init, parsed.get("store")),
         .host_start, .host_pause, .host_reload_tools, .host_status => try host(init, command, parsed),
         .host_restart => try @import("host_coordinator.zig").restartAll(init),
         .host_serve => unreachable,
@@ -4670,6 +4673,37 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
             try protocol_reply.checkCanonicalFailure(reply.command);
             return readFailureError(failure);
         },
+    }
+}
+
+/// `rui store check`: the one line per broken rule goes to stdout, the reason a check could not run to stderr.
+fn checkStore(init: std.process.Init, store: ?[]const u8) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, store, &selected_buffer);
+    var path_buffer: [store_path.max_database_path_bytes + 1:0]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&path_buffer, "{s}{s}", .{ selected, store_path.database_suffix }, 0) catch return error.InvalidArguments;
+    var out_buffer: [4096]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(init.io, &out_buffer);
+    var refusal_buffer: [512]u8 = undefined;
+    var refusal = std.Io.File.stderr().writerStreaming(init.io, &refusal_buffer);
+    const result = check_run.checkSqlite(path, &out.interface, &refusal.interface) catch |err| {
+        out.interface.flush() catch {};
+        switch (err) {
+            error.StoreFormatMismatch => {},
+            error.StoreOpenFailed => refusal.interface.writeAll("rui: store check could not open the Store's SQLite file read-only; stop the Host, and for a MySQL Store this check is not available yet\n") catch {},
+            error.CheckFailed => refusal.interface.writeAll("rui: store check could not run a statement; the Store file is damaged or not a Rui Store\n") catch {},
+            error.WriteFailed => {},
+        }
+        refusal.interface.flush() catch {};
+        recordExit(.environment);
+        return error.Reported;
+    };
+    out.interface.flush() catch return error.Reported;
+    if (result.breaking != 0) {
+        refusal.interface.print("rui: store check: {d} of {d} rules and references are broken by {d} rows\n", .{ result.breaking, result.checked, result.rows }) catch {};
+        refusal.interface.flush() catch {};
+        recordExit(.refused);
+        return error.Reported;
     }
 }
 
