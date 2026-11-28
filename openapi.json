@@ -2502,7 +2502,7 @@
                       "content": {
                         "anyOf": [
                           {
-                            "$ref": "#/components/schemas/ContentValue"
+                            "$ref": "#/components/schemas/ContentText"
                           },
                           {
                             "type": "null"

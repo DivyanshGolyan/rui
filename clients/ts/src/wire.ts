@@ -736,7 +736,7 @@ export interface components {
                     /** @enum {string} */
                     ending: "done" | "context_full" | "provider_refused" | "out_of_quota" | "provider_unavailable" | "stopped" | "interrupted" | "failed";
                     code: string;
-                    content: components["schemas"]["ContentValue"] | null;
+                    content: components["schemas"]["ContentText"] | null;
                     report: components["schemas"]["FailureReport"] | null;
                 };
             };

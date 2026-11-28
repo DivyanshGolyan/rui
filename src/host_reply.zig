@@ -582,7 +582,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     var hosted_worst: protocol.ActivityItem.HostedAction = .{ .kind = Worst.tag(@import("hosted_action.zig").HostedAction), .targets_total = max, .pattern = text };
     while (hosted_worst.targets.len < protocol.ActivityItem.HostedAction.Targets.max_served) try hosted_worst.targets.append(text);
-    var worst_report: @import("failure_report.zig").Report = .{ .code = .{ .cut = true }, .message = .{ .cut = true } };
+    var worst_report: @import("failure_report.zig").Report = .{};
     try worst_report.code.text.set(&@as([@import("failure_report.zig").max_part_bytes]u8, @splat(1)));
     try worst_report.message.text.set(&@as([@import("failure_report.zig").max_stored_bytes]u8, @splat(1)));
     const values = [_]protocol.ActivityItem.Value{

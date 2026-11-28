@@ -737,7 +737,7 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
     }.run);
 }
 
-test "a failed Turn's activity outcome references the provider's report" {
+test "a failed Turn's activity outcome carries the provider's report" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -757,12 +757,9 @@ test "a failed Turn's activity outcome references the provider's report" {
                 var request: protocol.ActivityPage = .{ .direction = .backward };
                 try request.session.set(session.slice());
                 const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.turn_ended;
-                if (words.len == 0) {
-                    try std.testing.expect(outcome.content == null);
-                } else {
-                    try std.testing.expectEqual(@as(u64, words.len), outcome.content.?.length);
-                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(words), &outcome.content.?.digest);
-                }
+                try std.testing.expect(outcome.content == null);
+                try std.testing.expectEqualStrings(words, outcome.report.message.text.slice());
+                try std.testing.expectEqual(words.len == 0, outcome.report.isEmpty());
             }
         }
     }.run);
@@ -836,10 +833,8 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
             try std.testing.expectEqualStrings(diagnostic, resolution.get("content").?.object.get("text").?.string);
             const outcome = parsed.value.object.get("full").?.object.get("turns").?.array.items[0].object.get("outcome").?.object;
             try std.testing.expectEqualStrings("retry_exhausted", outcome.get("code").?.string);
-            const words = "server_is_overloaded: Try again later.";
-            const reference = outcome.get("content").?.object;
-            try std.testing.expectEqualStrings(std.fmt.comptimePrint("{d}", .{words.len}), reference.get("bytes").?.string);
-            try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest(words), .lower), reference.get("sha256").?.string);
+            // The session report's outcome content is a done Turn's answer; the provider's words are the Turn's `report`, read from its Activity row.
+            try std.testing.expect(outcome.get("content").? == .null);
         }
     }.run);
 }

@@ -1520,7 +1520,8 @@ const OutcomeRead = struct {
             .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
         }
         const report = try outcome.decodeReport(&.{ .code = row.outcome_report_code, .message = row.outcome_report_message, .code_cut = row.outcome_report_code_cut, .message_cut = row.outcome_report_message_cut });
-        read.outcome.* = .{ .session = .{}, .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = row.outcome_code, .content = null, .report = report };
+        read.outcome.* = .{ .session = .{}, .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = .{}, .content = null, .report = report };
+        read.outcome.code.set(row.outcome_code.slice()) catch return error.CorruptStore;
         read.outcome.session.set(row.session_ref.slice()) catch return error.CorruptStore;
         read.at = row.outcome_at.get();
     }
