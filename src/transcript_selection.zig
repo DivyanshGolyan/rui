@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const viewport = @import("ConversationViewport.zig");
+const Hover = @import("widgets/Hover.zig");
 const TerminalText = @import("TerminalText.zig");
 const Document = viewport.Document;
 
@@ -137,30 +138,51 @@ pub fn opens(document: anytype, spot: Spot) ?[]const u8 {
     return document.sessionAt(relative(document, spot.start) orelse return null);
 }
 
-pub const PeerSpan = struct { start: u16, end: u16 };
-pub fn peers(document: anytype, cells: []const vaxis.Cell, arena: std.mem.Allocator) ![]const PeerSpan {
-    var spans: std.ArrayList(PeerSpan) = .empty;
-    var col: usize = 0;
-    while (col < cells.len) {
-        const id = peerAt(document, cells[col]) orelse {
-            col += 1;
-            continue;
-        };
-        const start = col;
-        col = @min(cells.len, col + @max(cells[col].char.width, 1));
-        while (col < cells.len) {
-            const next = peerAt(document, cells[col]) orelse break;
-            if (!std.mem.eql(u8, id, next)) break;
-            col = @min(cells.len, col + @max(cells[col].char.width, 1));
-        }
-        try spans.append(arena, .{ .start = @intCast(start), .end = @intCast(col) });
-    }
-    return spans.items;
-}
+pub const PeerHover = struct {
+    occurrence: ?[*]const u8 = null,
 
-fn peerAt(document: anytype, cell: vaxis.Cell) ?[]const u8 {
-    return document.sessionAt(document.cellOffset(cell) orelse return null);
-}
+    pub fn row(self: *PeerHover, document: anytype, cells: []const vaxis.Cell, index: usize, hover: *const Hover, targets: *std.ArrayList(Hover.Rect), arena: std.mem.Allocator) !void {
+        var col: usize = 0;
+        while (col < cells.len) {
+            const occurrence = hit(document, cells[col]) orelse {
+                col += 1;
+                continue;
+            };
+            const start = col;
+            while (true) {
+                col = @min(cells.len, col + @max(cells[col].char.width, 1));
+                if (col == cells.len or hit(document, cells[col]) != occurrence) break;
+            }
+            const rect: Hover.Rect = .{ .row = @intCast(index), .col = @intCast(start), .width = @intCast(col - start) };
+            try targets.append(arena, rect);
+            if (hover.contains(rect)) self.occurrence = occurrence;
+        }
+    }
+
+    pub fn paint(self: PeerHover, surface: vaxis.vxfw.Surface) void {
+        const occurrence = self.occurrence orelse return;
+        const width = surface.size.width;
+        for (0..surface.size.height) |index| {
+            const cells = surface.buffer[index * width ..][0..width];
+            for (cells, 0..) |cell, col| {
+                if (cellOccurrence(cell) != occurrence) continue;
+                const end = @min(width, col + @max(cell.char.width, 1));
+                for (cells[col..end]) |*painted| painted.style = Hover.underlined(painted.style);
+            }
+        }
+    }
+
+    fn hit(document: anytype, cell: vaxis.Cell) ?[*]const u8 {
+        // Word wrapping paints spaces without a source offset. They are part of
+        // the underline, while the pointer and click still use source-backed cells.
+        const occurrence = cellOccurrence(cell) orelse return null;
+        return if (document.cellOffset(cell) != null) occurrence else null;
+    }
+
+    fn cellOccurrence(cell: vaxis.Cell) ?[*]const u8 {
+        return if (cell.link.uri.len == 0 and cell.link.params.len != 0) cell.link.params.ptr else null;
+    }
+};
 
 pub const Copy = union(enum) {
     nothing,
