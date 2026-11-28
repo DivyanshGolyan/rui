@@ -11,6 +11,7 @@ const picker = @import("model_picker.zig");
 const Footer = @import("widgets/Footer.zig");
 const keys_panel = @import("keys_panel.zig");
 const connections_panel = @import("connections_panel.zig");
+const connections_refresh = @import("connections_refresh.zig");
 const preferences = @import("preferences.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
@@ -43,9 +44,6 @@ pub const Backend = struct {
     seconds: ?*const fn (*anyopaque) u64 = null,
 };
 
-/// How long an open Connections reference keeps a reading before it asks the Host again, in seconds.
-const connections_refresh_seconds = 5;
-
 pub const ConnectionsSnapshot = struct { facts: protocol.Connections, now: u64 };
 
 /// The read-only reference a Settings row opens in place of the list: the shared key list over its own rows.
@@ -59,7 +57,7 @@ reference_open: bool = false,
 reference: Reference = .keys,
 connection_rows: connections_panel.Rows = .{},
 connection_facts: ?ConnectionsSnapshot = null,
-connections_read_at: u64 = 0,
+connections_refresh: connections_refresh.State = .{},
 reference_offset: usize = 0,
 reference_rows: usize = 0,
 reference_height: usize = 0,
@@ -247,10 +245,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         self.connection_facts = null;
         if (row == .connections) {
             self.readConnections();
-            if (self.backend) |backend| {
-                if (backend.ask_connections) |ask| ask(backend.context);
-                self.connections_read_at = if (backend.seconds) |seconds| seconds(backend.context) else 0;
-            }
+            self.refreshStep(.{ .opened = self.now() });
         }
         self.reference_open = true;
         self.reference_offset = 0;
@@ -356,12 +351,18 @@ fn readConnections(self: *Self) void {
     self.connection_facts = read(backend.context);
 }
 
-/// Whether the open Connections reference has kept its reading long enough to ask the Host again.
-fn connectionsAged(self: *const Self) bool {
-    if (!self.reference_open or self.reference != .connections) return false;
-    const backend = self.backend orelse return false;
-    const seconds = backend.seconds orelse return false;
-    return seconds(backend.context) >= self.connections_read_at +| connections_refresh_seconds;
+/// Applies one refresh event: the core says whether to ask the owner for a newer reading.
+fn refreshStep(self: *Self, event: connections_refresh.Event) void {
+    const next = connections_refresh.step(self.connections_refresh, event);
+    self.connections_refresh = next.state;
+    if (!next.ask) return;
+    const backend = self.backend orelse return;
+    if (backend.ask_connections) |ask| ask(backend.context);
+}
+
+fn now(self: *const Self) u64 {
+    const backend = self.backend orelse return 0;
+    return if (backend.seconds) |seconds| seconds(backend.context) else 0;
 }
 
 fn poll(self: *Self) !void {
@@ -388,14 +389,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         try self.poll();
         if (was_saving) ctx.redraw = true;
         if (self.reference_open and self.reference == .connections) {
-            if (self.connectionsAged()) {
-                if (self.backend) |backend| if (backend.ask_connections) |ask| ask(backend.context);
-                self.connections_read_at = if (self.backend.?.seconds) |seconds| seconds(self.backend.?.context) else 0;
-            }
-            const before = self.connection_facts;
+            self.refreshStep(.{ .tick = self.now() });
+            const drawn = if (self.connection_facts) |facts| facts.now else null;
             self.readConnections();
-            const changed = (before == null) != (self.connection_facts == null) or (before != null and before.?.now != self.connection_facts.?.now);
-            if (changed) ctx.redraw = true;
+            if (connections_refresh.redraw(drawn, if (self.connection_facts) |facts| facts.now else null)) ctx.redraw = true;
         }
         return;
     }
@@ -1263,7 +1260,7 @@ test "Keys reclamps on resize and starts at the top when reopened" {
     try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
 }
 
-test "SUI-188 an open Connections reference asks its owner for a newer reading once its own is five seconds old, and the other screens never do" {
+test "SUI-189 an open Connections reference asks its owner for a newer reading once its own is five seconds old, and the other screens never do" {
     const start: u64 = 1_800_000_000;
     var snapshot: ConnectionsSnapshot = .{ .facts = .{}, .now = start };
     snapshot.facts.items[0] = .{ .name = connection.Name.parse("work").?, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .usage = .{ .observed_at = start - 60, .primary = .{ .used_percent = 10, .minutes = 10080, .reset_at = start + 86400 }, .secondary = null } };
