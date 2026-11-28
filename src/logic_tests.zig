@@ -54,6 +54,7 @@ const cores = .{
     .{ "connection.zig", @import("connection.zig") },
     .{ "connection_limits.zig", @import("connection_limits.zig") },
     .{ "connection_names.zig", @import("connection_names.zig") },
+    .{ "connections_refresh.zig", @import("connections_refresh.zig") },
     .{ "content_string.zig", @import("content_string.zig") },
     .{ "content_value.zig", @import("content_value.zig") },
     .{ "conversation_read.zig", @import("conversation_read.zig") },
