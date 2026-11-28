@@ -346,8 +346,6 @@ pub const ListSessions = session_list.ListSessions;
 
 pub const ListDelta = session_list.ListDelta;
 
-pub const ConversationContent = conversation_read.ConversationContent;
-
 pub const ProposalField = tool_proposal.Field;
 pub const ProposalFieldReference = activity_read.ProposalFieldReference;
 pub const ProposalRejection = tool_proposal.Rejection;

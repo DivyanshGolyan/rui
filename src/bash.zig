@@ -1829,7 +1829,7 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
         var used: std.atomic.Value(u64) = .init(0);
         const scratch: bash.Scratch = .{ .io = std.testing.io, .path = database.selector.slice(), .budget = .{ .used = &used, .limit = 4096 } };
         var preparation: bash.Preparation = undefined;
-        if (preparation.start(scratch, std.testing.allocator, try database.openPublicConversationContent(&request), &input, database.selector.slice(), "/bin/bash", 11, .{})) |initial| {
+        if (preparation.start(scratch, std.testing.allocator, try database.openActivityContent(&request), &input, database.selector.slice(), "/bin/bash", 11, .{})) |initial| {
             var failure = initial;
             try failure.cleanup.cleanup(scratch);
             return failure.cause;

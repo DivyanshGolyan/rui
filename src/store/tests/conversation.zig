@@ -76,7 +76,7 @@ test "INS-4 conversation rows hold a fixed end, leave out settings and continue 
             }));
             try std.testing.expect(!storage.isFenced());
             var unicode_reader: ContentReader = undefined;
-            unicode_reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = 41 }));
+            unicode_reader.open(try storage.openActivityContent(&.{ .session = request.session, .position = 41 }));
             var lead: [1]u8 = undefined;
             var rest: [4]u8 = undefined;
             try std.testing.expectEqual(@as(usize, 1), try unicode_reader.read(0, &lead));
@@ -113,17 +113,15 @@ test "INS-4 conversation rows hold a fixed end, leave out settings and continue 
             try std.testing.expectEqual(@as(usize, 16), fresh.count);
             try std.testing.expect(fresh.items[0].position > first.end);
             try std.testing.expect(fresh.items[0].value == .user);
-            var read = protocol.ConversationContent{ .session = request.session, .position = older.items[3].position, .start = 1024 * 1024 - 2 };
+            var read = protocol.ReadActivityContent{ .session = request.session, .position = older.items[3].position };
+            const tail_start: u64 = 1024 * 1024 - 2;
             var reader: ContentReader = undefined;
-            reader.open(try storage.openPublicConversationContent(&read));
+            reader.open(try storage.openActivityContent(&read));
             var tail: [2]u8 = undefined;
-            try std.testing.expectEqual(@as(usize, 2), try reader.read(read.start, &tail));
+            try std.testing.expectEqual(@as(usize, 2), try reader.read(tail_start, &tail));
             try std.testing.expectEqualStrings("xx", &tail);
             reader.close();
-            read.position = 42;
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&read));
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = .{}, .position = 1 }));
-            try std.testing.expectError(error.RangeOutOfBounds, storage.openPublicConversationContent(&.{ .session = request.session, .position = 22, .start = 1024 * 1024 + 1 }));
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = .{}, .position = 1 }));
             try std.testing.expectError(error.InvalidCursor, store_testing.conversationRows(&storage, .{ .session = request.session, .end = first.end + 100, .before_position = 1 }));
             try std.testing.expect(!storage.isFenced());
         }
@@ -173,7 +171,7 @@ test "INS-4 private-only model output never becomes a conversation row" {
             try std.testing.expectEqual(@as(usize, 1), page.count);
             try std.testing.expect(page.items[0].value == .user);
             try std.testing.expect(page.end > page.items[0].position);
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{
                 .session = request.session,
                 .position = page.end,
             }));
@@ -225,7 +223,7 @@ test "INS-4 a tool-result cursor crosses a completed group boundary" {
             try std.testing.expect(older.items[0].value == .tool_result);
             try std.testing.expect(older.items[1].value == .user);
             var reader: ContentReader = undefined;
-            reader.open(try storage.openPublicConversationContent(&.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 }));
+            reader.open(try storage.openActivityContent(&.{ .session = cursor.session, .position = older.items[0].position, .ordinal = 1 }));
             defer reader.close();
             var result: [64]u8 = undefined;
             const size = try reader.read(0, &result);
