@@ -102,18 +102,27 @@ test "overview header draws no counts view name or Host-stopped band" {
 }
 
 pub const Settings = struct {
-    selected: bool,
-    memory: ?overview_view.Memory = null,
-    available: ?@import("upgrade_status.zig").Version = null,
-    run: ?@import("upgrade_status.zig").Run = null,
+    /// What the screen decides before each draw.
+    pub const Props = struct {
+        selected: bool = false,
+        memory: ?overview_view.Memory = null,
+        available: ?@import("upgrade_status.zig").Version = null,
+        run: ?@import("upgrade_status.zig").Run = null,
+        caps: overview_view.Caps = .{},
+    };
+
+    props: Props = .{},
     settings_target: ?Hover.Rect = null,
     update_target: ?Hover.Rect = null,
     update_identity: @import("upgrade_status.zig").Target = .{ .available = null, .run = null },
     hover: Hover = .{},
     size: vxfw.Size = .{ .width = 0, .height = 0 },
-    caps: overview_view.Caps,
     userdata: *anyopaque,
     on_click: *const fn (*anyopaque, *vxfw.EventContext, overview_view.Click) anyerror!void,
+
+    pub fn present(self: *Settings, props: Props) void {
+        self.props = props;
+    }
 
     pub fn widget(self: *Settings) vxfw.Widget {
         return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -146,37 +155,37 @@ pub const Settings = struct {
         self.size = .{ .width = size.width, .height = height };
         self.settings_target = null;
         self.update_target = null;
-        self.update_identity = .{ .available = self.available, .run = self.run };
+        self.update_identity = .{ .available = self.props.available, .run = self.props.run };
         const target: Hover.Rect = .{ .row = 1, .col = @min(5, size.width), .width = @min(13, size.width -| 2) -| @min(5, size.width) };
         const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), self.size);
-        @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
+        @memset(surface.buffer, .{ .style = widget_style.of(self.props.caps, .{ .colour = .quiet }) });
         self.hover.targets = &.{};
         if (height == 0 or size.width == 0) return surface;
-        for (0..size.width) |column| surface.writeCell(@intCast(column), 0, widget_style.line(self.caps, .horizontal));
+        for (0..size.width) |column| surface.writeCell(@intCast(column), 0, widget_style.line(self.props.caps, .horizontal));
         if (height < 2) return surface;
         self.settings_target = target;
-        const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
-        const row_style = widget_style.of(self.caps, .{});
+        const ground: overview_view.Background = if (self.props.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
+        const row_style = widget_style.of(self.props.caps, .{});
         @memset(surface.buffer[size.width .. 2 * size.width], .{ .style = row_style });
-        try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{ .{ .text = "   ", .style = row_style }, .{ .text = "Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) } }, row_style);
+        try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{ .{ .text = "   ", .style = row_style }, .{ .text = "Settings", .style = widget_style.of(self.props.caps, .{ .colour = if (self.props.selected) .strong else .normal, .bold = self.props.selected, .background = ground }) } }, row_style);
         for (0..size.width) |col| {
             if (!target.contains(@intCast(col), 1)) surface.buffer[size.width + col].style = row_style;
         }
-        for (@as(usize, @intCast(target.col))..@as(usize, @intCast(target.col)) + target.width) |col| surface.buffer[size.width + col].style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground });
+        for (@as(usize, @intCast(target.col))..@as(usize, @intCast(target.col)) + target.width) |col| surface.buffer[size.width + col].style = widget_style.of(self.props.caps, .{ .colour = if (self.props.selected) .strong else .normal, .bold = self.props.selected, .background = ground });
         self.hover.targets = try ctx.arena.dupe(Hover.Rect, &.{target});
         const status = @import("upgrade_status.zig");
         var buffer: [status.max_line_bytes]u8 = undefined;
-        const update = status.control(@import("transport_options").version, self.available, self.run, &buffer, if (self.caps.unicode) .unicode else .ascii);
-        const busy = if (self.run) |run| run.going() else false;
+        const update = status.control(@import("transport_options").version, self.props.available, self.props.run, &buffer, if (self.props.caps.unicode) .unicode else .ascii);
+        const busy = if (self.props.run) |run| run.going() else false;
         const show_update = update.tone != .quiet or busy;
         const text = if (show_update)
             if (update.tone == .warning) "Update failed" else update.text
         else
-            try @import("memory_text.zig").sidebar(ctx.arena, self.memory, size.width -| 15);
+            try @import("memory_text.zig").sidebar(ctx.arena, self.props.memory, size.width -| 15);
         const text_width = @import("display_text.zig").width(text, .terminal);
         if (text_width > 0 and text_width + 15 <= size.width) {
             const start: u16 = size.width - @as(u16, @intCast(text_width)) - 1;
-            const style = widget_style.of(self.caps, .{ .colour = if (!show_update) .quiet else switch (update.tone) {
+            const style = widget_style.of(self.props.caps, .{ .colour = if (!show_update) .quiet else switch (update.tone) {
                 .quiet => .quiet,
                 .link => .ink,
                 .warning => .attention,
@@ -249,7 +258,7 @@ pub fn sui4BottomControls() !void {
     for (runs) |run| for ([_]?status.Version{ null, .{ .schema = 76, .patch = 0 } }) |available| for ([_]overview_view.Caps{ .{}, .{ .unicode = false }, .{ .depth = .none }, .{ .background = .{ 255, 255, 255 } }, .{ .unicode = false, .background = .{ 255, 255, 255 } } }) |caps| for ([_]bool{ false, true }) |selected| for ([_]u16{ 0, 1, 8, 9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 34, 35, 36, 37, 44, 45, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
         defer _ = arena.reset(.retain_capacity);
         var clicks: Clicks = .{};
-        var settings: Settings = .{ .selected = selected, .caps = caps, .userdata = &clicks, .on_click = Clicks.take, .run = run, .available = available, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
+        var settings: Settings = .{ .props = .{ .selected = selected, .caps = caps, .run = run, .available = available, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } }, .userdata = &clicks, .on_click = Clicks.take };
         const frame = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         try std.testing.expectEqual(@min(height, 2), frame.size.height);
         if (width > 0 and height > 0) for (0..width) |column| {
@@ -272,8 +281,7 @@ pub fn sui4BottomControls() !void {
         const expected_target: ?Hover.Rect = if (height >= 2 and width >= label_width + 15 and (failed or (!busy and !done and available != null))) .{ .row = 1, .col = @intCast(width - label_width - 1), .width = @intCast(label_width) } else null;
         try std.testing.expectEqual(expected_target, settings.update_target);
         const identity: status.Target = .{ .available = available, .run = run };
-        settings.available = .{ .schema = 77, .patch = 0 };
-        settings.run = .checking;
+        settings.present(.{ .selected = selected, .caps = caps, .available = .{ .schema = 77, .patch = 0 }, .run = .checking, .memory = settings.props.memory });
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         for (0..height + 1) |row| for (0..width + 1) |column| {
             clicks.got = null;
@@ -284,12 +292,39 @@ pub fn sui4BottomControls() !void {
     };
 }
 
+test "SUI-195 the settings line uses the inputs it was last given, all of them at once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var clicks: Clicks = .{};
+    var settings: Settings = .{ .userdata = &clicks, .on_click = Clicks.take };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };
+    const caps: overview_view.Caps = .{ .depth = .direct };
+
+    // Memory shows on the second line, and the selection turns the first row's ground to the selection's.
+    settings.present(.{ .selected = true, .caps = caps, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } });
+    var frame = try settings.widget().draw(draw_ctx);
+    try std.testing.expect(std.mem.indexOf(u8, try cells(arena.allocator(), frame, 1), "38 MB") != null);
+    const selected_style = frame.readCell(5, 1).style;
+    // Presenting again with nothing replaces every input: the memory and the selection are gone.
+    settings.present(.{ .caps = caps });
+    frame = try settings.widget().draw(draw_ctx);
+    try std.testing.expect(std.mem.indexOf(u8, try cells(arena.allocator(), frame, 1), "MB") == null);
+    try std.testing.expect(!std.meta.eql(selected_style, frame.readCell(5, 1).style));
+    // An available update is offered, and presenting without it withdraws the offer.
+    settings.present(.{ .caps = caps, .available = .{ .schema = 77, .patch = 0 } });
+    frame = try settings.widget().draw(draw_ctx);
+    try std.testing.expect(settings.update_target != null);
+    settings.present(.{ .caps = caps });
+    frame = try settings.widget().draw(draw_ctx);
+    try std.testing.expect(settings.update_target == null);
+}
+
 pub fn sui4WordBounds() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 8, 12, 15, 46, 140 }) |width| {
         var clicks: Clicks = .{};
-        var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
+        var settings: Settings = .{ .props = .{ .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } }, .userdata = &clicks, .on_click = Clicks.take };
         const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         _ = try settings.widget().draw(draw_ctx);
@@ -300,7 +335,7 @@ pub fn sui4WordBounds() !void {
             try std.testing.expectEqual(inside, settings.hover.pointing);
             for (0..width) |painted| {
                 const shaded = painted >= 5 and painted < @min(13, width -| 2) and inside;
-                const expected = widget_style.of(settings.caps, .{ .background = if (shaded) .hover else .ground }).bg;
+                const expected = widget_style.of(settings.props.caps, .{ .background = if (shaded) .hover else .ground }).bg;
                 try std.testing.expectEqual(expected, frame.readCell(@intCast(painted), 1).style.bg);
             }
             for (0..2) |_| {
@@ -318,7 +353,7 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     defer state.deinit();
     var clicks: Clicks = .{};
     var new_session: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
-    var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
+    var settings: Settings = .{ .userdata = &clicks, .on_click = Clicks.take };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };

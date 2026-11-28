@@ -57,11 +57,7 @@ field-leak FeedView.FeedView.welcome
 field-leak FeedView.FeedView.welcome_quiet
 field-leak FeedView.FeedView.welcome_unicode
 field-leak OverviewLines.SessionControls.caps
-field-leak OverviewLines.Settings.available
-field-leak OverviewLines.Settings.caps
-field-leak OverviewLines.Settings.memory
-field-leak OverviewLines.Settings.run
-field-leak OverviewLines.Settings.selected
+field-leak OverviewLines.Settings.props
 field-leak Palette.Palette.max_height
 field-leak Palette.Palette.menu
 field-leak Palette.Palette.on_select
