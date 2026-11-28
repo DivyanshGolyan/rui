@@ -158,6 +158,7 @@
 | SUI-191 | Surface | A DocumentView continuation takes the hover background across its painted row, opens the next document position on click and loses its hover on leave. With no click handler it offers no target. | DocumentView renders mouse events | `SUI-191 DocumentView continuation hovers and activates its painted row` | docs/contracts/session-ui.md#accepted-contract |
 | SUI-192 | Surface | App settings applies that policy through its owner: the Connections reference asks the owner and draws what the owner holds, and the Keys reference and the settings list never ask; Settings never reads the Host itself. | `app_settings.Backend.ask_connections`, `Backend.connections` | `SUI-192 an open Connections reference asks its owner for a newer reading once its own is five seconds old, and the other screens never do` | `src/app_settings.zig` |
 | DIA-10 | Host | Host readiness is delivered even when optional diagnostics contend or fail. | Host startup wire with stderr fault injection | `readiness_before_diagnostics`: vary aliased output, diagnostic failure and backpressure; check readiness and later bounded notice. | docs/contracts/diagnostics.md:10 |
+| SUI-192 | Surface | Slash suggestion rows give names first use of the available width, retain two blank cells before any description, and keep ordinary descriptions aligned. | Palette rendered cells | `SUI-192 Palette keeps readable descriptions beside full names` | docs/contracts/session-ui.md:669; src/skill_palette_tests.zig |
 
 ## Seams the harness must provide
 

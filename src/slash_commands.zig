@@ -396,13 +396,6 @@ pub const List = struct {
         const fit = named(self.count, rows);
         return @min((highlight + 1) -| fit, self.count - fit);
     }
-
-    pub fn descriptionColumn(self: *const List) usize {
-        if (self.column) |column| return column;
-        var widest: usize = 0;
-        for (self.shown()) |entry| widest = @max(widest, entry.shown.len);
-        return widest + 2;
-    }
 };
 
 pub const Shown = struct {
