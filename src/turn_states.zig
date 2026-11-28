@@ -117,7 +117,7 @@ pub const TurnStates = struct {
     }
 };
 
-test "a routing value replays one Turn's first value and never another Turn's" {
+test "CM-72 a routing value replays one Turn's first value and never another Turn's" {
     var storage: [2]TurnStates.Entry = @splat(.{});
     var states: TurnStates = .{ .entries = &storage };
     defer states.deinit();
@@ -172,7 +172,7 @@ test "a routing value replays one Turn's first value and never another Turn's" {
     try std.testing.expectEqualStrings("", unused.replay(1, account).value);
 }
 
-test "owner changes invalidate paused Turns and stale completions" {
+test "CM-73 owner changes invalidate paused Turns and stale completions" {
     const account: TurnStates.Owner = @splat(1);
     for ([_]TurnStates.Owner{ @splat(2), @splat(3) }) |changed| {
         for ([_]bool{ false, true }) |late_completion| {
@@ -221,4 +221,47 @@ test "EXR-103 two connections' Turns keep their values while their different own
     try std.testing.expectEqualStrings("", states.get(openai).replay(1, key).value);
     // A custom name has its own table: the built-in codex Turn's value is not replayed to it.
     try std.testing.expectEqualStrings("", states.get(names[2]).replay(1, chatgpt).value);
+}
+
+test "CM-74 the routing table's owner epochs drop and refuse a connection's usage reading through the sink, leaving another connection's alone" {
+    const names = [_]connection.Name{ connection.Name.parse("work").?, connection.Name.parse("home").? };
+    var storage: [2 * names.len]TurnStates.Entry = @splat(.{});
+    var usage: ConnectionUsage = .init(std.testing.io);
+    var states: PerConnection = undefined;
+    states.init(&names, &storage, &usage);
+    defer states.deinit();
+    const sink = states.sink();
+    const week: provider.AllowanceWindow = .{ .used = .{ .value = 40 }, .minutes = .{ .value = 10080 }, .reset_at = .{ .value = 1700000000 } };
+    const a: TurnStates.Owner = @splat(1);
+    const b: TurnStates.Owner = @splat(2);
+    const reading = struct {
+        fn of(name: connection.Name, epoch: u64, at: i64) provider.AllowanceObservation {
+            return .{ .binding = std.mem.zeroes(@FieldType(provider.AllowanceObservation, "binding")), .provider = name, .status = 200, .observed_at = at, .seen = at, .epoch = epoch, .primary = week };
+        }
+    }.of;
+    const work = names[0];
+    const home = names[1];
+    // Account A starts a request on each connection and both report.
+    const work_a = sink.replay(sink.context, work, 1, a);
+    const home_a = sink.replay(sink.context, home, 1, a);
+    usage.record(reading(work, work_a.epoch, 10));
+    usage.record(reading(home, home_a.epoch, 11));
+    // A second request of the same account keeps the reading.
+    _ = sink.replay(sink.context, work, 2, a);
+    try std.testing.expectEqual(@as(u64, 10), usage.get(work).?.observed_at);
+    // Account B starts on work: its reading is gone, and A's outstanding reply is refused.
+    const work_b = sink.replay(sink.context, work, 3, b);
+    try std.testing.expect(work_b.epoch != work_a.epoch);
+    try std.testing.expectEqual(@as(?ConnectionUsage.Reading, null), usage.get(work));
+    usage.record(reading(work, work_a.epoch, 20));
+    try std.testing.expectEqual(@as(?ConnectionUsage.Reading, null), usage.get(work));
+    // A returns: the outstanding reply from before B is still refused, and a fresh one is kept.
+    const work_back = sink.replay(sink.context, work, 4, a);
+    try std.testing.expect(work_back.epoch != work_a.epoch and work_back.epoch != work_b.epoch);
+    usage.record(reading(work, work_a.epoch, 30));
+    try std.testing.expectEqual(@as(?ConnectionUsage.Reading, null), usage.get(work));
+    usage.record(reading(work, work_back.epoch, 40));
+    try std.testing.expectEqual(@as(u64, 40), usage.get(work).?.observed_at);
+    // Home never changed owner, so its reading was untouched throughout.
+    try std.testing.expectEqual(@as(u64, 11), usage.get(home).?.observed_at);
 }
