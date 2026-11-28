@@ -1061,7 +1061,7 @@ fn testContext(arena: *std.heap.ArenaAllocator, height: u16) vxfw.DrawContext {
     return .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = height }, .cell_size = .{} };
 }
 
-test "SUI-200 Up and Down move the selected block through zero, one, many and sixteen blocks" {
+test "SUI-208 Up and Down move the selected block through zero, one, many and sixteen blocks" {
     for ([_]usize{ 0, 1, 3, 16 }) |count| {
         var fields: [48]Field = undefined;
         var blocks: [16]Block = undefined;
