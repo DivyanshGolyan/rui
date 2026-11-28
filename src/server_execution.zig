@@ -716,7 +716,7 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
         run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
-    run.turn_states.init(served_names, turn_states);
+    run.turn_states.init(served_names, turn_states, run.shared.usage);
     defer {
         run.turn_states.deinit();
         unmapZeroed(turn_states);

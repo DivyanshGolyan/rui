@@ -4,6 +4,7 @@ set -eu
 version='@VERSION@'
 digest_darwin_arm64='@SHA256_DARWIN_ARM64@'
 digest_linux_x86_64='@SHA256_LINUX_X86_64@'
+digest_linux_arm64='@SHA256_LINUX_ARM64@'
 repository='DivyanshGolyan/rui'
 
 if [ $# = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
@@ -24,7 +25,8 @@ esac
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) platform=darwin-arm64; expected=$digest_darwin_arm64 ;;
     Linux/x86_64) platform=linux-x86_64; expected=$digest_linux_x86_64 ;;
-    *) printf 'Supported platforms: macOS Apple Silicon and Linux x86-64.\n' >&2; exit 1 ;;
+    Linux/aarch64|Linux/arm64) platform=linux-arm64; expected=$digest_linux_arm64 ;;
+    *) printf 'Supported platforms: macOS Apple Silicon, Linux x86-64 and Linux ARM64.\n' >&2; exit 1 ;;
 esac
 for tool in curl tar uname; do
     if ! command -v "$tool" >/dev/null; then

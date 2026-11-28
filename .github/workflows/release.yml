@@ -89,7 +89,7 @@ jobs:
           {
             echo "Rui $VERSION from main commit $SHA (Store schema $schema)."
             echo
-            echo "Install or update on macOS Apple Silicon or Linux x86-64:"
+            echo "Install or update on macOS Apple Silicon, Linux x86-64 or Linux ARM64:"
             echo
             echo '```sh'
             echo "curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh | sh"
@@ -97,7 +97,7 @@ jobs:
             echo
             echo "The target build checks Store compatibility at Host startup. Supported SQLite formats are backed up and migrated then; installation alone never migrates or resets a Store. MySQL schema changes remain operator-owned."
             echo
-            echo "Also attached: the Linux ARM64 archive, and the npm tarballs (the TypeScript client and one executable package per platform). The same packages are on npm: npm install ruicode."
+            echo "Also attached: the npm tarballs (the TypeScript client and one executable package per platform). The same packages are on npm: npm install ruicode."
             echo
             echo "The Linux executables ship without debug info. For readable crash traces, add it"
             echo "to the installed build (again after each update, which installs a new build):"

@@ -553,9 +553,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         },
         .tick => {
             if (self.state.pointer_over and (!self.root.listVisible() or self.root.input.layer != .main)) {
-                self.app_sessions.anchor = null;
-                self.app_sessions.anchor_after_scroll = null;
-                self.app_sessions.pointer_row = null;
+                self.app_sessions.forgetPosition();
                 try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = false } }));
                 ctx.redraw = true;
             }
@@ -661,11 +659,7 @@ fn listKey(input: vxfw.Event, delivery: @import("app_input.zig").Effects.Deliver
 
 fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (!over) {
-        self.app_sessions.anchor = null;
-        self.app_sessions.anchor_after_scroll = null;
-        self.app_sessions.pointer_row = null;
-    }
+    if (!over) self.app_sessions.forgetPosition();
     if (self.state.pointer_over == over) return;
     const revision = self.state.presentation_revision;
     try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = over } }));
@@ -1184,17 +1178,23 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const frame = awake_ms / view.spin_interval_ms;
     const rows = try ctx.arena.create(SessionRows);
     rows.* = .{ .state = &self.state, .width = @import("widgets/RowInset.zig").contentWidth(size.width), .caps = self.caps, .frame = frame };
-    self.app_sessions.selected = if (view.Lines.highlighted(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
-    self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.listFocused()) .bar else .selection;
-    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count, .findFn = SessionRows.find };
-    self.app_sessions.edges = .{ .userdata = rows, .lineFn = SessionRows.edge };
-    self.app_settings_line.selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings);
-    self.app_settings_line.memory = self.state.memory;
-    self.app_settings_line.run = self.state.upgrade.run;
-    self.app_settings_line.available = self.state.upgrade.available;
-    self.app_settings_line.caps = self.caps;
+    self.app_sessions.present(.{
+        .selected = if (view.Lines.highlighted(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null,
+        .selection_background = if (self.root.session != null and !self.root.input.listFocused()) .bar else .selection,
+        .rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count, .findFn = SessionRows.find },
+        .edges = .{ .userdata = rows, .lineFn = SessionRows.edge },
+        .caps = self.caps,
+        .on_press = .{ .userdata = self, .pressed = appClick },
+        .on_pointer = .{ .userdata = self, .moved = appPointer },
+    });
+    self.app_settings_line.present(.{
+        .selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings),
+        .memory = self.state.memory,
+        .run = self.state.upgrade.run,
+        .available = self.state.upgrade.available,
+        .caps = self.caps,
+    });
     self.app_screen.input = if (part == .whole) self.bottomWidget() else self.settingsWidget();
-    self.app_sessions.caps = self.caps;
     self.app_header.caps = self.caps;
     self.app_new_session.caps = self.caps;
     const header = try ctx.arena.create(@import("widgets/Stack.zig"));
@@ -1205,9 +1205,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     }) };
     self.app_screen.header = header.widget();
     defer {
-        self.app_sessions.rows = .none;
-        self.app_sessions.edges = null;
-        self.app_sessions.tail = null;
+        self.app_sessions.endFrame();
         self.app_screen.header = null;
         self.app_screen.host = null;
     }
@@ -1270,9 +1268,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_screen = .{ .content = &self.app_sessions, .input = self.bottomWidget(), .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
     self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick, .on_pointer = .{ .userdata = self, .moved = appPointer } };
-    self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
-    self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
-    self.app_sessions.on_pointer = .{ .userdata = self, .moved = appPointer };
+    self.app_settings_line = .{ .props = .{ .caps = self.caps }, .userdata = self, .on_click = appClick };
+    self.app_sessions.present(.{ .caps = self.caps, .on_press = .{ .userdata = self, .pressed = appClick }, .on_pointer = .{ .userdata = self, .moved = appPointer } });
     self.app_sessions.on_presence = .{ .userdata = self, .changed = appPresence };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
@@ -5373,7 +5370,7 @@ fn keyboardSelectionCase() !void {
         for (0..4) |_| try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.down, .mods = .{ .shift = shift } } }, .{ .under = .main, .pasted = false, .wide = sidebar });
         var after = try rig.shown(if (sidebar) 140 else 46, 7);
         defer after.deinit();
-        const selected = overview.app_sessions.selected orelse return error.TestExpectedEqual;
+        const selected = overview.app_sessions.props.selected orelse return error.TestExpectedEqual;
         try std.testing.expect(selected >= overview.app_sessions.shown.first and selected < overview.app_sessions.shown.end);
     };
 }
@@ -5435,7 +5432,7 @@ test "SUI-41 sidebar stays live and wheels route to their pane" {
     defer arena.deinit();
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 8 }, .cell_size = .{} };
     const frame = try overview.root.widget().draw(draw);
-    const selected = overview.app_sessions.selected.?;
+    const selected = overview.app_sessions.props.selected.?;
     const target = (try view.Lines.at(arena.allocator(), &overview.state, selected, 40, overview.caps, 0)).?.target.?;
     try std.testing.expectEqualStrings("k7m2qx", &target.open);
     try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
@@ -6263,7 +6260,7 @@ fn sidebarControls() !void {
         try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "+ New chat") != null);
         try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "Archived") != null);
         if (width == 140) {
-            const line = rig.overview.app_sessions.selected.?;
+            const line = rig.overview.app_sessions.props.selected.?;
             const target = (try view.Lines.at(shown.arena.allocator(), &rig.overview.state, line, 40, rig.overview.caps, 0)).?.target.?;
             try std.testing.expectEqualStrings(&selected, &target.open);
         }
@@ -7823,7 +7820,7 @@ const EmptySessionOwner = struct {
             }
             try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New chat")) 2 else 1), std.mem.count(u8, text.written(), name));
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
-            try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
+            try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.props.selected);
             var bold_name = false;
             for ((try view.Lines.at(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)).?.segments) |segment| {
                 if (std.mem.indexOf(u8, segment.text, name) != null) bold_name = segment.style.bold;
@@ -8163,7 +8160,7 @@ test "App list selection consumes the core projection through arrivals covered S
                 defer shown.deinit();
                 if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .cell_arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
                 const expected: ?u32 = if (view.Lines.highlighted(&overview.state, overview.root.input.listFocused() or overview.root.session == null)) |line| @intCast(line) else null;
-                try std.testing.expectEqual(expected, overview.app_sessions.selected);
+                try std.testing.expectEqual(expected, overview.app_sessions.props.selected);
             }
         }
     };

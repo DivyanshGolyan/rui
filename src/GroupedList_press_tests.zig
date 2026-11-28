@@ -91,14 +91,14 @@ test "GroupedList press domain preserves every target and region boundary across
         var rows = [_]GroupedList.Row{.{ .segments = &.{.{ .text = "click targets", .style = .{} }}, .target = primary, .alternate_target = alternate, .regions = &regions }};
         const source: []const GroupedList.Row = &rows;
         var pressed: Pressed = .{};
-        var list: GroupedList = .{ .rows = .of(&source), .selected = if (selected) 0 else null, .on_press = pressed.handler() };
+        var list: GroupedList = .{ .props = .{ .rows = .of(&source), .selected = if (selected) 0 else null, .on_press = pressed.handler() } };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         defer events.cmds.deinit(events.alloc);
         const surface = try draw(&list, arena.allocator(), 24, 1);
         const line = surface.children[0].surface;
         try std.testing.expectEqualStrings("c", line.readCell(RowInset.left, 0).char.grapheme);
         for (0..24) |column| {
-            const expected = widget_style.of(list.caps, .{ .background = if (selected or (column >= 14 and column < 19)) .selection else .ground });
+            const expected = widget_style.of(list.props.caps, .{ .background = if (selected or (column >= 14 and column < 19)) .selection else .ground });
             const actual = line.readCell(@intCast(column), 0).style;
             try std.testing.expectEqual(expected.bg, actual.bg);
             try std.testing.expectEqual(expected.reverse, actual.reverse);
@@ -131,7 +131,7 @@ test "GroupedList press domain leaves gaps empty lines headings and outside cell
     };
     const source: []const GroupedList.Row = &rows;
     var pressed: Pressed = .{};
-    var list: GroupedList = .{ .rows = .of(&source), .on_press = pressed.handler() };
+    var list: GroupedList = .{ .props = .{ .rows = .of(&source), .on_press = pressed.handler() } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -172,15 +172,15 @@ test "GroupedList press domain clears old targets for empty and zero size frames
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var pressed: Pressed = .{};
-        var list: GroupedList = .{ .rows = .of(&source), .on_press = pressed.handler() };
+        var list: GroupedList = .{ .props = .{ .rows = .of(&source), .on_press = pressed.handler() } };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         defer events.cmds.deinit(events.alloc);
         _ = try draw(&list, arena.allocator(), 24, 2);
         try pressed.expect(&list, &events, left(0, 0), targets[0]);
         switch (mode) {
-            0 => list.rows = .none,
+            0 => list.props.rows = .none,
             1, 2 => {},
-            3 => list.on_press = null,
+            3 => list.props.on_press = null,
             else => unreachable,
         }
         _ = try draw(&list, arena.allocator(), if (mode == 1) 0 else 24, if (mode == 2) 0 else 2);
@@ -214,11 +214,11 @@ test "GroupedList press domain maps every target through scrolling past gaps and
     }
     const source: []const GroupedList.Row = &rows;
     var pressed: Pressed = .{};
-    var list: GroupedList = .{ .rows = .of(&source), .on_press = pressed.handler() };
+    var list: GroupedList = .{ .props = .{ .rows = .of(&source), .on_press = pressed.handler() } };
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     defer events.cmds.deinit(events.alloc);
     for (targets, 0..) |_, selected| {
-        list.selected = @intCast(selected * 3 + 1);
+        list.props.selected = @intCast(selected * 3 + 1);
         const surface = try draw(&list, arena.allocator(), 24, 5);
         if (selected > 1) try std.testing.expect(list.shown.first > 0);
         var saw_selected = false;

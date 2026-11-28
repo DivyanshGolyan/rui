@@ -134,8 +134,7 @@ fn streamsDeliver(context: *anyopaque, record: *Record, iovecs: []std.posix.iove
     const self: *Engine = @ptrCast(@alignCast(context));
     if (self.observe(record, .{ .body = total }) == .refuse) return .sink_refused;
     if (!self.writeSink(record, iovecs, total)) return if (record.flags.sink_is_buffer) .sink_refused else .sink_failed;
-    record.sink_written += total;
-    record.last_activity_ns = self.clock.now();
+    _ = record.apply(.{ .sink_advanced = .{ .total = total, .now_ns = self.clock.now() } });
     self.timers.moveToTail(record);
     return null;
 }
@@ -250,34 +249,24 @@ pub fn prepare(self: *Engine, record: *Record, request: h2.Request) h2.PrepareEr
     for (request.fields) |field| {
         written += Record.FieldBlock.put(block[written..], field);
     }
-    record.* = std.mem.zeroes(Record);
-    record.fields = if (block_len == 0) blk: {
+    const fields: ?[*]u8 = if (block_len == 0) blk: {
         self.allocator.free(block);
         break :blk null;
     } else block.ptr;
-    record.fields_len = @intCast(block_len);
-    record.endpoint = @backingInt(request.endpoint);
-    record.flags.get = request.method == .get;
-    switch (request.body) {
-        .file => |file| {
-            record.body_source = @intCast(file.handle);
-            record.body_length = file.length;
+    _ = record.apply(.{ .prepare = .{
+        .fields = fields,
+        .fields_len = @intCast(block_len),
+        .endpoint = @backingInt(request.endpoint),
+        .get = request.method == .get,
+        .body = switch (request.body) {
+            .file => |file| .{ .file = .{ .handle = @intCast(file.handle), .length = file.length } },
+            .bytes => |bytes| .{ .bytes = bytes },
         },
-        .bytes => |bytes| {
-            record.flags.body_is_bytes = true;
-            record.body_source = @intFromPtr(bytes.ptr);
-            record.body_length = bytes.len;
+        .sink = switch (request.sink) {
+            .file => |fd| .{ .file = @intCast(fd) },
+            .buffer => |buffer| .{ .buffer = buffer },
         },
-    }
-    switch (request.sink) {
-        .file => |fd| record.sink_target = @intCast(fd),
-        .buffer => |buffer| {
-            record.flags.sink_is_buffer = true;
-            record.sink_target = @intFromPtr(buffer.ptr);
-            record.sink_capacity = @intCast(buffer.len);
-        },
-    }
-    record.state = .prepared;
+    } });
 }
 
 fn validFieldName(name: []const u8) bool {
@@ -298,9 +287,7 @@ fn validFieldValue(value: []const u8) bool {
 
 pub fn launch(self: *Engine, record: *Record) void {
     std.debug.assert(self.receiver == null);
-    std.debug.assert(record.state == .prepared);
-    record.state = .pending;
-    record.last_activity_ns = self.clock.now();
+    _ = record.apply(.{ .launch = self.clock.now() });
     self.timers.pushTail(record);
     self.pendingOf(record).pushTail(record);
 }
@@ -325,14 +312,14 @@ pub fn cancel(self: *Engine, record: *Record) void {
         .collected, .cancelled => return,
     }
     record.releaseFields(self.allocator);
-    record.state = .cancelled;
+    _ = record.apply(.cancel);
 }
 
 pub fn nextFinished(self: *Engine) ?*Record {
     std.debug.assert(self.receiver == null);
     const record = self.finished.popHead() orelse return null;
     self.finished_count -= 1;
-    record.state = .collected;
+    _ = record.apply(.collect);
     return record;
 }
 
@@ -342,24 +329,18 @@ fn endStream(self: *Engine, record: *Record, cause: policy.Cause) void {
     self.timers.remove(record);
     self.retireBody(record);
     record.releaseFields(self.allocator);
-    record.cause = cause;
-    record.state = .finished;
+    _ = record.apply(.{ .finish = cause });
     self.finished.pushTail(record);
     self.finished_count += 1;
 }
 
 fn requeue(self: *Engine, record: *Record, replay: bool) void {
-    std.debug.assert(record.state == .open and !record.flags.response_started);
-    if (replay) record.flags.replays += 1;
-    record.state = .pending;
-    record.body_offset = 0;
-    record.flags.body_done = false;
+    _ = record.apply(.{ .requeue = .{ .replay = replay } });
     self.pendingOf(record).putBack(record);
 }
 
 fn retireBody(self: *Engine, record: *Record) void {
-    if (record.flags.body_retired) return;
-    record.flags.body_retired = true;
+    if (!record.apply(.body_retired).changed) return;
     _ = self.observe(record, .body_retired);
 }
 

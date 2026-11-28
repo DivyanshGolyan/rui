@@ -102,6 +102,8 @@ pub const AllowanceWindow = struct {
 pub const AllowanceObservation = struct {
     binding: attempt.AttemptBinding,
     provider: connection.Name,
+    /// The routing table's owner epoch when the request started: the one authority that says whose account this reading answers.
+    epoch: u64 = 0,
     status: u16,
     observed_at: i64,
     /// The monotonic clock when the final head arrived; it orders readings of one connection, which `observed_at` (Unix seconds) cannot.
@@ -143,7 +145,8 @@ pub const AllowanceObservation = struct {
     }
 };
 
-pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: connection.Name };
+/// What a reply's allowance reading is attributed to: the connection, and the owner epoch of its routing table (`TurnStates`) when the request started.
+pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: connection.Name, epoch: u64 = 0 };
 
 /// The Reactor-wide observation. Header names belong to each Transfer's codec (its manifest).
 pub const HeaderObservation = struct {
@@ -498,6 +501,7 @@ pub const Reactor = struct {
                     var snapshot: AllowanceObservation = .{
                         .binding = source.binding,
                         .provider = source.provider,
+                        .epoch = source.epoch,
                         .status = head.status,
                         .observed_at = now_seconds,
                         .seen = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds),
@@ -803,6 +807,7 @@ pub const Transfer = struct {
         if (options.routing) |routing| if (reactor.observation.turn_state) |table| {
             const replay = table.replay(table.context, request.provider, routing.turn_id, routing.owner);
             self.headers.turn_state = .{ .provider = request.provider, .turn_id = routing.turn_id, .epoch = replay.epoch };
+            if (self.allowance_source) |*source| source.epoch = replay.epoch;
             const name = self.observe.turn_state;
             if (name.len != 0 and replay.value.len != 0) {
                 fields[count] = .{ .name = name, .value = replay.value };

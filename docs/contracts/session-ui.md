@@ -755,6 +755,7 @@ No fill is read in under a press or drag, at either loading edge; it waits for t
 An active plain copy selection stays held across `mouse_leave`. Root routes its drag and release across the active Session pane, including the split divider and bottom inset when Root is the only hit target. The release coordinate supplies the final endpoint even without a final motion event; copying begins only on release. A focus or presentation change that removes the feed, a size change, or an endpoint no longer retained cancels the selection; while the Session remains open Root consumes that canceled gesture’s release. Alt-left quote keeps its existing rule: leaving the feed cancels it.
 
 Alt-left-drag in a terminal that forwards Alt mouse reports selects with the same highlight and inserts a Markdown blockquote at the existing draft caret on release.
+When a quote drag releases inside the feed, the release cell supplies the final endpoint even without a final motion report.
 On macOS Ghostty the chord is Option-left-drag; Rui changes no terminal preferences or mouse-modifier modes.
 Terminals that intercept the chord cannot offer this shortcut; ordinary drag still copies.
 The press latches copy or quote intent, so releasing or pressing Alt during a drag never switches its effect.

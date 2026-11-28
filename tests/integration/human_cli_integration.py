@@ -674,6 +674,10 @@ def clipboard_paste_case(*, protocol_only=False):
             raw_output(master, lambda screen: "Paste too long" in screen and "Clipboard caption" in screen)
             paste(master, b"image/png", png)
             raw_output(master, lambda screen: "[Image 1]" in screen)
+            paste(master, b"image/png", b"not a PNG")
+            raw_output(master, lambda screen: "Clipboard image is invalid or too large" in screen)
+            refused_draft = draft_area(current_screen(master))
+            assert "[Image 1]" in refused_draft and "Clipboard caption ordinary" in refused_draft
             assert endpoint.requests == []
             os.write(master, b"\r")
             read_terminal(master, "Image received.")

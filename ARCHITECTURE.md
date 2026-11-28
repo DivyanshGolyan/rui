@@ -6,7 +6,7 @@ For runnable behavior and current limitations, see [README Status](README.md#sta
 
 ## Supported guarantees
 
-Rui supports Linux x86-64 and macOS Apple Silicon.
+Rui supports Linux x86-64, Linux ARM64 and macOS Apple Silicon.
 Recovery covers a terminated Rui process followed by restart on supported local storage.
 After an OS crash or power loss the canonical Store has SQLite's ACID behavior for WAL with `synchronous=FULL` (see [Store durability](docs/contracts/store.md#store-durability)); Rui adds no further OS-crash, power-loss or storage-device guarantee.
 Existing atomic publication, sync ordering, canonical-state validation and indeterminate-effect rules remain required; narrowing the recovery promise does not excuse a failing functional assertion.
