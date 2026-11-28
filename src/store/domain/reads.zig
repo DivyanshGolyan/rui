@@ -123,7 +123,6 @@ pub fn countRow(count: *RowCount, visitor: anytype, row: anytype) bool {
 
 pub const read_failures = .{
     .{ missing_assistant_entry, error.ConversationReadFailed },
-    .{ public_page, error.ConversationReadFailed },
     .{ activity_forward, error.ActivityReadFailed },
     .{ activity_backward, error.ActivityReadFailed },
     .{ public_entry, error.ConversationReadFailed },
@@ -148,14 +147,6 @@ pub const read_failures = .{
 fn runRows(a: *ReadAccess) !void {
     return store_access.runNamed(a, read_failures, error.CorruptStore);
 }
-
-const public_tool_groups_sql = "WITH tool_groups AS (SELECT op.operation_id,max(" ++ tool_fulfillment.positionSql("tool_call", "action") ++ ") AS position " ++
-    "FROM model_operation op JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
-    "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-    "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
-    "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-    "AND count(" ++ tool_fulfillment.positionSql("tool_call", "action") ++ ")=count(*) " ++
-    "AND count(" ++ tool_fulfillment.contentSql("tool_call", "action") ++ ")=count(*)), ";
 
 fn toolGroupCompletesAtLast(comptime operation: []const u8, comptime position: []const u8) []const u8 {
     return "EXISTS(SELECT 1 FROM model_operation op WHERE op.operation_id=" ++ operation ++ " AND op.session_ref=?1 AND " ++
@@ -346,10 +337,6 @@ pub const queued = rsql.Read(.{
     .cardinality = .each,
 });
 
-pub const PublicConversationItem = command_reply.PublicConversationItem;
-
-pub const PublicConversationPage = command_reply.PublicConversationPage;
-
 pub const MessageObservation = command_reply.MessageObservation;
 
 pub const Recovery = command_reply.Recovery;
@@ -380,20 +367,6 @@ pub const SessionObservation = struct {
     action_count: u64 = 0,
     rejected_call_count: u64 = 0,
 };
-
-const next_position = rsql.Read(.{
-    .sql = "SELECT next_position FROM session WHERE session_ref=?1",
-    .Args = struct { session: []const u8 },
-    .Row = struct { next_position: rsql.Positive },
-    .cardinality = .optional,
-});
-
-fn readNextPosition(a: *ReadAccess, session: []const u8) !?u64 {
-    var row: next_position.Result = undefined;
-    a.read(next_position, .{ .session = session }, &row);
-    try store_access.runAs(a, error.SessionReadFailed);
-    return if (row) |found| found.next_position.get() else null;
-}
 
 pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *SessionObservation) !void {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
@@ -446,145 +419,6 @@ pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *Ses
 
 fn runCounts(a: *ReadAccess) !void {
     return store_access.runNamed(a, report_domain.session_count_failures ++ report_domain.work_failures, error.CorruptStore);
-}
-
-const public_page = rsql.Read(.{
-    .sql = public_tool_groups_sql ++
-        "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
-        "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND " ++ visibleEntrySql("e") ++ " AND e.session_position<=?2 " ++
-        "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4," ++ tool_fulfillment.contentSql("tool_call", "action") ++ " " ++
-        "FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "WHERE tool_groups.position<=?2 " ++
-        "UNION ALL SELECT item.session_position,0,5,NULL FROM model_output_item item @index(model_output_hosted_history) WHERE item.session_ref=?1 AND item.item_kind=5 AND item.session_position<=?2) " ++
-        "SELECT position,ordinal,kind,content_id FROM public WHERE (?3=0 OR position<?3 OR (position=?3 AND ordinal<?4)) " ++
-        "ORDER BY position DESC,ordinal DESC LIMIT 17",
-    .Args = struct { session: []const u8, end: u64, before_position: u64, before_ordinal: u64 },
-    .Row = struct { position: u64, ordinal: u64, kind: u8, content_id: ?u64 },
-    .cardinality = .each,
-    .compound = true,
-});
-
-pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.ConversationPage, page: *PublicConversationPage, reads: *[PublicConversationPage.capacity]PublicRowRead) !void {
-    if (request.end > std.math.maxInt(i64) or request.before_position > std.math.maxInt(i64) or
-        request.before_ordinal > std.math.maxInt(i64) or
-        (request.end == 0 and request.before_position != 0) or
-        (request.before_position == 0 and request.before_ordinal != 0) or
-        (request.end != 0 and request.before_position > request.end)) return error.InvalidCursor;
-    const session = request.session.slice();
-    const next = try readNextPosition(a, session) orelse return error.SessionNotFound;
-    const end = if (request.end == 0) next - 1 else request.end;
-    if (request.end != 0 and (request.before_position > end or end >= next or
-        end > std.math.maxInt(i64))) return error.InvalidCursor;
-    page.* = .{ .end = end };
-    if (end == 0) return;
-    var rows: Collected(public_page.Row, PublicConversationPage.capacity + 1) = .{};
-    a.readEach(public_page, .{ .session = session, .end = end, .before_position = request.before_position, .before_ordinal = request.before_ordinal }, rows.items.len, &rows);
-    var hosted_cursor: tool_presentation.ToolPresentation = undefined;
-    var hosted: HostedRead = .{ .position = request.before_position, .presentation = &hosted_cursor };
-    var cursor: PublicContentRead = .{ .position = request.before_position, .ordinal = request.before_ordinal };
-    if (request.before_position != 0) {
-        if (request.before_ordinal == 0) hosted.queue(a, session);
-        cursor.queue(a, session);
-    }
-    try runRows(a);
-    var content_cursor: ?*PublicContentRead = null;
-    if (request.before_position != 0) cursor: {
-        if (request.before_ordinal == 0) if (hosted.found()) |_| break :cursor else |err| switch (err) {
-            error.ContentNotFound => {},
-            else => return err,
-        };
-        cursor.found() catch |err| switch (err) {
-            error.ContentNotFound => return error.InvalidCursor,
-            else => return err,
-        };
-        cursor.queueMetadata(a);
-        content_cursor = &cursor;
-    }
-    page.more = rows.len > page.items.len;
-    const shown = rows.slice()[0..@min(rows.len, page.items.len)];
-    for (shown, page.items[0..shown.len]) |row, *item| {
-        if (row.position == 0) return error.CorruptStore;
-        item.* = .{ .position = row.position, .ordinal = row.ordinal, .kind = switch (row.kind) {
-            1 => .user,
-            3 => .assistant,
-            4 => .tool_result,
-            5 => .hosted_call,
-            else => return error.CorruptStore,
-        }, .content = .{ .text = .{ .length = 0, .digest = content_string.digest("") } } };
-        if (row.kind == 5) {
-            if (row.ordinal != 0) return error.CorruptStore;
-        } else if ((row.content_id orelse 0) == 0 or (row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;
-    }
-    page.count = shown.len;
-    const upper = if (request.before_position == 0) end else @min(end, request.before_position - @intFromBool(request.before_ordinal == 0));
-    try readPublicRows(a, reads[0..shown.len], session, shown, page.items[0..shown.len], if (page.more) page.items[page.count - 1].position else 0, upper, content_cursor);
-}
-
-pub const PublicRowRead = struct {
-    reads: union(enum) { content: PublicContentRead, hosted: HostedRead },
-    label: LabelRead = undefined,
-    presentation: PresentationRead = undefined,
-};
-
-// The row reads are about 8 KiB, so the caller provides them before the Store is entered.
-noinline fn readPublicRows(a: *ReadAccess, reads: []PublicRowRead, session: []const u8, rows: []const public_page.Row, items: []PublicConversationItem, lower: u64, upper: u64, cursor: ?*PublicContentRead) !void {
-    var missing: missing_assistant_entry.Result = null;
-    if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
-    for (items, reads[0..items.len]) |*item, *read| {
-        if (item.kind == .hosted_call) {
-            item.presentation = @as(tool_presentation.ToolPresentation, undefined);
-            read.* = .{ .reads = .{ .hosted = .{ .position = item.position, .presentation = &item.presentation.? } } };
-            read.reads.hosted.queue(a, session);
-        } else {
-            read.* = .{ .reads = .{ .content = .{ .position = item.position, .ordinal = item.ordinal, .sender = &item.sender } } };
-            read.reads.content.queue(a, session);
-        }
-    }
-    if (items.len != 0 or lower <= upper or cursor != null) try runRows(a);
-    if (cursor) |read| try read.takeMetadata();
-    var contents = false;
-    for (rows, items, reads[0..items.len]) |row, *item, *read| switch (read.reads) {
-        .hosted => |*hosted| try hosted.found(),
-        .content => |*content| {
-            try content.found();
-            const found = &content.content;
-            if (@as(u64, @intCast(found.id)) != row.content_id.? or (row.kind == 1) != (found.admitted_at != null)) return error.CorruptStore;
-            item.admitted_at = found.admitted_at;
-            item.source_action = found.source_action;
-            content.queueMetadata(a);
-            contents = true;
-            if (item.sender) |*sender| {
-                read.label = .{ .peer = sender };
-                read.label.queue(a);
-            }
-            if (found.tool_operation) |operation| {
-                item.presentation = @as(tool_presentation.ToolPresentation, undefined);
-                read.presentation = .init(operation, item.ordinal - 1, item.position, &item.presentation.?);
-                read.presentation.queue(a);
-            }
-        },
-    };
-    if (contents) try runRows(a);
-    var proposals = false;
-    for (items, reads[0..items.len]) |*item, *read| switch (read.reads) {
-        .hosted => {},
-        .content => |*content| {
-            try content.takeMetadata();
-            item.content = content.content.value;
-            if (item.sender != null) try read.label.found();
-            if (content.content.tool_operation != null) {
-                try read.presentation.checkCall();
-                read.presentation.queueProposal(a);
-                proposals = true;
-            }
-        },
-    };
-    if (proposals) {
-        try runRows(a);
-        for (reads[0..items.len]) |*read| if (read.reads == .content and read.reads.content.content.tool_operation != null) try read.presentation.finish();
-    }
-    if (missing != null) return error.CorruptStore;
 }
 
 pub fn openPublicConversationContent(a: *ReadAccess, request: *const conversation_read.ConversationContent) !ContentLocation {
@@ -1199,7 +1033,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
     }
     var position = request.before_position orelse end;
     var ordinal = request.before_ordinal orelse if (request.before_position == null) @as(u64, std.math.maxInt(i64)) else 0;
-    const text_kinds = activityKinds(.initMany(&.{ .admission, .user, .assistant, .call, .tool_result, .turn_ended, .received }));
+    const text_kinds = activityKinds(.initMany(&.{ .admission, .user, .assistant, .call, .tool_result, .turn_ended, .received, .instruction, .skill, .hosted_call }));
     const kinds = activityKinds(request.kinds) & text_kinds;
     var budget: usize = activity_search_budget;
     var lower: u64 = 0;
@@ -1214,32 +1048,36 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
             try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located);
             scratch.hit_count = 0;
             scratch.matcher.init(request.query.slice());
-            if (scratch.item.body() == .call) {
-                const call = scratch.item.body().call;
-                try searchField(a, scratch, call.name, &budget);
-                if (budget != 0) {
-                    scratch.matcher.feed("\n");
-                    try searchField(a, scratch, call.arguments, &budget);
-                }
-                collectHits(scratch, null);
-            } else if (located) |content| switch (content.value) {
-                .text => |reference| {
-                    try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = reference }, &budget);
+            // `Item.body` is the one owner of which rows have text and what it is; this read only searches it.
+            switch (scratch.item.body()) {
+                .none => {},
+                .call => |call| {
+                    try searchFields(a, scratch, &.{ fieldReference(call.name), fieldReference(call.arguments) }, &budget);
                     collectHits(scratch, null);
                 },
-                .parts => |value| {
-                    // The manifest is read before any part, so a value whose manifest does not
-                    // fit the remaining budget waits for the continuation, which starts after
-                    // the last entry scanned. A first entry always fits the whole budget.
-                    if (value.identity.length > budget) {
-                        lower = position;
-                        out.next = .{ .position = position, .ordinal = ordinal };
-                        break :scan;
-                    }
-                    budget -= @intCast(value.identity.length);
-                    try searchParts(a, scratch, request.query.slice(), .{ .content_id = @intCast(content.id), .reference = .{ .parts = value.identity } }, &budget);
+                .hosted => |text| {
+                    try searchFields(a, scratch, text.refs(), &budget);
+                    collectHits(scratch, null);
                 },
-            };
+                .value => if (located) |content| switch (content.value) {
+                    .text => |reference| {
+                        try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = reference }, &budget);
+                        collectHits(scratch, null);
+                    },
+                    .parts => |value| {
+                        // The manifest is read before any part, so a value whose manifest does not
+                        // fit the remaining budget waits for the continuation, which starts after
+                        // the last entry scanned. A first entry always fits the whole budget.
+                        if (value.identity.length > budget) {
+                            lower = position;
+                            out.next = .{ .position = position, .ordinal = ordinal };
+                            break :scan;
+                        }
+                        budget -= @intCast(value.identity.length);
+                        try searchParts(a, scratch, request.query.slice(), .{ .content_id = @intCast(content.id), .reference = .{ .parts = value.identity } }, &budget);
+                    },
+                },
+            }
             if (scratch.hit_count != 0) {
                 const item = &out.items[out.count];
                 item.position = at.position;
@@ -1270,13 +1108,22 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
     }
 }
 
-fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: activity_read.ProposalFieldReference, budget: *usize) !void {
-    const reference: ContentReference = .{ .length = field.length, .digest = field.digest };
-    const id = content_domain.contentIdOf(a, reference, false) catch |err| switch (err) {
-        error.ContentIsParts => return error.CorruptStore,
-        else => return err,
-    };
-    try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
+fn fieldReference(field: activity_read.ProposalFieldReference) ContentReference {
+    return .{ .length = field.length, .digest = field.digest };
+}
+
+/// Searches a row's public texts as one stream, a newline between fields, each charged to the budget.
+/// No match spans the newline, and a field the budget cannot reach is not searched.
+fn searchFields(a: *ReadAccess, scratch: *SearchScratch, fields: []const ContentReference, budget: *usize) !void {
+    for (fields, 0..) |reference, index| {
+        if (budget.* == 0) return;
+        if (index != 0) scratch.matcher.feed("\n");
+        const id = content_domain.contentIdOf(a, reference, false) catch |err| switch (err) {
+            error.ContentIsParts => return error.CorruptStore,
+            else => return err,
+        };
+        try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
+    }
 }
 
 fn collectHits(scratch: *SearchScratch, part: ?u32) void {
@@ -1467,9 +1314,9 @@ const approval_request = rsql.Read(.{
 });
 
 const session_change = rsql.Read(.{
-    .sql = "SELECT revision,field,changed_at,provider_text FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
+    .sql = "SELECT c.revision,c.field,c.changed_at,c.provider_text,CASE WHEN c.field='provider' THEN r.provider END AS provider FROM session_change c JOIN session_revision r ON r.session_ref=c.session_ref AND r.revision=c.revision WHERE c.session_ref=?1 AND c.position=?2 AND c.ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: session_settings.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes) },
+    .Row = struct { revision: rsql.Positive, field: session_settings.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes), provider: *?connection.Name },
     .cardinality = .optional,
 });
 
@@ -1798,6 +1645,7 @@ const ItemRead = struct {
             13 => {
                 const change = &read.state.change;
                 change.row.provider_text = &item.value.session_changed.provider_text;
+                change.row.provider = &item.value.session_changed.provider;
                 a.readInto(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &change.row, &change.found);
             },
             14 => a.read(compaction_row, .{ .operation = item.value.compacted.operation, .session = session }, &read.state.compaction),

@@ -884,7 +884,7 @@ def refusal_cases(state, processes, endpoints):
             positions = [entry["position"] for entry in report["full"]["conversation"]
                          if entry["kind"] == "assistant"]
             assert len(positions) == 1, report
-            public = subprocess.run([str(RUI), "session", "read-conversation", "--store", str(store),
+            public = subprocess.run([str(RUI), "session", "read-content", "--store", str(store),
                 "--session", session, "--position", str(positions[0]), "--ordinal", "0"],
                 capture_output=True, timeout=10)
             assert public.returncode == 0 and public.stdout == expected, public
@@ -1068,7 +1068,7 @@ def phased_message_cases(state, processes, endpoints):
                          if entry["kind"] == "assistant"]
             actual = []
             for position in positions:
-                result = subprocess.run([str(RUI), "session", "read-conversation", "--store", str(store),
+                result = subprocess.run([str(RUI), "session", "read-content", "--store", str(store),
                     "--session", session, "--position", str(position), "--ordinal", "0"],
                     capture_output=True, timeout=10)
                 assert result.returncode == 0, result.stderr

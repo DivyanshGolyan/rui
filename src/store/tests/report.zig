@@ -348,7 +348,7 @@ test "Current, activity pages and Message progress report one work in each state
             const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
             var diagnostic: [512]u8 = undefined;
             const quota: @import("../../transport_policy.zig").Quota = .{ .refusal = .quota, .resets_at = 1792940000 };
-            try storage.settleModelAttemptFailure(retry, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = "" } }, .ordinary, .{});
+            try storage.settleModelAttemptFailure(retry, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = .empty } }, .ordinary, .{});
             try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT outcome_at FROM turn", .{}), try expectOneWork(&storage, &tmp, session.slice(), "failed"));
             {
                 var request: protocol.ActivityPage = .{};

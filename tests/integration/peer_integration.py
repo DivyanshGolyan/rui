@@ -677,7 +677,7 @@ def stdin_start_contract():
                 ("request", "inspect", "--key", "first"),
                 ("request", "read-result", "--key", "first"),
                 ("session", "list"),
-                ("session", "read-conversation", "--session", session, "--position", "1", "--ordinal", "1"),
+                ("session", "read-content", "--session", session, "--position", "1", "--ordinal", "1"),
                 ("action", "inspect", "--session", session, "--action", "1")):
             failed(invoke(*arguments, "--store", store), "host_not_serving", status=6)
         failed(invoke("session", "send", "--store", store, "--session", session, input=b"offline"), "host_not_serving", status=6)

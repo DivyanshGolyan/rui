@@ -57,6 +57,7 @@ test {
     _ = @import("FactsRow.zig");
     _ = @import("ActivityBlock.zig");
     _ = @import("keys_panel.zig");
+    _ = @import("connections_panel.zig");
     _ = @import("SessionChrome.zig");
     _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");
@@ -141,6 +142,7 @@ test {
     _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");
     _ = @import("ModelLists.zig");
+    _ = @import("ConnectionUsage.zig");
     _ = @import("listing_slot.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");

@@ -1,6 +1,8 @@
 //! What a column's own value rules accept. `schema.Column` owns each rule once: it renders the CHECK a test database
 //! enforces and `accepts` evaluates the same value, so the two cannot disagree; `engine.bind` calls it before a statement is sent.
 const std = @import("std");
+const char_set = @import("rules/char_set.zig");
+const row_rules = @import("rules/row.zig");
 
 /// A bound value as a rule sees it.
 pub const Value = union(enum) { null, int: i64, octets: []const u8 };
@@ -30,10 +32,10 @@ pub fn accepts(comptime column: anytype, value: Value) bool {
         if (value.int < range.min) return false;
         if (range.max) |max| if (value.int > max) return false;
     }
-    if (column.initial) |set| if (value != .octets or value.octets.len == 0 or !inSet(set, value.octets[0])) return false;
+    if (column.initial) |set| if (value != .octets or value.octets.len == 0 or !char_set.inSet(set, value.octets[0])) return false;
     if (column.charset) |set| {
         if (value != .octets) return false;
-        for (value.octets) |byte| if (!inSet(set, byte)) return false;
+        for (value.octets) |byte| if (!char_set.inSet(set, byte)) return false;
     }
     return true;
 }
@@ -47,18 +49,12 @@ fn oneOf(values: []const []const u8, text: []const u8) bool {
     return false;
 }
 
-/// Whether `byte` is in a character set written as ranges and literals, as `@charset` writes it (`a-z0-9_-`):
-/// `x-y` is a range except where the `-` leads or ends the set.
-pub fn inSet(comptime set: []const u8, byte: u8) bool {
-    var at: usize = 0;
-    while (at < set.len) {
-        if (at + 2 < set.len and set[at + 1] == '-') {
-            if (byte >= set[at] and byte <= set[at + 2]) return true;
-            at += 3;
-        } else {
-            if (byte == set[at]) return true;
-            at += 1;
-        }
-    }
-    return false;
+/// Whether the row a statement inserts satisfies every CHECK rule of `table` whose columns it binds: `names` are the bound columns and
+/// `values` their values in the same order (null for one the caller cannot state). The rule value that renders each CHECK is evaluated here,
+/// so the Host answers before the engine is asked. A rule that reads a column the statement does not bind is left to the engine's own CHECK.
+/// `table` is a `schema.Table`, taken by shape like `accepts` takes a column.
+pub fn acceptsRow(comptime table: anytype, comptime names: []const []const u8, values: []const ?Value) bool {
+    inline for (table.checks) |check| if (!row_rules.accepts(check, names, values)) return false;
+    inline for (table.columns) |column| if (comptime column.check) |check| if (!row_rules.accepts(check, names, values)) return false;
+    return true;
 }

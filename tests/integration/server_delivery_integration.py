@@ -90,9 +90,6 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
             assistant = next(row["position"] for row in rows if row_kind(row) == "assistant")
             routes = [
                 ("/v1/read-result", "read_result", {"key": "message"}, text),
-                *[("/v1/conversation-content", "conversation_content",
-                   {"session": session, "position": position, "ordinal": "0", "start": "0", "stream": True}, expected)
-                  for position, expected in ((user, user_text), (assistant, text))],
                 *[("/v1/activity-content", "activity_content",
                    {"session": session, "position": position, "ordinal": "0"}, expected)
                   for position, expected in ((user, user_text), (assistant, text))],
@@ -165,11 +162,11 @@ def main():
             assert row_kind(item) == "assistant", item
             for index in range(10):
                 deadline = time.monotonic() + 5
-                held_requests.append(peers.expect("conversation_content" if index in (0, 2) else
+                held_requests.append(peers.expect("activity_content" if index in (0, 2) else
                                                   "inspect" if index % 2 else "read_result"))
                 if index in (0, 2):
-                    peer, length = hold_reply(sock, store, "/v1/conversation-content", "conversation_content",
-                                              session=session, position=item["position"], ordinal="0", start="0", stream=True)
+                    peer, length = hold_reply(sock, store, "/v1/activity-content", "activity_content",
+                                              session=session, position=item["position"], ordinal="0")
                 elif index % 2:
                     peer, length = hold_reply(sock, store, "/v1/inspect-session", "inspect_session",
                                               session=session, profile="full")

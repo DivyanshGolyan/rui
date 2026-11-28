@@ -17,6 +17,7 @@ const failure_class = @import("failure_class.zig");
 const DispatchCapacity = @import("execution.zig").DispatchCapacity;
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
+const failure_report = @import("failure_report.zig");
 const model_adapter = @import("model_adapter.zig");
 const models_dev = @import("models_dev.zig");
 const model_list = @import("model_list.zig");
@@ -37,6 +38,7 @@ const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
 const ModelLists = @import("ModelLists.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 const mcp_servers_module = @import("mcp/servers.zig");
 const execution_owner = @import("execution_owner.zig");
 const host_drain = @import("host_drain.zig");
@@ -176,6 +178,7 @@ pub const Shared = struct {
     probes: *server_host.Probes,
     retention: *output_retention.Queue,
     model_lists: *ModelLists,
+    usage: *ConnectionUsage,
     environments: ?*SessionEnvironments,
     allowance_diagnostic: *server_host.AllowanceDiagnostic,
     /// The Host process environment that `watch_github_pr` takes its `gh` profile from.
@@ -298,18 +301,17 @@ const PendingFailure = struct {
     floor: store_module.HistoryFloorPreparation,
     code: protocol.Bounded(96),
     diagnostic: protocol.Bounded(512),
-    report: output_decode.Report,
+    report: failure_report.Report,
     request_id: protocol.Bounded(256),
     kind: std.meta.Tag(store_module.ModelFailure),
 
     fn init(self: *PendingFailure, operation: u64, failure: store_module.ModelFailure) void {
         self.code = .{};
         self.diagnostic = .{};
-        self.report = .{};
         self.request_id = .{};
         self.kind = failure;
         self.code.set(failure.code()) catch unreachable;
-        self.report.set(failure.report()) catch unreachable;
+        self.report = failure.report().*;
         if (failure.diagnostic()) |detail| self.diagnostic.set(detail) catch unreachable;
         switch (failure) {
             .uncorrelated => {},
@@ -322,8 +324,8 @@ const PendingFailure = struct {
     fn value(self: *const PendingFailure) store_module.ModelFailure {
         return switch (self.kind) {
             .uncorrelated => .{ .uncorrelated = self.code.slice() },
-            .correlated => .{ .correlated = .{ .code = self.code.slice(), .request_id = self.request_id, .report = self.report.slice() } },
-            .rejected => .{ .rejected = .{ .code = self.code.slice(), .request_id = self.request_id, .report = self.report.slice(), .diagnostic = self.diagnostic.slice() } },
+            .correlated => .{ .correlated = .{ .code = self.code.slice(), .request_id = self.request_id, .report = self.report } },
+            .rejected => .{ .rejected = .{ .code = self.code.slice(), .request_id = self.request_id, .report = self.report, .diagnostic = self.diagnostic.slice() } },
         };
     }
 };
@@ -466,6 +468,7 @@ const testing_parts = if (@import("builtin").is_test) struct {
             .probes = host.probes,
             .retention = host.retention,
             .model_lists = &host.model_lists,
+            .usage = &host.usage,
             .environments = host.environments,
             .allowance_diagnostic = &host.allowance_diagnostic,
         };
@@ -515,6 +518,12 @@ test "execution slots change only through attachSlot and moveSlot" {
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, code, " = .{ ." ++ arm ++ " ="));
     }
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, code, "]" ++ " = ."));
+}
+
+fn expectPendingReport(expected: []const u8, report: *const failure_report.Report) !void {
+    comptime std.debug.assert(@import("builtin").is_test);
+    var out: [protocol.max_report_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, report.joined(&out));
 }
 
 fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.CustodyPool, mcp: ?*const server_mcp.Calls) !void {
@@ -2467,7 +2476,7 @@ fn advanceRefresh(run: *Run, slot: *ExecutionSlot) bool {
     const result = run.auth_worker.?.take() orelse return false;
     const active = slot.model_refreshing;
     if (!active.cancelled) {
-        const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id, .report = "" } };
+        const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id, .report = .empty } };
         switch (result) {
             .refreshed => |refreshed| settleFailure(run, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary),
             .failed => |err| settleFailure(run, active.owner.token, active.owner.binding, .{ .uncorrelated = providers.leaseFailureCode(err) }, .ordinary),
@@ -2586,7 +2595,7 @@ fn launchPreparedRequest(
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
-        .observe_allowance = run.shared.probes.hooks.observe_allowance and served.credential.signIn() != null,
+        .observe_allowance = served.credential.signIn() != null,
         .timing = run.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
         .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
@@ -2665,7 +2674,10 @@ fn completeTransfer(
 ) void {
     const active = &slot.provider;
     const owner = active.owner;
-    if (active.transfer.allowance) |observation| server_host.writeAllowance(run.shared.allowance_diagnostic, observation);
+    if (active.transfer.allowance) |observation| {
+        run.shared.usage.record(observation);
+        if (run.shared.probes.hooks.observe_allowance) server_host.writeAllowance(run.shared.allowance_diagnostic, observation);
+    }
     run.shared.probes.traceCompletionQueue(completion.queued_after, owner.binding);
     defer run.shared.probes.traceOperation("provider_completion_serviced", owner.binding);
     if (run.settings.providers.anySignIn()) run.shared.probes.traceTransfer(&active.transfer, owner.binding);
@@ -2727,9 +2739,9 @@ fn completeTransfer(
                     .settle, .key_rejected => {},
                 };
                 const failure_record: store_module.ModelFailure = if (diagnostic) |detail|
-                    answered.rejection(code, detail, workspace.provider_failure.report.slice())
+                    answered.rejection(code, detail, workspace.provider_failure.report)
                 else
-                    .{ .correlated = .{ .code = code, .request_id = answered.request_id, .report = workspace.provider_failure.report.slice() } };
+                    .{ .correlated = .{ .code = code, .request_id = answered.request_id, .report = workspace.provider_failure.report } };
                 if (beginOverflowFailure(run, owner, failure_record, disposition, &answered_response.?)) |pending| {
                     if (pending) {
                         const response = answered_response.?;
@@ -2739,9 +2751,9 @@ fn completeTransfer(
                         return;
                     }
                 } else if (diagnostic) |detail| {
-                    answered.reject(code, detail, workspace.provider_failure.report.slice(), disposition);
+                    answered.reject(code, detail, workspace.provider_failure.report, disposition);
                 } else {
-                    answered.fail(code, workspace.provider_failure.report.slice(), disposition);
+                    answered.fail(code, workspace.provider_failure.report, disposition);
                 }
             } else {
                 const response = active.transfer.partialResponse();
@@ -2803,13 +2815,13 @@ noinline fn completeRejectedTransfer(run: *Run, workspace: *Workspace, slot: *Ex
     const diagnostic = rejection.format(&detail);
     retainFailedResponse(run, .{ .file = response.file, .length = response.length, .transfer = .complete }, answered.retention(rejection.code, diagnostic, http_status));
     const disposition = failureClass(run.settings.limits, rejection.kind, null, null);
-    if (beginOverflowFailure(run, owner, answered.rejection(rejection.code, diagnostic, workspace.provider_failure.report.slice()), disposition, response)) |pending| {
+    if (beginOverflowFailure(run, owner, answered.rejection(rejection.code, diagnostic, workspace.provider_failure.report), disposition, response)) |pending| {
         if (pending) {
             response_owned = false;
             moveSlot(run, slot, .model_failure_preparing, .{ .owner = owner, .response = response.* });
             return;
         }
-    } else answered.reject(rejection.code, diagnostic, workspace.provider_failure.report.slice(), disposition);
+    } else answered.reject(rejection.code, diagnostic, workspace.provider_failure.report, disposition);
     response.deinit();
     response_owned = false;
     finishCustodyNow(run, slot);
@@ -2856,7 +2868,7 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(run, rejected, answered.retention("response_metadata_exhausted", null, http_status));
-        answered.fail("response_metadata_exhausted", "", .ordinary);
+        answered.fail("response_metadata_exhausted", .empty, .ordinary);
         return .cleanup;
     };
     defer metadata.deinit();
@@ -2871,7 +2883,7 @@ noinline fn completeSuccessfulTransfer(run: *Run, workspace: *Workspace, active:
         }
         stderr.print("rui: response data acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         retainFailedResponse(run, rejected, answered.retention("response_data_exhausted", null, http_status));
-        answered.fail("response_data_exhausted", "", .ordinary);
+        answered.fail("response_data_exhausted", .empty, .ordinary);
         return .cleanup;
     };
     defer event_data.deinit();
@@ -2935,7 +2947,7 @@ noinline fn rejectOutputSchema(
     var detail: [512]u8 = undefined;
     const diagnostic = rejection.format(&detail);
     retainFailedResponse(run, rejected, answered.retention(rejection.code, diagnostic, http_status));
-    answered.reject(rejection.code, diagnostic, "", .ordinary);
+    answered.reject(rejection.code, diagnostic, .empty, .ordinary);
 }
 
 noinline fn rejectContradictoryOutput(
@@ -2949,7 +2961,7 @@ noinline fn rejectContradictoryOutput(
     var detail: [512]u8 = undefined;
     const diagnostic = rejection.format(err, &detail);
     retainFailedResponse(run, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
-    saveImmediateFailure(run, answered.owner.binding, answered.rejection("contradictory_provider_output", diagnostic, ""), .ordinary);
+    saveImmediateFailure(run, answered.owner.binding, answered.rejection("contradictory_provider_output", diagnostic, .empty), .ordinary);
 }
 
 fn advanceRetainedCleanup(
@@ -3046,7 +3058,7 @@ const AnsweredAttempt = struct {
         return .{ .run = run, .owner = owner, .request_id = request_id };
     }
 
-    fn fail(self: *const AnsweredAttempt, code: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
+    fn fail(self: *const AnsweredAttempt, code: []const u8, report: failure_report.Report, disposition: store_module.ModelFailureClass) void {
         settleFailure(self.run, self.owner.token, self.owner.binding, .{ .correlated = .{
             .code = code,
             .request_id = self.request_id,
@@ -3054,11 +3066,11 @@ const AnsweredAttempt = struct {
         } }, disposition);
     }
 
-    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
+    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: failure_report.Report, disposition: store_module.ModelFailureClass) void {
         settleFailure(self.run, self.owner.token, self.owner.binding, self.rejection(code, diagnostic, report), disposition);
     }
 
-    fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8) store_module.ModelFailure {
+    fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: failure_report.Report) store_module.ModelFailure {
         return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id, .report = report } };
     }
 
@@ -6251,7 +6263,7 @@ const PendingOverflowFixture = struct {
         var request_id: protocol.Bounded(256) = .{};
         try request_id.set("original-overflow-request");
         var diagnostic: [37]u8 = @splat('d');
-        const failure: store_module.ModelFailure = .{ .rejected = .{ .code = "provider_context_overflow", .request_id = request_id, .diagnostic = &diagnostic, .report = "original report" } };
+        const failure: store_module.ModelFailure = .{ .rejected = .{ .code = "provider_context_overflow", .request_id = request_id, .diagnostic = &diagnostic, .report = .ofMessage("original report") } };
         try std.testing.expectEqual(@as(?bool, true), beginOverflowFailure(&self.run, owner, failure, .context_overflow, &response));
         @memset(&diagnostic, 'z');
         moveSlot(&self.run, &self.slots[index], .model_failure_preparing, .{ .owner = owner, .response = response });
@@ -6441,7 +6453,7 @@ test "pending compound overflow from HTTP and SSE retains original failure throu
         try std.testing.expectEqual(expected_kind, pending.kind);
         try std.testing.expectEqualStrings("provider_context_overflow", pending.code.slice());
         try std.testing.expectEqualStrings(correlation, pending.request_id.slice());
-        try std.testing.expectEqualStrings(report, pending.report.slice());
+        try expectPendingReport(report, &pending.report);
         var diagnostic: protocol.Bounded(512) = .{};
         if (transport == .sse) {
             try std.testing.expectEqual(error.ContextOverflow, fixture.work.value.interpretation.rejected.reason);
@@ -6454,7 +6466,7 @@ test "pending compound overflow from HTTP and SSE retains original failure throu
         try std.testing.expectEqual(@as(u64, @sizeOf(PendingFailure)), fixture.host.scratch_used.load(.acquire));
         try std.testing.expectEqual(@as(usize, 1), fixture.execution.custody.occupied());
         fixture.work.value.provider_failure.clear();
-        try fixture.work.value.provider_failure.report.set("later unrelated provider report");
+        fixture.work.value.provider_failure.report = .ofMessage("later unrelated provider report");
         if (transport == .sse) fixture.work.value.interpretation.rejected.code = "later_unrelated_rejection";
         phase = "finish bounded floor walk with retained original failure";
         var steps: usize = 0;
@@ -6466,7 +6478,7 @@ test "pending compound overflow from HTTP and SSE retains original failure throu
             try std.testing.expectEqual(expected_kind, saved.kind);
             try std.testing.expectEqualStrings("provider_context_overflow", saved.code.slice());
             try std.testing.expectEqualStrings(correlation, saved.request_id.slice());
-            try std.testing.expectEqualStrings(report, saved.report.slice());
+            try expectPendingReport(report, &saved.report);
             try std.testing.expectEqualStrings(diagnostic.slice(), saved.diagnostic.slice());
             try std.testing.expect(advancePendingFailure(&fixture.run, &fixture.slots, fixture.work.value));
         }
