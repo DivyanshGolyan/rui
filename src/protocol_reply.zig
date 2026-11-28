@@ -4216,7 +4216,7 @@ test "a hosted call's action names nothing under none and serves as many targets
     }
 }
 
-test "session change activity carries refusal text only for a refused later revision and a connection only for a provider change" {
+test "INS-21 a session_changed row decodes only with refusal text exactly for a refused later revision and a connection exactly for a provider change" {
     for (std.enums.values(protocol.SessionField)) |field| {
         for ([_]u64{ 1, 2 }) |revision| {
             for ([_]bool{ false, true }) |has_text| {

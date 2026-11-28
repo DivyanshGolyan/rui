@@ -360,15 +360,6 @@ test "a Session moves to another account of its wire format, records the change,
             const after = try storage.inspectSessionForTesting(session.slice());
             try std.testing.expectEqualStrings("work", after.provider.?.slice());
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE field='provider' AND revision=?1", .{moved.accepted.revision}));
-            // The Activity row names the connection the revision switched to, and no other field's row names one.
-            var changes: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
-            changes.session = session;
-            const activity = try store_core.activityPageForTesting(&storage, changes);
-            try std.testing.expectEqual(@as(usize, 1), activity.count);
-            const row = activity.items[0].value.session_changed;
-            try std.testing.expectEqual(protocol.SessionField.provider, row.field);
-            try std.testing.expectEqual(moved.accepted.revision, row.revision);
-            try std.testing.expectEqualStrings("work", row.provider.?.slice());
 
             var other: wire_request.ConfigureCommand = .{};
             try other.key.set("switch-to-codex");
@@ -381,6 +372,49 @@ test "a Session moves to another account of its wire format, records the change,
             const kept = try storage.inspectSessionForTesting(session.slice());
             try std.testing.expectEqual(after.revision, kept.revision);
             try std.testing.expectEqualStrings("work", kept.provider.?.slice());
+        }
+    }.run);
+}
+
+test "INS-20 a Session's switch of connection is an Activity row naming the connection it switched to, and no other change names one" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var routes = protocol.servedBuiltIns(.endpoint);
+            try routes.put(.{ .name = connection.Name.parse("work").?, .label = .{}, .route = .key_file, .codec = .@"openai-responses/3", .web_search = true });
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var initial = try completeConfiguration("names-initial", "", workspace, "model-a");
+            initial.configuration.provider.state = .value;
+            try initial.configuration.provider.value.set("chatgpt");
+            const session = (try storage.configure(&initial, .{})).accepted.session;
+            // One revision changes the connection and the label together: two rows, only the connection's names a connection.
+            var move = try completeConfiguration("names-move", session.slice(), workspace, "model-a");
+            move.configuration.provider.state = .value;
+            try move.configuration.provider.value.set("work");
+            move.configuration.label.state = .value;
+            try move.configuration.label.value.set("renamed");
+            const moved = try storage.configure(&move, .{});
+            try std.testing.expect(moved == .accepted);
+            var changes: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
+            changes.session = session;
+            const activity = try store_core.activityPageForTesting(&storage, changes);
+            var named: usize = 0;
+            for (activity.items[0..activity.count]) |item| {
+                const row = item.value.session_changed;
+                try std.testing.expectEqual(moved.accepted.revision, row.revision);
+                try std.testing.expectEqual(row.field == .provider, row.provider != null);
+                if (row.provider) |name| {
+                    try std.testing.expectEqualStrings("work", name.slice());
+                    named += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 2), activity.count);
+            try std.testing.expectEqual(@as(usize, 1), named);
         }
     }.run);
 }
