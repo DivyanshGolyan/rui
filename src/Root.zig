@@ -8,6 +8,7 @@ const Dialog = @import("Dialog.zig");
 const TerminalApp = @import("TerminalApp.zig");
 const app_input = @import("app_input.zig");
 const clipboard_paste = @import("clipboard_paste.zig");
+const ticket_ledger = @import("ticket_ledger.zig");
 const Input = @import("SessionInput.zig");
 const Self = @This();
 const FocusRect = struct { row: i32, col: i32, width: i32, height: i32 };
@@ -52,7 +53,7 @@ pub const MainPresentation = struct {
 };
 clipboard: clipboard_paste.Transaction = .{},
 clipboard_target: ?Input.Insertion = null,
-clipboard_epoch: u64 = 0,
+tickets: ticket_ledger.Ledger = .{},
 clipboard_supported: bool = false,
 clipboard_enabled: bool = false,
 clipboard_deadline: ?i96 = null,
@@ -94,7 +95,7 @@ fn syncClipboard(self: *Self, ctx: *vxfw.EventContext) !void {
         null;
     if (!std.meta.eql(target, self.clipboard_target)) {
         self.clipboard_target = target;
-        self.clipboard_epoch +%= 1;
+        self.tickets.supersede(.clipboard_paste);
         self.clipboard.abort(std.heap.page_allocator);
     }
     const enabled = target != null;
@@ -107,9 +108,14 @@ fn syncClipboard(self: *Self, ctx: *vxfw.EventContext) !void {
 fn clipboardFrame(self: *Self, ctx: *vxfw.EventContext, payload: []const u8) !void {
     try self.syncClipboard(ctx);
     const allocator = std.heap.page_allocator;
-    const received = self.clipboard.receive(allocator, payload, self.clipboard_epoch);
+    const received = self.clipboard.receive(allocator, payload, self.tickets.issue(.clipboard_paste).epoch);
     self.clipboard_deadline = if (self.clipboard.pending()) std.Io.Clock.awake.now(ctx.io).nanoseconds + 5 * std.time.ns_per_s else null;
     if (received) |effect| try self.clipboardEffect(ctx, effect);
+}
+
+/// A paste answer applies only while paste is on and its target is the one the read was opened for.
+fn clipboardCurrent(self: *const Self, epoch: u64) bool {
+    return self.clipboard_enabled and self.tickets.admit(.{ .slot = .clipboard_paste, .epoch = epoch }, .read) == .apply;
 }
 
 fn clipboardEffect(self: *Self, ctx: *vxfw.EventContext, effect: clipboard_paste.Effect) !void {
@@ -124,25 +130,25 @@ fn clipboardEffect(self: *Self, ctx: *vxfw.EventContext, effect: clipboard_paste
         },
         .text => |text| {
             defer allocator.free(text.bytes);
-            if (self.clipboard_enabled and text.epoch == self.clipboard_epoch) {
+            if (self.clipboardCurrent(text.epoch)) {
                 const owner = self.session_focus.?;
                 try owner.clipboard.?.paste(owner.context, ctx, .{ .text = text.bytes });
             }
         },
         .image => |image| {
-            if (self.clipboard_enabled and image.epoch == self.clipboard_epoch) {
+            if (self.clipboardCurrent(image.epoch)) {
                 const owner = self.session_focus.?;
                 try owner.clipboard.?.paste(owner.context, ctx, .{ .image = image.bytes });
             } else allocator.free(image.bytes);
         },
         .failure => |failure| {
-            if (self.clipboard_enabled and failure.epoch == self.clipboard_epoch) {
+            if (self.clipboardCurrent(failure.epoch)) {
                 const owner = self.session_focus.?;
                 try owner.clipboard.?.paste(owner.context, ctx, .{ .failure = failure.reason });
             }
         },
         .local_image => |epoch| {
-            if (self.clipboard_enabled and epoch == self.clipboard_epoch) {
+            if (self.clipboardCurrent(epoch)) {
                 const owner = self.session_focus.?;
                 try owner.clipboard.?.paste(owner.context, ctx, .local_image);
             }
@@ -409,7 +415,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 try self.syncClipboard(ctx);
                 if (self.clipboard_deadline) |deadline| if (std.Io.Clock.awake.now(ctx.io).nanoseconds >= deadline) {
                     self.clipboard_deadline = null;
-                    if (self.clipboard.expire(std.heap.page_allocator, self.clipboard_epoch)) |effect| try self.clipboardEffect(ctx, effect);
+                    if (self.clipboard.expire(std.heap.page_allocator, self.tickets.issue(.clipboard_paste).epoch)) |effect| try self.clipboardEffect(ctx, effect);
                 };
                 try ctx.tick(16, self.widget());
             }
