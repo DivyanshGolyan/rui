@@ -90,7 +90,8 @@ type EntryFromRow<R extends Row> = R extends Row ? {
 /** A discriminated wire-row union with top-level camelCase fields and an opaque continuation `cursor`.
  * `call` and `approval_requested` carry saved `description`, `tool` and `server`;
  * `readContent` opens their original arguments JSON.
- * `session_changed` uses `reasoning_effort_refused` and inline `providerText` for a refused effort change.
+ * `session_changed` uses `reasoning_effort_refused` and inline `providerText` for a refused effort change;
+ * `provider` names the connection the Session switched to, set exactly for a `provider` change.
  */
 export type FeedEntry = EntryFromRow<Row>;
 

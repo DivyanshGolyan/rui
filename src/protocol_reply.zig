@@ -61,7 +61,7 @@ pub const ActivityPage = struct {
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
-        const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
+        const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null, provider: ?JsonString(@import("connection.zig").max_name_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const HostedAction = struct { kind: JsonEnum(hosted_action.HostedAction), targets: JsonArray(Ref, protocol.HostedActionJson.max_served), targets_total: JsonString(20), pattern: ?Ref };
         const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
@@ -121,8 +121,9 @@ pub const ActivityPage = struct {
                 },
                 .session_changed => |change| {
                     const revision = try id(change.revision, false);
-                    if (revision <= 1 or (change.field == .reasoning_effort_refused) != (change.provider_text != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .session_changed = .{ .revision = revision, .field = change.field, .provider_text = if (change.provider_text) |text| text.value else null } };
+                    if (revision <= 1 or (change.field == .reasoning_effort_refused) != (change.provider_text != null) or (change.field == .provider) != (change.provider != null)) return error.InvalidActivityPage;
+                    const provider = if (change.provider) |text| @import("connection.zig").Name.parse(text.slice()) orelse return error.InvalidActivityPage else null;
+                    fact.value = .{ .session_changed = .{ .revision = revision, .field = change.field, .provider_text = if (change.provider_text) |text| text.value else null, .provider = provider } };
                 },
                 .instruction => |instruction| {
                     // The skill-catalog instruction has neither a Turn nor an authored revision; every other one has both.
