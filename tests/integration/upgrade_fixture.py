@@ -23,7 +23,7 @@ class Releases:
 
     def __init__(self, binary, version):
         target = os_semantics.native_release_target()
-        assert target is not None, "Upgrade supports darwin-arm64 and linux-x86_64"
+        assert target is not None, "Upgrade supports darwin-arm64, linux-x86_64 and linux-arm64"
         self.version = version
         self.name = f"rui-{version}-{target}.tar.gz"
         self.archive = self.make_archive(binary)

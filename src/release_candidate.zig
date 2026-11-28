@@ -54,7 +54,15 @@ pub const ReleaseCandidate = struct {
 pub fn platform() ![]const u8 {
     if (os.tag == .macos and builtin.cpu.arch == .aarch64) return "darwin-arm64";
     if (os.tag == .linux and builtin.cpu.arch == .x86_64) return "linux-x86_64";
+    if (os.tag == .linux and builtin.cpu.arch == .aarch64) return "linux-arm64";
     return error.UnsupportedReleasePlatform;
+}
+
+fn isReleasePlatform(target: []const u8) bool {
+    for ([_][]const u8{ "darwin-arm64", "linux-x86_64", "linux-arm64" }) |known| {
+        if (std.mem.eql(u8, target, known)) return true;
+    }
+    return false;
 }
 
 fn fixtureOrigin(endpoint: []const u8) ![]const u8 {
@@ -157,7 +165,7 @@ fn parseTag(url: []const u8, final_origin: []const u8) !ParsedTag {
 pub fn fromEffectiveUrl(allocator: std.mem.Allocator, effective: []const u8, final_origin: []const u8, origin: []const u8, target: []const u8) !ReleaseCandidate {
     const parsed = try parseTag(effective, final_origin);
     const tag = parsed.tag;
-    if (!std.mem.eql(u8, target, "darwin-arm64") and !std.mem.eql(u8, target, "linux-x86_64")) return error.UnsupportedReleasePlatform;
+    if (!isReleasePlatform(target)) return error.UnsupportedReleasePlatform;
     const archive_name = try std.fmt.allocPrint(allocator, "rui-{s}-{s}.tar.gz", .{ tag[1..], target });
     errdefer allocator.free(archive_name);
     const archive_url = try std.fmt.allocPrint(allocator, "{s}/releases/download/{s}/{s}", .{ origin, tag, archive_name });
@@ -208,6 +216,7 @@ test "release effective URL pins a canonical tag and derived assets" {
     for ([_]struct { []const u8, []const u8, []const u8 }{
         .{ "linux-x86_64", "rui-0.56.2-linux-x86_64.tar.gz", "https://ruicode.com/releases/download/v0.56.2/rui-0.56.2-linux-x86_64.tar.gz" },
         .{ "darwin-arm64", "rui-0.56.2-darwin-arm64.tar.gz", "https://ruicode.com/releases/download/v0.56.2/rui-0.56.2-darwin-arm64.tar.gz" },
+        .{ "linux-arm64", "rui-0.56.2-linux-arm64.tar.gz", "https://ruicode.com/releases/download/v0.56.2/rui-0.56.2-linux-arm64.tar.gz" },
     }) |case| {
         var candidate = try fromEffectiveUrl(allocator, "https://github.com/DivyanshGolyan/rui/releases/tag/v0.56.2", tag_origin, download_origin, case[0]);
         defer candidate.deinit(allocator);
@@ -227,7 +236,7 @@ test "release effective URL pins a canonical tag and derived assets" {
         defer allocator.free(url);
         try std.testing.expectError(error.InvalidReleaseVersion, fromEffectiveUrl(allocator, url, tag_origin, download_origin, "linux-x86_64"));
     }
-    try std.testing.expectError(error.UnsupportedReleasePlatform, fromEffectiveUrl(allocator, tag_origin ++ "/releases/tag/v0.56.2", tag_origin, download_origin, "linux-arm64"));
+    try std.testing.expectError(error.UnsupportedReleasePlatform, fromEffectiveUrl(allocator, tag_origin ++ "/releases/tag/v0.56.2", tag_origin, download_origin, "darwin-x86_64"));
     var stopped: client.Cancellation = .{};
     stopped.requestStop();
     try std.testing.expectError(error.Cancelled, discover(allocator, std.testing.io, default_endpoint, &stopped, null));
