@@ -1556,6 +1556,7 @@ pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
 pub fn ddlIn(comptime dialect: rsql.Dialect, comptime form: Form) [:0]const u8 {
     if (form == .strict) return ddl(dialect);
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_plain_ddl else generated.mysql_plain_ddl;
         @setEvalBranchQuota(objects_quota);
         var text: []const u8 = "";
         for (plainObjects(dialect)) |object| text = text ++ object.sql ++ ";\n";
@@ -1613,9 +1614,10 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     };
 }
 
-/// The plain form's objects: no CHECK, no FOREIGN KEY. Rendered at comptime, never served from the statement table.
+/// The plain form's objects: no CHECK, no FOREIGN KEY. Served from the statement table with the strict form's, rendered at comptime when the table is stale.
 pub fn plainObjects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_plain_objects else generated.mysql_plain_objects;
         @setEvalBranchQuota(objects_quota);
         const result = renderedObjects(dialect, .plain);
         break :blk result;
@@ -3302,11 +3304,14 @@ comptime {
     if (rsql.collecting()) {
         @setEvalBranchQuota(objects_quota);
         for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
-            const all = objects(dialect);
-            var items: [all.len][]const u8 = undefined;
-            for (all, &items) |object, *item| item.* = @tagName(object.kind) ++ "\x1e" ++ object.name ++ "\x1e" ++ object.sql;
-            rsql.collectSchema(@tagName(dialect) ++ "_objects", joined(&items, "\x1d"));
-            rsql.collectSchema(@tagName(dialect) ++ "_ddl", ddl(dialect));
+            for (.{ Form.strict, Form.plain }) |form| {
+                const all = objectsIn(dialect, form);
+                var items: [all.len][]const u8 = undefined;
+                for (all, &items) |object, *item| item.* = @tagName(object.kind) ++ "\x1e" ++ object.name ++ "\x1e" ++ object.sql;
+                const prefix = @tagName(dialect) ++ (if (form == .strict) "" else "_plain");
+                rsql.collectSchema(prefix ++ "_objects", joined(&items, "\x1d"));
+                rsql.collectSchema(prefix ++ "_ddl", ddlIn(dialect, form));
+            }
         }
         const texts = mysqlMigrationTexts();
         for (texts, 0..) |text, index| {
@@ -3521,6 +3526,7 @@ test "SH-182 the plain form drops every CHECK and FOREIGN KEY and keeps each tab
 }
 
 fn plainTable(comptime objects_of: []const Object, comptime name: []const u8) []const u8 {
+    @setEvalBranchQuota(1_000_000);
     for (objects_of) |object| if (object.kind == .table and std.mem.eql(u8, object.name, name)) return object.sql;
     @compileError("schema: no plain table " ++ name);
 }

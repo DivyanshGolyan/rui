@@ -481,13 +481,13 @@ test "the Responses headers are lowercase tokens, header-safe, within bounds and
         try std.testing.expect(headers.count <= codec_abi.max_request_headers);
         var value_bytes: usize = 0;
         for (0..headers.count) |index| {
-            const name = codecs.headerName(.@"openai-responses/1", headers.names[index]);
+            const name = codecs.headerName(.@"openai-responses/1", headers.name(index));
             const value = headers.value(index);
             value_bytes += value.len;
             try std.testing.expect(codec_abi.lowercaseToken(name));
             try std.testing.expect(codec_abi.headerValue(value));
             try std.testing.expect(!provider.hostField(name));
-            for (headers.names[0..index]) |earlier| try std.testing.expect(earlier != headers.names[index]);
+            for (0..index) |earlier| try std.testing.expect(headers.name(earlier) != headers.name(index));
         }
         try std.testing.expect(value_bytes <= codec_abi.max_request_header_bytes);
     };
@@ -2008,8 +2008,8 @@ test "a prepared request carries the Responses codec's headers with its Session'
     const session_id = std.fmt.bytesToHex(preparation.settings.session_affinity, .lower);
     const expected = [_][2][]const u8{ .{ "accept", "text/event-stream" }, .{ "session-id", &session_id }, .{ "originator", "rui" } };
     try std.testing.expectEqual(@as(u8, expected.len), request.headers.count);
-    for (expected, request.headers.names[0..request.headers.count], 0..) |pair, name, index| {
-        try std.testing.expectEqualStrings(pair[0], codecs.headerName(request.codec, name));
+    for (expected, 0..) |pair, index| {
+        try std.testing.expectEqualStrings(pair[0], codecs.headerName(request.codec, request.headers.name(index)));
         try std.testing.expectEqualStrings(pair[1], request.headers.value(index));
     }
 }

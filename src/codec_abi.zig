@@ -182,15 +182,26 @@ pub const Headers = struct {
         std.debug.assert(max_request_header_bytes <= std.math.maxInt(u8));
     }
 
-    pub fn add(self: *Headers, name: anytype, text: []const u8) void {
-        comptime std.debug.assert(@typeInfo(@TypeOf(name)) == .@"enum");
+    pub fn add(self: *Headers, token: anytype, text: []const u8) void {
+        comptime std.debug.assert(@typeInfo(@TypeOf(token)) == .@"enum");
         std.debug.assert(self.count < max_request_headers);
         const start = self.valueBytes();
         std.debug.assert(text.len <= max_request_header_bytes - start);
         @memcpy(self.bytes[start..][0..text.len], text);
-        self.names[self.count] = @backingInt(name);
+        self.names[self.count] = @backingInt(token);
         self.ends[self.count] = @intCast(start + text.len);
         self.count += 1;
+    }
+
+    /// Empties the list so a codec can rebuild its request headers into the same storage.
+    pub fn clear(self: *Headers) void {
+        self.count = 0;
+    }
+
+    /// The wire name token of the header at `index`, as `add` recorded it.
+    pub fn name(self: *const Headers, index: usize) u8 {
+        std.debug.assert(index < self.count);
+        return self.names[index];
     }
 
     pub fn value(self: *const Headers, index: usize) []const u8 {
@@ -480,4 +491,19 @@ test "a header value is printable ASCII without edge spaces" {
     try std.testing.expect(lowercaseToken("session-id"));
     for ([_][]const u8{ "", "Accept", ":path", "a b", "a\x00" }) |name|
         try std.testing.expect(!lowercaseToken(name));
+}
+
+test "request headers keep each added token in order and clear empties them for a rebuild" {
+    const Token = enum(u8) { accept = 7, originator = 9 };
+    var headers: Headers = .{ .count = 0 };
+    headers.add(Token.accept, "text/event-stream");
+    headers.add(Token.originator, "rui");
+    try std.testing.expectEqual(@as(u8, 7), headers.name(0));
+    try std.testing.expectEqual(@as(u8, 9), headers.name(1));
+    try std.testing.expectEqualStrings("rui", headers.value(1));
+    headers.clear();
+    try std.testing.expectEqual(@as(usize, 0), headers.valueBytes());
+    headers.add(Token.originator, "ok");
+    try std.testing.expectEqual(@as(u8, 9), headers.name(0));
+    try std.testing.expectEqualStrings("ok", headers.value(0));
 }
