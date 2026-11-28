@@ -1,5 +1,5 @@
 {
-  "revision": "c39ebcf88f569f439280f26652d93dec79fa6721",
+  "revision": "972fd6b2a85f9ace45165fadef51d432260eac42",
   "sources": {
     "Parser.zig": {
       "sha256": "9935e0eaf80c7b826465769a13b25837974d052a3038839901e16b2ac8bd5381",
@@ -11,6 +11,12 @@
       "sha256": "93550b699f3f676430605cf87ede94414bc06c68457585a3cd67374cfd6ac8ad",
       "tests": [
         "SUI-128 OSC 5522 transport dispatches copied frames and reports only to the App root"
+      ]
+    },
+    "Loop.zig": {
+      "sha256": "24d427a5554e1964903af8123f067911671abdd980b3b63933e2d184cfb4d3d3",
+      "tests": [
+        "SUI-194 OSC 5522 report-all Escape survives a delayed read without changing legacy input"
       ]
     }
   }
