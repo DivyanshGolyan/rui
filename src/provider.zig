@@ -102,6 +102,8 @@ pub const AllowanceWindow = struct {
 pub const AllowanceObservation = struct {
     binding: attempt.AttemptBinding,
     provider: connection.Name,
+    /// The owner whose request this reading answers; a reading never outlives a change of owner on its connection.
+    owner: RoutingOwner = @splat(0),
     status: u16,
     observed_at: i64,
     /// The monotonic clock when the final head arrived; it orders readings of one connection, which `observed_at` (Unix seconds) cannot.
@@ -143,7 +145,8 @@ pub const AllowanceObservation = struct {
     }
 };
 
-pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: connection.Name };
+/// What a reply's allowance reading is attributed to: the connection, and the owner (a sign-in's account, or the key) whose request it answers.
+pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: connection.Name, owner: RoutingOwner = @splat(0) };
 
 /// The Reactor-wide observation. Header names belong to each Transfer's codec (its manifest).
 pub const HeaderObservation = struct {
@@ -498,6 +501,7 @@ pub const Reactor = struct {
                     var snapshot: AllowanceObservation = .{
                         .binding = source.binding,
                         .provider = source.provider,
+                        .owner = source.owner,
                         .status = head.status,
                         .observed_at = now_seconds,
                         .seen = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds),
@@ -790,7 +794,7 @@ pub const Transfer = struct {
             .credential = options.credential,
             .timing = options.timing,
             .allowance_source = if (options.observe_allowance)
-                .{ .binding = binding, .provider = request.provider }
+                .{ .binding = binding, .provider = request.provider, .owner = if (options.routing) |routing| routing.owner else @splat(0) }
             else
                 null,
         };

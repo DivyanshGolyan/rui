@@ -2593,12 +2593,14 @@ fn launchPreparedRequest(
         .rejection = served.credential.rejection(lease),
     });
     const active = &slot.provider;
+    const routing_owner = served.credential.routingOwner(lease);
+    if (served.credential.signIn() != null) run.shared.usage.begin(request.provider, routing_owner);
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
         .observe_allowance = served.credential.signIn() != null,
         .timing = run.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
-        .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
+        .routing = .{ .turn_id = binding.turn_id, .owner = routing_owner },
         .faults = run.shared.probes.transferFaults(),
         .response_workspace_bytes = if (owner.purpose == .compaction) @sizeOf(PendingFailure) else 0,
     }, &retained_response) catch |err| {
