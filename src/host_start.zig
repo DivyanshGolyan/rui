@@ -518,8 +518,7 @@ fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !v
     if (key.source != .default) return;
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
-    key.source = .{ .file = .{} };
-    try key.source.file.text.set(path);
+    try key.useFile(path);
 }
 
 /// Sets each key connection the document names to its readiness: configured when its key loads and is

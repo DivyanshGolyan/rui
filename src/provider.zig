@@ -767,8 +767,8 @@ pub const Transfer = struct {
         if (count + @intFromBool(options.routing != null) > h2.max_fields) return error.TooManyProviderHeaders;
         var fields: [h2.max_fields]h2.Field = undefined;
         fields[0] = content_type;
-        for (fields[1..][0..request.headers.count], request.headers.names[0..request.headers.count], 0..) |*field, name, index|
-            field.* = .{ .name = codecs.headerName(request.codec, name), .value = request.headers.value(index) };
+        for (fields[1..][0..request.headers.count], 0..) |*field, index|
+            field.* = .{ .name = codecs.headerName(request.codec, request.headers.name(index)), .value = request.headers.value(index) };
         @memcpy(fields[1 + request.headers.count ..][0..options.fields.len], options.fields);
         const response = ResponseCapture.init(
             reactor.io,
