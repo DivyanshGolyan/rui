@@ -245,7 +245,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         self.connection_facts = null;
         if (row == .connections) {
             self.readConnections();
-            self.refreshStep(.{ .opened = self.now() });
+            self.refreshStep(.{ .opened = self.clock() });
         }
         self.reference_open = true;
         self.reference_offset = 0;
@@ -352,15 +352,15 @@ fn readConnections(self: *Self) void {
 }
 
 /// Applies one refresh event: the core says whether to ask the owner for a newer reading.
-fn refreshStep(self: *Self, event: connections_refresh.Event) void {
-    const next = connections_refresh.step(self.refresh_state, event);
+fn refreshStep(self: *Self, refresh: connections_refresh.Event) void {
+    const next = connections_refresh.step(self.refresh_state, refresh);
     self.refresh_state = next.state;
     if (!next.ask) return;
     const backend = self.backend orelse return;
     if (backend.ask_connections) |ask| ask(backend.context);
 }
 
-fn now(self: *const Self) u64 {
+fn clock(self: *const Self) u64 {
     const backend = self.backend orelse return 0;
     return if (backend.seconds) |seconds| seconds(backend.context) else 0;
 }
@@ -389,7 +389,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         try self.poll();
         if (was_saving) ctx.redraw = true;
         if (self.reference_open and self.reference == .connections) {
-            self.refreshStep(.{ .tick = self.now() });
+            self.refreshStep(.{ .tick = self.clock() });
             const drawn = if (self.connection_facts) |facts| facts.now else null;
             self.readConnections();
             if (connections_refresh.redraw(drawn, if (self.connection_facts) |facts| facts.now else null)) ctx.redraw = true;
