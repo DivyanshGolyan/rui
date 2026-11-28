@@ -203,7 +203,7 @@ Core built-ins do not request permission; Bash and MCP calls under `ask` do.
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
 Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
 A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
-A `session_changed` row (D138, D218) carries `revision`, `field` and required nullable `provider_text` (explicit `null` for ordinary changes).
+A `session_changed` row (D138, D218) carries `revision`, `field`, required nullable `provider_text` (explicit `null` for ordinary changes) and required nullable `provider`, the connection the Session switched to: set exactly when `field` is `provider` and null for every other field.
 An ordinary row names a setting the revision changed (`provider`, `model`, `instructions`, `tools`, `loaded_tools`, `app_tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`) and has null provider text.
 The revision's commit writes those rows at one position, never edited; creation and an unchanged revision have none.
 A refused effort update is also an immutable row, with `field:"reasoning_effort_refused"`, the revision whose effort was refused, and the provider report in `provider_text`, using the same bounded, control-normalized report as other provider failures.
