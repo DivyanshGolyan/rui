@@ -56,7 +56,7 @@ pub const RequestHeader = enum(u8) { accept, @"anthropic-version" };
 
 pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Headers) void {
     _ = settings;
-    out.count = 0;
+    out.clear();
     out.add(RequestHeader.accept, "text/event-stream");
     out.add(RequestHeader.@"anthropic-version", "2023-06-01");
 }

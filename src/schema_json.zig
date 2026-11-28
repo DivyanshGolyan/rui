@@ -173,7 +173,7 @@ test "schema objects normalize incrementally like DOM serialization" {
     }
 }
 
-test "CM-75 the encoder's fragment moves only through its table over every state and event" {
+test "CM-76 the encoder's fragment moves only through its table over every state and event" {
     const Cell = struct { from: Fragment, event: Fragment.Event, next: Fragment };
     const cells = [_]Cell{
         .{ .from = .none, .event = .text, .next = .string },

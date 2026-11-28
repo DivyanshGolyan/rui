@@ -110,8 +110,6 @@ field-leak chat_info.chat_info.narrow
 field-leak client.CapturedRecord.saved
 field-leak client.HostControlObservation.facts
 field-leak client.StatusFacts.instance
-field-leak codec_abi.Headers.count
-field-leak codec_abi.Headers.names
 field-leak codecs/json.Reader.arrays
 field-leak codecs/json.Reader.text_bytes
 field-leak codex_credentials.Lease.record
@@ -131,7 +129,6 @@ field-leak history_memo.Table.Entry.memo
 field-leak history_memo.Table.entries
 field-leak host_drain.Watch.until_ns
 field-leak host_restart_report.OptionalOutput.writer
-field-leak host_settings.Secret.source
 field-leak host_start.ConnectionInfo.endpoint
 field-leak json_ascii.Escaping.writer
 field-leak line.Line.seen
