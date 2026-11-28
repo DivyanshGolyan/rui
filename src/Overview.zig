@@ -2044,7 +2044,7 @@ fn hostFacts(self: *Self) HostRead {
         .access_failure => .unreadable,
     };
     const connections: ?AppSettings.ConnectionsSnapshot = switch (observation) {
-        .ready => |_| if (seen) |host| .{ .facts = host.capabilities.connections, .now = @intCast(@max(std.Io.Clock.real.now(self.init.io).toSeconds(), 0)) } else null,
+        .ready => if (seen) |host| .{ .facts = host.capabilities.connections, .now = @intCast(@max(std.Io.Clock.real.now(self.init.io).toSeconds(), 0)) } else null,
         else => null,
     };
     return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null), .connections = connections };
