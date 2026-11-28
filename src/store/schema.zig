@@ -3505,6 +3505,7 @@ test "SH-182 the plain form drops every CHECK and FOREIGN KEY and keeps each tab
 }
 
 fn plainTable(comptime objects_of: []const Object, comptime name: []const u8) []const u8 {
+    @setEvalBranchQuota(1_000_000);
     for (objects_of) |object| if (object.kind == .table and std.mem.eql(u8, object.name, name)) return object.sql;
     @compileError("schema: no plain table " ++ name);
 }
