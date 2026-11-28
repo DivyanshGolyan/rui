@@ -49,6 +49,61 @@ const State = union(enum) {
     trailers,
     until_close,
     done,
+
+    /// What happened to the framing of a response; the input to `State.next`.
+    const Transition = union(enum) {
+        /// A final head arrived; its framing picks the body state.
+        head: Head,
+        /// This many body bytes were consumed from a length or chunk body.
+        body: u64,
+        /// A length-framed body has no bytes left.
+        body_end,
+        /// A chunk-size line declared this many bytes (0 starts trailers).
+        chunk_line: u64,
+        /// The CRLF that ends a chunk's data arrived.
+        chunk_crlf,
+        /// The empty line that ends trailers arrived.
+        trailers_end,
+        /// The peer closed the connection.
+        connection_closed,
+    };
+
+    /// The one decision table for `State`. A transition that does not apply
+    /// to the current state leaves it unchanged, except a connection close
+    /// before the body is complete, which is an error.
+    fn next(state: State, transition: Transition) Error!State {
+        return switch (transition) {
+            .head => |head| switch (state) {
+                .head => try framing(head),
+                else => state,
+            },
+            .body => |taken| switch (state) {
+                .length => |left| .{ .length = left - taken },
+                .chunk_data => |left| if (taken == left) .chunk_end else .{ .chunk_data = left - taken },
+                else => state,
+            },
+            .body_end => switch (state) {
+                .length => |left| if (left == 0) .done else state,
+                else => state,
+            },
+            .chunk_line => |size| switch (state) {
+                .chunk_size => if (size == 0) .trailers else .{ .chunk_data = size },
+                else => state,
+            },
+            .chunk_crlf => switch (state) {
+                .chunk_end => .chunk_size,
+                else => state,
+            },
+            .trailers_end => switch (state) {
+                .trailers => .done,
+                else => state,
+            },
+            .connection_closed => switch (state) {
+                .until_close, .done => .done,
+                else => error.TruncatedResponse,
+            },
+        };
+    }
 };
 
 state: State = .head,
@@ -71,41 +126,41 @@ pub fn next(self: *Parser, input: []const u8) Error!Step {
             if (head.status < 200) {
                 return .{ .used = length, .event = .more };
             }
-            self.state = try framing(head);
+            self.state = try State.next(self.state, .{ .head = head });
             return .{ .used = length, .event = .{ .head = head } };
         },
         .length => |left| {
             if (left == 0) {
-                self.state = .done;
+                self.state = try State.next(self.state, .body_end);
                 continue;
             }
             if (input.len == 0) return .{ .used = 0, .event = .more };
             const take: usize = @intCast(@min(left, input.len));
-            self.state = .{ .length = left - take };
+            self.state = try State.next(self.state, .{ .body = take });
             return .{ .used = take, .event = .{ .body = input[0..take] } };
         },
         .chunk_size => {
             const line = (try takeLine(input)) orelse return .{ .used = 0, .event = .more };
             const size = try chunkSize(line.text);
-            self.state = if (size == 0) .trailers else .{ .chunk_data = size };
+            self.state = try State.next(self.state, .{ .chunk_line = size });
             return .{ .used = line.used, .event = .more };
         },
         .chunk_data => |left| {
             if (input.len == 0) return .{ .used = 0, .event = .more };
             const take: usize = @intCast(@min(left, input.len));
-            self.state = if (take == left) .chunk_end else .{ .chunk_data = left - take };
+            self.state = try State.next(self.state, .{ .body = take });
             return .{ .used = take, .event = .{ .body = input[0..take] } };
         },
         .chunk_end => {
             if (input.len < 2) return .{ .used = 0, .event = .more };
             if (!std.mem.eql(u8, input[0..2], "\r\n")) return error.InvalidChunk;
-            self.state = .chunk_size;
+            self.state = try State.next(self.state, .chunk_crlf);
             return .{ .used = 2, .event = .more };
         },
         .trailers => {
             const line = (try takeLine(input)) orelse return .{ .used = 0, .event = .more };
             if (line.text.len == 0) {
-                self.state = .done;
+                self.state = try State.next(self.state, .trailers_end);
                 return .{ .used = line.used, .event = .end };
             }
             _ = try fieldLine(line.text);
@@ -120,13 +175,8 @@ pub fn next(self: *Parser, input: []const u8) Error!Step {
 }
 
 pub fn finish(self: *Parser) Error!Event {
-    switch (self.state) {
-        .until_close, .done => {
-            self.state = .done;
-            return .end;
-        },
-        else => return error.TruncatedResponse,
-    }
+    self.state = try State.next(self.state, .connection_closed);
+    return .end;
 }
 
 fn parseHead(bytes: []const u8) Error!Head {
@@ -426,7 +476,9 @@ test "a head and a line are bounded" {
     const big: [max_head_bytes]u8 = @splat('a');
     try std.testing.expectError(error.HeadTooLarge, parser.next(&big));
 
-    var chunked: Parser = .{ .state = .chunk_size };
+    var chunked: Parser = .{};
+    const chunked_head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try std.testing.expectEqual(@as(u16, 200), (try chunked.next(chunked_head)).event.head.status);
     const long_line = [_]u8{'1'} ++ @as([max_line_bytes + 1]u8, @splat(' '));
     try std.testing.expectError(error.LineTooLarge, chunked.next(&long_line));
     const short = [_]u8{'1'} ++ @as([max_line_bytes - 1]u8, @splat(' '));
@@ -444,4 +496,114 @@ test "a head arriving a byte at a time is scanned once" {
     const step = try parser.next(response);
     try std.testing.expectEqual(@as(u16, 200), step.event.head.status);
     try std.testing.expectEqual(Event.end, (try parser.next(response[step.used..])).event);
+}
+
+/// Streams that frame their own end, with the status and body each yields.
+/// `closes` marks a body with no framing, which ends only when the connection closes.
+const Complete = struct { stream: []const u8, status: u16, body: []const u8, closes: bool = false };
+const complete_streams = [_]Complete{
+    .{ .stream = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", .status = 200, .body = "hello" },
+    .{ .stream = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", .status = 200, .body = "" },
+    .{ .stream = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", .status = 200, .body = "hello" },
+    .{ .stream = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;x=y\r\na\r\n6\r\n bcdef\r\n0\r\nX-T: 1\r\n\r\n", .status = 200, .body = "a bcdef" },
+    .{ .stream = "HTTP/1.1 204 No Content\r\n\r\n", .status = 204, .body = "" },
+    .{ .stream = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", .status = 200, .body = "ok" },
+    .{ .stream = "HTTP/1.1 200 OK\r\n\r\nstream", .status = 200, .body = "stream", .closes = true },
+};
+
+/// Reads `stream` with the whole buffer in hand, one call at a time, as a
+/// caller does. A message that frames its end reaches `.end`, consumes nothing
+/// after it, and still finishes cleanly; a body with no framing has no `.end`
+/// until the connection closes.
+fn expectEndsWhole(stream: []const u8, closes: bool) !void {
+    var parser: Parser = .{};
+    var rest = stream;
+    var ended = false;
+    while (true) {
+        const step = try parser.next(rest);
+        rest = rest[step.used..];
+        if (step.event == .end) {
+            ended = true;
+            break;
+        }
+        if (step.used == 0) break;
+    }
+    if (!ended) {
+        try std.testing.expect(closes);
+        try std.testing.expectEqual(Event.end, try parser.finish());
+        return;
+    }
+    const after = try parser.next(rest);
+    try std.testing.expectEqual(@as(usize, 0), after.used);
+    try std.testing.expectEqual(Event.end, after.event);
+    try std.testing.expectEqual(Event.end, try parser.finish());
+}
+
+/// Every proper prefix of a message that frames its end is a response cut short.
+fn expectTruncatedAtEveryCut(stream: []const u8) !void {
+    for (0..stream.len) |cut| {
+        var out: Collected = .{};
+        try std.testing.expectError(error.TruncatedResponse, collect(stream[0..cut], cut, &out));
+    }
+}
+
+test "EXR-106 the parser moves through every state x transition as its framing rules say" {
+    for (complete_streams) |case| {
+        try expectEverySplit(case.stream, case.status, case.body);
+        try expectEndsWhole(case.stream, case.closes);
+        if (!case.closes) try expectTruncatedAtEveryCut(case.stream);
+    }
+
+    // Supporting table: the same transitions named one by one, including ones
+    // `Parser.next` never drives (`body_end` with bytes left, body bytes from a
+    // non-body state), which the API checks above cannot reach.
+    const Row = struct { from: State, transition: State.Transition, want: Error!State };
+    const plain: Head = .{ .status = 200, .fields = "" };
+    const sized: Head = .{ .status = 200, .fields = "Content-Length: 5\r\n" };
+    const chunked: Head = .{ .status = 200, .fields = "Transfer-Encoding: chunked\r\n" };
+    const no_content: Head = .{ .status = 204, .fields = "" };
+    const rows = [_]Row{
+        .{ .from = .head, .transition = .{ .head = plain }, .want = .until_close },
+        .{ .from = .head, .transition = .{ .head = sized }, .want = .{ .length = 5 } },
+        .{ .from = .head, .transition = .{ .head = chunked }, .want = .chunk_size },
+        .{ .from = .head, .transition = .{ .head = no_content }, .want = .done },
+        .{ .from = .{ .length = 5 }, .transition = .{ .head = plain }, .want = .{ .length = 5 } },
+        .{ .from = .{ .chunk_data = 3 }, .transition = .{ .head = plain }, .want = .{ .chunk_data = 3 } },
+        .{ .from = .head, .transition = .{ .body = 2 }, .want = .head },
+        .{ .from = .{ .length = 5 }, .transition = .{ .body = 2 }, .want = .{ .length = 3 } },
+        .{ .from = .{ .length = 5 }, .transition = .{ .body = 5 }, .want = .{ .length = 0 } },
+        .{ .from = .{ .chunk_data = 3 }, .transition = .{ .body = 2 }, .want = .{ .chunk_data = 1 } },
+        .{ .from = .{ .chunk_data = 3 }, .transition = .{ .body = 3 }, .want = .chunk_end },
+        .{ .from = .chunk_size, .transition = .{ .body = 2 }, .want = .chunk_size },
+        .{ .from = .until_close, .transition = .{ .body = 2 }, .want = .until_close },
+        .{ .from = .done, .transition = .{ .body = 2 }, .want = .done },
+        .{ .from = .head, .transition = .body_end, .want = .head },
+        .{ .from = .{ .length = 5 }, .transition = .body_end, .want = .{ .length = 5 } },
+        .{ .from = .done, .transition = .body_end, .want = .done },
+        .{ .from = .{ .length = 0 }, .transition = .body_end, .want = .done },
+        .{ .from = .chunk_size, .transition = .{ .chunk_line = 0 }, .want = .trailers },
+        .{ .from = .chunk_size, .transition = .{ .chunk_line = 7 }, .want = .{ .chunk_data = 7 } },
+        .{ .from = .head, .transition = .{ .chunk_line = 7 }, .want = .head },
+        .{ .from = .{ .chunk_data = 3 }, .transition = .{ .chunk_line = 7 }, .want = .{ .chunk_data = 3 } },
+        .{ .from = .chunk_end, .transition = .chunk_crlf, .want = .chunk_size },
+        .{ .from = .chunk_size, .transition = .chunk_crlf, .want = .chunk_size },
+        .{ .from = .trailers, .transition = .trailers_end, .want = .done },
+        .{ .from = .chunk_size, .transition = .trailers_end, .want = .chunk_size },
+        .{ .from = .until_close, .transition = .connection_closed, .want = .done },
+        .{ .from = .done, .transition = .connection_closed, .want = .done },
+        .{ .from = .head, .transition = .connection_closed, .want = error.TruncatedResponse },
+        .{ .from = .{ .length = 5 }, .transition = .connection_closed, .want = error.TruncatedResponse },
+        .{ .from = .chunk_size, .transition = .connection_closed, .want = error.TruncatedResponse },
+        .{ .from = .{ .chunk_data = 3 }, .transition = .connection_closed, .want = error.TruncatedResponse },
+        .{ .from = .chunk_end, .transition = .connection_closed, .want = error.TruncatedResponse },
+        .{ .from = .trailers, .transition = .connection_closed, .want = error.TruncatedResponse },
+    };
+    for (rows) |row| {
+        const got = State.next(row.from, row.transition);
+        if (row.want) |want| {
+            try std.testing.expectEqualDeep(want, try got);
+        } else |want_error| {
+            try std.testing.expectError(want_error, got);
+        }
+    }
 }

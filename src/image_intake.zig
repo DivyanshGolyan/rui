@@ -36,44 +36,84 @@ pub const Progress = union(enum) {
     failed: Failure,
 };
 
+/// The phases of one intake and the one table that moves between them.
+pub const Phase = enum {
+    idle,
+    scan,
+    ready,
+    copy,
+    done,
+
+    pub const Event = enum {
+        /// A streamed source needs no validation pass: it is ready at once.
+        begin_streamed,
+        /// A replayable source is validated in a first pass before capture.
+        begin_replayable,
+        /// Size preflight refused the source before any read.
+        begin_refused,
+        /// The caller discards a ready source because layout cannot admit it.
+        cancel_ready,
+        /// The image part starts in the capture.
+        attach,
+        /// The validation pass ends and the source is rewound for copying.
+        scanned,
+        /// The copy ends and the capture holds the image.
+        copied,
+        /// A source or capture error ends the intake from scan or copy.
+        fail,
+    };
+
+    /// The phase an event leaves `from`, or null when the event is not legal there.
+    pub fn next(from: Phase, event: Event) ?Phase {
+        return switch (event) {
+            .begin_streamed => if (from == .idle or from == .done) .ready else null,
+            .begin_replayable => if (from == .idle or from == .done) .scan else null,
+            .begin_refused => if (from == .idle or from == .done) .done else null,
+            .cancel_ready => if (from == .ready) .done else null,
+            .attach => if (from == .ready) .copy else null,
+            .scanned => if (from == .scan) .ready else null,
+            .copied => if (from == .copy) .done else null,
+            .fail => if (from == .scan or from == .copy) .done else null,
+        };
+    }
+};
+
 pub const Intake = struct {
     source: Source = undefined,
     scanner: media.Scanner = undefined,
     window: [InputCapture.window_bytes]u8 = undefined,
     offset: u64 = 0,
     capture: ?*InputCapture = null,
-    phase: enum { idle, scan, ready, copy, done } = .idle,
+    phase: Phase = .idle,
 
     /// Does no I/O or capture allocation; call before opening scratch files.
     pub fn begin(self: *Intake, source: Source, limits: media.Limits) Progress {
-        std.debug.assert(self.phase == .idle or self.phase == .done);
         self.source = source;
         self.offset = 0;
         self.capture = null;
         self.scanner = preflight(source.length, source.format, limits) catch |err| {
-            self.phase = .done;
+            self.phase = Phase.next(self.phase, .begin_refused).?;
             return .{ .failed = .{ .source = err } };
         };
-        self.phase = if (source.rewind == null) .ready else .scan;
-        return if (self.phase == .ready) .ready else .pending;
+        if (source.rewind == null) {
+            self.phase = Phase.next(self.phase, .begin_streamed).?;
+            return .ready;
+        }
+        self.phase = Phase.next(self.phase, .begin_replayable).?;
+        return .pending;
     }
 
     /// Discard a preflighted source when layout cannot admit another image.
     pub fn cancelReady(self: *Intake) void {
-        std.debug.assert(self.phase == .ready);
-        self.phase = .done;
+        self.phase = Phase.next(self.phase, .cancel_ready).?;
     }
 
     /// Starts the image part after the caller has written any preceding parts.
     /// A failure makes the capture unusable, as with InputCapture.begin.
     pub fn attach(self: *Intake, capture: *InputCapture) Progress {
-        std.debug.assert(self.phase == .ready);
-        capture.begin(.{ .image = .{ .assertion = self.source.format } }, self.source.length) catch |err| {
-            self.phase = .done;
-            return .{ .failed = .{ .capture = err } };
-        };
+        self.phase = Phase.next(self.phase, .attach).?;
+        capture.begin(.{ .image = .{ .assertion = self.source.format } }, self.source.length) catch |err| return self.fail(.{ .capture = err });
         self.capture = capture;
-        self.phase = .copy;
         return .pending;
     }
 
@@ -103,16 +143,16 @@ pub const Intake = struct {
             _ = self.scanner.finish() catch |err| return self.fail(.{ .source = err });
             self.source.rewind.?(self.source.context) catch |err| return self.fail(.{ .source = err });
             self.offset = 0;
-            self.phase = .ready;
+            self.phase = Phase.next(self.phase, .scanned).?;
             return .ready;
         }
         self.capture.?.end() catch |err| return self.fail(.{ .capture = err });
-        self.phase = .done;
+        self.phase = Phase.next(self.phase, .copied).?;
         return .kept;
     }
 
     fn fail(self: *Intake, failure: Failure) Progress {
-        self.phase = .done;
+        self.phase = Phase.next(self.phase, .fail).?;
         return .{ .failed = failure };
     }
 };
@@ -255,6 +295,133 @@ test "intake can decline a ready image before beginning another" {
     intake.cancelReady();
     try std.testing.expect(intake.begin(source.source(false), .{}) == .ready);
     intake.cancelReady();
+}
+
+test "ADM-36 image intake phases move only by the table's events, through its public calls" {
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A replayable image is validated, rewound, then copied into the capture.
+    {
+        var source: TestSource = .{ .bytes = png };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(true), .{}) == .pending);
+        try std.testing.expectEqual(Phase.scan, intake.phase);
+        try std.testing.expect(intake.step() == .ready);
+        try std.testing.expectEqual(Phase.ready, intake.phase);
+        try std.testing.expectEqual(@as(usize, 0), source.at);
+        var used: std.atomic.Value(u64) = .init(0);
+        var capture: InputCapture = undefined;
+        try testCapture(&capture, tmp.dir, &used, 4096);
+        defer capture.close();
+        try std.testing.expect(intake.attach(&capture) == .pending);
+        try std.testing.expectEqual(Phase.copy, intake.phase);
+        try std.testing.expect(intake.step() == .kept);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+        _ = try capture.seal();
+    }
+    // A replayable source that is not an image fails in its validation pass and ends done.
+    {
+        var source: TestSource = .{ .bytes = "not an image" };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(true), .{}) == .pending);
+        const invalid = intake.step();
+        try std.testing.expect(invalid == .failed and invalid.failed == .source);
+        try std.testing.expectEqual(error.UnsupportedImage, invalid.failed.source);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+    }
+    // A declared size over the limit is refused before any read, and ends done.
+    {
+        var source: TestSource = .{ .bytes = "not an image" };
+        var too_large = source.source(false);
+        too_large.length = 100;
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(too_large, .{ .max_bytes = 99 }) == .failed);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+        try std.testing.expectEqual(@as(usize, 0), source.calls);
+    }
+    // A streamed source is ready at once; layout may cancel it, and a later begin starts again.
+    {
+        var source: TestSource = .{ .bytes = png };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(false), .{}) == .ready);
+        try std.testing.expectEqual(Phase.ready, intake.phase);
+        intake.cancelReady();
+        try std.testing.expectEqual(Phase.done, intake.phase);
+        try std.testing.expect(intake.begin(source.source(true), .{}) == .pending);
+        try std.testing.expectEqual(Phase.scan, intake.phase);
+    }
+    // A streamed source that fails while it is copied ends done from the copy phase.
+    {
+        var source: TestSource = .{ .bytes = png };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(false), .{}) == .ready);
+        var used: std.atomic.Value(u64) = .init(0);
+        var capture: InputCapture = undefined;
+        try testCapture(&capture, tmp.dir, &used, 4096);
+        defer capture.close();
+        try std.testing.expect(intake.attach(&capture) == .pending);
+        source.failure = error.NoSpaceLeft;
+        const failed = intake.step();
+        try std.testing.expect(failed == .failed and failed.failed == .source);
+        try std.testing.expectEqual(error.NoSpaceLeft, failed.failed.source);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+    }
+    // Supporting check: the table's legal pairs. The illegal pairs are table-only, because the
+    // public calls assert that an event is legal from the phase they are made in.
+    const Event = Phase.Event;
+    const cases = [_]struct { from: Phase, event: Event, to: ?Phase }{
+        .{ .from = .idle, .event = .begin_streamed, .to = .ready },
+        .{ .from = .idle, .event = .begin_replayable, .to = .scan },
+        .{ .from = .idle, .event = .begin_refused, .to = .done },
+        .{ .from = .idle, .event = .cancel_ready, .to = null },
+        .{ .from = .idle, .event = .attach, .to = null },
+        .{ .from = .idle, .event = .scanned, .to = null },
+        .{ .from = .idle, .event = .copied, .to = null },
+        .{ .from = .idle, .event = .fail, .to = null },
+        .{ .from = .scan, .event = .begin_streamed, .to = null },
+        .{ .from = .scan, .event = .begin_replayable, .to = null },
+        .{ .from = .scan, .event = .begin_refused, .to = null },
+        .{ .from = .scan, .event = .cancel_ready, .to = null },
+        .{ .from = .scan, .event = .attach, .to = null },
+        .{ .from = .scan, .event = .scanned, .to = .ready },
+        .{ .from = .scan, .event = .copied, .to = null },
+        .{ .from = .scan, .event = .fail, .to = .done },
+        .{ .from = .ready, .event = .begin_streamed, .to = null },
+        .{ .from = .ready, .event = .begin_replayable, .to = null },
+        .{ .from = .ready, .event = .begin_refused, .to = null },
+        .{ .from = .ready, .event = .cancel_ready, .to = .done },
+        .{ .from = .ready, .event = .attach, .to = .copy },
+        .{ .from = .ready, .event = .scanned, .to = null },
+        .{ .from = .ready, .event = .copied, .to = null },
+        .{ .from = .ready, .event = .fail, .to = null },
+        .{ .from = .copy, .event = .begin_streamed, .to = null },
+        .{ .from = .copy, .event = .begin_replayable, .to = null },
+        .{ .from = .copy, .event = .begin_refused, .to = null },
+        .{ .from = .copy, .event = .cancel_ready, .to = null },
+        .{ .from = .copy, .event = .attach, .to = null },
+        .{ .from = .copy, .event = .scanned, .to = null },
+        .{ .from = .copy, .event = .copied, .to = .done },
+        .{ .from = .copy, .event = .fail, .to = .done },
+        .{ .from = .done, .event = .begin_streamed, .to = .ready },
+        .{ .from = .done, .event = .begin_replayable, .to = .scan },
+        .{ .from = .done, .event = .begin_refused, .to = .done },
+        .{ .from = .done, .event = .cancel_ready, .to = null },
+        .{ .from = .done, .event = .attach, .to = null },
+        .{ .from = .done, .event = .scanned, .to = null },
+        .{ .from = .done, .event = .copied, .to = null },
+        .{ .from = .done, .event = .fail, .to = null },
+    };
+    // Each of the 5 phases crossed with each of the 8 events is written out exactly once.
+    for (std.enums.values(Phase)) |from| for (std.enums.values(Event)) |event| {
+        var matches: usize = 0;
+        for (cases) |case| {
+            if (case.from != from or case.event != event) continue;
+            matches += 1;
+            try std.testing.expectEqual(case.to, Phase.next(from, event));
+        }
+        try std.testing.expectEqual(@as(usize, 1), matches);
+    };
 }
 
 test "image diagnostic is written in place" {

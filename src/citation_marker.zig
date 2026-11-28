@@ -17,8 +17,34 @@ const lead = "\xee\x88\x80cite" ++ separator;
 /// A marker holds at most this many bytes before its closer; a longer run stays text.
 pub const max_held = 256;
 
-const State = enum { idle, lead, id_start, id, mark_1, mark_2 };
 const Step = enum { pass, keep, drop, reject };
+
+/// What one byte does to the filter: the state it leaves behind and how the byte is handled.
+const Move = struct { next: State, step: Step };
+const reject_move: Move = .{ .next = .idle, .step = .reject };
+
+const State = enum {
+    idle,
+    lead,
+    id_start,
+    id,
+    mark_1,
+    mark_2,
+
+    /// The one decision table for a marker. `held` counts the marker bytes already scanned; a
+    /// marker that reaches `max_held` bytes without its closer is rejected at its next byte.
+    inline fn move(self: State, byte: u8, held: usize) Move {
+        if (self != .idle and held == max_held) return reject_move;
+        return switch (self) {
+            .idle => if (byte != lead[0]) .{ .next = .idle, .step = .pass } else .{ .next = .lead, .step = .keep },
+            .lead => if (byte != lead[held]) reject_move else .{ .next = if (held + 1 == lead.len) .id_start else .lead, .step = .keep },
+            .id_start => if (!idByte(byte)) reject_move else .{ .next = .id, .step = .keep },
+            .id => if (idByte(byte)) .{ .next = .id, .step = .keep } else if (byte != separator[0]) reject_move else .{ .next = .mark_1, .step = .keep },
+            .mark_1 => if (byte != separator[1]) reject_move else .{ .next = .mark_2, .step = .keep },
+            .mark_2 => if (byte == separator[2]) .{ .next = .id_start, .step = .keep } else if (byte != close[2]) reject_move else .{ .next = .idle, .step = .drop },
+        };
+    }
+};
 
 /// Removes complete markers from a stream of bytes. Create one per answer, `feed` every byte in
 /// order, then `finish`. `out` has `put(byte: u8) !void` and receives the text that remains.
@@ -41,6 +67,7 @@ pub const Filter = struct {
     pub fn finish(self: *Filter, out: anytype) !void {
         while (self.state != .idle) {
             try self.reject(out);
+            self.state = reject_move.next;
             try self.drain(out);
         }
     }
@@ -80,50 +107,14 @@ pub const Filter = struct {
         try out.put(self.buf[self.anchor]);
         self.anchor += 1;
         self.head = self.anchor;
-        self.state = .idle;
     }
 
+    /// Moves the state by one byte. While idle the anchor equals the head, so a marker that starts
+    /// here is anchored at this byte without a write.
     fn step(self: *Filter, byte: u8) Step {
-        const held = self.head - self.anchor;
-        if (self.state != .idle and held == max_held) return .reject;
-        switch (self.state) {
-            .idle => {
-                if (byte != lead[0]) return .pass;
-                self.anchor = self.head;
-                self.state = .lead;
-                return .keep;
-            },
-            .lead => {
-                if (byte != lead[held]) return .reject;
-                if (held + 1 == lead.len) self.state = .id_start;
-                return .keep;
-            },
-            .id_start => {
-                if (!idByte(byte)) return .reject;
-                self.state = .id;
-                return .keep;
-            },
-            .id => {
-                if (idByte(byte)) return .keep;
-                if (byte != separator[0]) return .reject;
-                self.state = .mark_1;
-                return .keep;
-            },
-            .mark_1 => {
-                if (byte != separator[1]) return .reject;
-                self.state = .mark_2;
-                return .keep;
-            },
-            .mark_2 => {
-                if (byte == separator[2]) {
-                    self.state = .id_start;
-                    return .keep;
-                }
-                if (byte != close[2]) return .reject;
-                self.state = .idle;
-                return .drop;
-            },
-        }
+        const moved = self.state.move(byte, self.head - self.anchor);
+        self.state = moved.next;
+        return moved.step;
     }
 };
 
@@ -251,5 +242,77 @@ test "SUI-167 the stream filter agrees with the whole-text definition over gener
         var actual: Collect = .{};
         run(text[0..length], &actual);
         try std.testing.expectEqualStrings(expected.slice(), actual.slice());
+    }
+}
+
+test "SUI-201 the marker filter removes complete markers, byte by byte, and passes every other byte" {
+    // Fixed inputs through the public `Filter`: each marker is removed whole, and each unfinished or
+    // malformed one is text, including when it is split across `feed` calls and cut short by `finish`.
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "plain text", .expected = "plain text" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\u{e201}b", .expected = "ab" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\u{e202}t2\u{e201}b", .expected = "ab" },
+        .{ .input = "a\u{e200}cx", .expected = "a\u{e200}cx" },
+        .{ .input = "a\u{e200}cite\u{e202}\u{e201}b", .expected = "a\u{e200}cite\u{e202}\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e202}x y\u{e201}b", .expected = "a\u{e200}cite\u{e202}x y\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee\x89b", .expected = "a\u{e200}cite\u{e202}t1\xee\x89b" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee\x88x", .expected = "a\u{e200}cite\u{e202}t1\xee\x88x" },
+        .{ .input = "a\u{e200}cite", .expected = "a\u{e200}cite" },
+        .{ .input = "a\u{e200}cite\u{e202}", .expected = "a\u{e200}cite\u{e202}" },
+        .{ .input = "a\u{e200}cite\u{e202}turn0", .expected = "a\u{e200}cite\u{e202}turn0" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee", .expected = "a\u{e200}cite\u{e202}t1\xee" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee\x88", .expected = "a\u{e200}cite\u{e202}t1\xee\x88" },
+    };
+    for (cases) |case| try expectFiltered(case.input, case.expected);
+    const ids: [max_held - lead.len - close.len]u8 = @splat('x');
+    try expectFiltered("a" ++ lead ++ ids ++ close ++ "b", "ab");
+    const too_long = "a" ++ lead ++ ids ++ "x" ++ close ++ "b";
+    try expectFiltered(too_long, too_long);
+
+    // Supporting check: the state table's rows agree with the stream's behavior above. Rows with
+    // an idle state holding bytes, or a lead at the hold bound, are table-only: the stream never
+    // reaches them, since an idle filter holds nothing and a lead is shorter than the hold bound.
+    const Row = struct { from: State, byte: u8, held: usize, next: State, step: Step };
+    const rows = [_]Row{
+        // Idle: a byte that starts no marker passes; the marker's first byte starts one.
+        .{ .from = .idle, .byte = 'a', .held = 0, .next = .idle, .step = .pass },
+        .{ .from = .idle, .byte = lead[0], .held = 0, .next = .lead, .step = .keep },
+        .{ .from = .idle, .byte = 'a', .held = max_held, .next = .idle, .step = .pass },
+        // Lead: each byte must match the lead in order; its last byte moves to the id.
+        .{ .from = .lead, .byte = lead[1], .held = 1, .next = .lead, .step = .keep },
+        .{ .from = .lead, .byte = lead[9], .held = 9, .next = .id_start, .step = .keep },
+        .{ .from = .lead, .byte = 'x', .held = 3, .next = .idle, .step = .reject },
+        .{ .from = .lead, .byte = lead[1], .held = max_held, .next = .idle, .step = .reject },
+        // Id start: one id byte is required.
+        .{ .from = .id_start, .byte = 'x', .held = 10, .next = .id, .step = .keep },
+        .{ .from = .id_start, .byte = '-', .held = 10, .next = .id, .step = .keep },
+        .{ .from = .id_start, .byte = ' ', .held = 10, .next = .idle, .step = .reject },
+        // Id: more id bytes stay; the separator starts the next id; anything else rejects.
+        .{ .from = .id, .byte = '_', .held = 11, .next = .id, .step = .keep },
+        .{ .from = .id, .byte = separator[0], .held = 12, .next = .mark_1, .step = .keep },
+        .{ .from = .id, .byte = ' ', .held = 12, .next = .idle, .step = .reject },
+        .{ .from = .id, .byte = 'x', .held = max_held, .next = .idle, .step = .reject },
+        // Mark 1 and mark 2: the separator's bytes, then the closer or another separator.
+        .{ .from = .mark_1, .byte = separator[1], .held = 13, .next = .mark_2, .step = .keep },
+        .{ .from = .mark_1, .byte = 'x', .held = 13, .next = .idle, .step = .reject },
+        .{ .from = .mark_2, .byte = separator[2], .held = 14, .next = .id_start, .step = .keep },
+        .{ .from = .mark_2, .byte = close[2], .held = 14, .next = .idle, .step = .drop },
+        .{ .from = .mark_2, .byte = 'x', .held = 14, .next = .idle, .step = .reject },
+    };
+    // Every state and every step is the subject of at least one row.
+    for (std.enums.values(State)) |state| {
+        var seen = false;
+        for (rows) |row| seen = seen or row.from == state;
+        try std.testing.expect(seen);
+    }
+    for (std.enums.values(Step)) |step| {
+        var seen = false;
+        for (rows) |row| seen = seen or row.step == step;
+        try std.testing.expect(seen);
+    }
+    for (rows) |row| {
+        const moved = row.from.move(row.byte, row.held);
+        try std.testing.expectEqual(row.next, moved.next);
+        try std.testing.expectEqual(row.step, moved.step);
     }
 }
