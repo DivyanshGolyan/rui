@@ -1376,6 +1376,9 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
+        fn seconds(raw: *anyopaque) u64 {
+            return @intCast(@max(std.Io.Clock.real.now(owner(raw).init.io).toSeconds(), 0));
+        }
         fn connections(raw: *anyopaque) ?@import("app_settings.zig").ConnectionsSnapshot {
             const self_ = owner(raw);
             return switch (client.hostStatus(self_.init.io, self_.options.store)) {
@@ -1384,7 +1387,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             };
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue, .connections = Callbacks.connections };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue, .connections = Callbacks.connections, .seconds = Callbacks.seconds };
 }
 
 fn destroy(self: *Self) void {
