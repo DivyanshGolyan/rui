@@ -360,6 +360,15 @@ test "a Session moves to another account of its wire format, records the change,
             const after = try storage.inspectSessionForTesting(session.slice());
             try std.testing.expectEqualStrings("work", after.provider.?.slice());
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE field='provider' AND revision=?1", .{moved.accepted.revision}));
+            // The Activity row names the connection the revision switched to, and no other field's row names one.
+            var changes: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
+            changes.session = session;
+            const activity = try store_core.activityPageForTesting(&storage, changes);
+            try std.testing.expectEqual(@as(usize, 1), activity.count);
+            const row = activity.items[0].value.session_changed;
+            try std.testing.expectEqual(protocol.SessionField.provider, row.field);
+            try std.testing.expectEqual(moved.accepted.revision, row.revision);
+            try std.testing.expectEqualStrings("work", row.provider.?.slice());
 
             var other: wire_request.ConfigureCommand = .{};
             try other.key.set("switch-to-codex");

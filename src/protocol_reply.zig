@@ -4216,13 +4216,13 @@ test "a hosted call's action names nothing under none and serves as many targets
     }
 }
 
-test "session change activity carries refusal text only for a refused later revision" {
+test "session change activity carries refusal text only for a refused later revision and a connection only for a provider change" {
     for (std.enums.values(protocol.SessionField)) |field| {
         for ([_]u64{ 1, 2 }) |revision| {
-            for ([_]bool{ false, true }) |has_text| {
+            for ([_]bool{ false, true }) |has_text| for ([_]bool{ false, true }) |has_provider| {
                 var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 2 } };
                 try facts.work.workspace.set("/w");
-                facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .session_changed = .{ .revision = revision, .field = field } } };
+                facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .session_changed = .{ .revision = revision, .field = field, .provider = if (has_provider) @import("connection.zig").Name.parse("work") else null } } };
                 if (has_text) {
                     facts.items[0].value.session_changed.provider_text = .{};
                     try facts.items[0].value.session_changed.provider_text.?.set("unsupported_value: high \"effort\" is not supported");
@@ -4230,7 +4230,7 @@ test "session change activity carries refusal text only for a refused later revi
                 var buffer: [activity_reply.max_page_bytes]u8 = undefined;
                 var writer = std.Io.Writer.fixed(&buffer);
                 try activity_reply.writePage(&writer, &facts);
-                if (revision > 1 and (field == .reasoning_effort_refused) == has_text) {
+                if (revision > 1 and (field == .reasoning_effort_refused) == has_text and (field == .provider) == has_provider) {
                     const page = try ActivityPage.parse(writer.buffered(), .{});
                     try std.testing.expectEqualDeep(facts.items[0].value.session_changed, page.facts.items[0].value.session_changed);
                 } else {
