@@ -503,3 +503,12 @@ test "PRW-30 gh helper deadline covers a running child and a child that closes i
         try dir.dir.deleteFile(io, "ready");
     }
 }
+
+test "PRW-33 response cleanup releases only owned storage" {
+    const a = std.testing.allocator;
+    // A 304 or empty 200 duplicates a zero-length body: no storage, dangling pointer.
+    var empty: Response = .{ .status = 304, .body = try a.dupe(u8, ""), .etag = try a.dupe(u8, "\"v1\"") };
+    empty.deinit(a);
+    var owned: Response = .{ .status = 200, .body = try a.dupe(u8, "{}"), .link = try a.dupe(u8, "next") };
+    owned.deinit(a);
+}

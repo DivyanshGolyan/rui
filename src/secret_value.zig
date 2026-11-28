@@ -49,6 +49,9 @@ test "key validation checks every byte against visible ASCII" {
 /// Zeroes `bytes`, then returns them to `allocator` through rawFree:
 /// Allocator.free would write debug poison over the wipe first.
 pub fn wipeAndFree(allocator: std.mem.Allocator, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+    // A zero-length slice owns no storage (alloc and dupe return a dangling
+    // pointer), and Allocator.free skips it for the same reason.
+    if (bytes.len == 0) return;
     std.crypto.secureZero(u8, bytes);
     allocator.rawFree(bytes, alignment, ret);
 }
@@ -98,4 +101,13 @@ test "wiping arenas erase full backing blocks before release" {
     arena.deinit();
     try std.testing.expect(observer.frees > 0);
     try std.testing.expect(observer.all_zero);
+}
+
+test "wipeAndFree releases only storage that was allocated" {
+    const a = std.testing.allocator;
+    // dupe of an empty slice allocates nothing; its pointer is dangling.
+    const empty = try a.dupe(u8, "");
+    wipeAndFree(a, empty, .fromByteUnits(@alignOf(u8)), @returnAddress());
+    const owned = try a.dupe(u8, "x");
+    wipeAndFree(a, owned, .fromByteUnits(@alignOf(u8)), @returnAddress());
 }
