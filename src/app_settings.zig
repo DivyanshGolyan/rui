@@ -352,8 +352,8 @@ fn readConnections(self: *Self) void {
 }
 
 /// Applies one refresh event: the core says whether to ask the owner for a newer reading.
-fn refreshStep(self: *Self, refresh: connections_refresh.Event) void {
-    const next = connections_refresh.step(self.refresh_state, refresh);
+fn refreshStep(self: *Self, step_event: connections_refresh.Event) void {
+    const next = connections_refresh.step(self.refresh_state, step_event);
     self.refresh_state = next.state;
     if (!next.ask) return;
     const backend = self.backend orelse return;
