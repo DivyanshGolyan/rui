@@ -49,6 +49,9 @@ test "key validation checks every byte against visible ASCII" {
 /// Zeroes `bytes`, then returns them to `allocator` through rawFree:
 /// Allocator.free would write debug poison over the wipe first.
 pub fn wipeAndFree(allocator: std.mem.Allocator, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+    // A zero-length slice owns no storage (alloc and dupe return a dangling
+    // pointer), and Allocator.free skips it for the same reason.
+    if (bytes.len == 0) return;
     std.crypto.secureZero(u8, bytes);
     allocator.rawFree(bytes, alignment, ret);
 }

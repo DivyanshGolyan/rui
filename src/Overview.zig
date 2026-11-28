@@ -1187,11 +1187,13 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         .on_press = .{ .userdata = self, .pressed = appClick },
         .on_pointer = .{ .userdata = self, .moved = appPointer },
     });
-    self.app_settings_line.selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings);
-    self.app_settings_line.memory = self.state.memory;
-    self.app_settings_line.run = self.state.upgrade.run;
-    self.app_settings_line.available = self.state.upgrade.available;
-    self.app_settings_line.caps = self.caps;
+    self.app_settings_line.present(.{
+        .selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings),
+        .memory = self.state.memory,
+        .run = self.state.upgrade.run,
+        .available = self.state.upgrade.available,
+        .caps = self.caps,
+    });
     self.app_screen.input = if (part == .whole) self.bottomWidget() else self.settingsWidget();
     self.app_header.caps = self.caps;
     self.app_new_session.caps = self.caps;
@@ -1266,7 +1268,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_screen = .{ .content = &self.app_sessions, .input = self.bottomWidget(), .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
     self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick, .on_pointer = .{ .userdata = self, .moved = appPointer } };
-    self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
+    self.app_settings_line = .{ .props = .{ .caps = self.caps }, .userdata = self, .on_click = appClick };
     self.app_sessions.present(.{ .caps = self.caps, .on_press = .{ .userdata = self, .pressed = appClick }, .on_pointer = .{ .userdata = self, .moved = appPointer } });
     self.app_sessions.on_presence = .{ .userdata = self, .changed = appPresence };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });

@@ -519,11 +519,12 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
                 .finish_click, .finish_copy => {},
                 else => return,
             }
-            if (held.purpose == .copy and transition.effect == .finish_copy) held.head = try self.spotAt(ctx.alloc, at) orelse held.head;
+            if (held.purpose == .quote and
+                (!was_dragging or (value.button != .left and value.button != .none) or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width)) return;
+            if (transition.effect == .finish_copy) held.head = try self.spotAt(ctx.alloc, at) orelse held.head;
             const anchor = self.resolved(held.anchor) orelse return;
             const head = self.resolved(held.head) orelse return;
             if (held.purpose == .quote) {
-                if (!was_dragging or (value.button != .left and value.button != .none) or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return;
                 const quote = handler.quote orelse return;
                 const result = try selecting.copyBody(ctx.alloc, self.window, .of(anchor, head));
                 switch (result) {
@@ -1358,7 +1359,12 @@ test "SUI-111 FeedView drag excludes message chrome from highlight and clipboard
     };
 }
 
-test "FeedView quote gesture latches decoded Alt and never copies or submits" {
+test "SUI-198 FeedView quote gesture latches press intent and preserves authored text" {
+    try quoteIntentWitness();
+    try wrappedQuoteWitness();
+}
+
+fn quoteIntentWitness() !void {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
@@ -1399,7 +1405,7 @@ test "FeedView quote gesture latches decoded Alt and never copies or submits" {
     try std.testing.expectEqual(@as(usize, 2), fixture.inserted);
 }
 
-test "FeedView quote gesture cancels stale content reflow leave and outside release" {
+test "SUI-199 FeedView quote gesture discards invalid releases without side effects" {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
@@ -1457,7 +1463,7 @@ test "FeedView quote gesture cancels stale content reflow leave and outside rele
     }
 }
 
-test "FeedView quote gesture keeps emoji combining CJK and long wrapped body text" {
+fn wrappedQuoteWitness() !void {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
