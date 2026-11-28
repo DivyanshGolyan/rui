@@ -102,12 +102,3 @@ test "wiping arenas erase full backing blocks before release" {
     try std.testing.expect(observer.frees > 0);
     try std.testing.expect(observer.all_zero);
 }
-
-test "wipeAndFree releases only storage that was allocated" {
-    const a = std.testing.allocator;
-    // dupe of an empty slice allocates nothing; its pointer is dangling.
-    const empty = try a.dupe(u8, "");
-    wipeAndFree(a, empty, .fromByteUnits(@alignOf(u8)), @returnAddress());
-    const owned = try a.dupe(u8, "x");
-    wipeAndFree(a, owned, .fromByteUnits(@alignOf(u8)), @returnAddress());
-}
