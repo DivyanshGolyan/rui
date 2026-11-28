@@ -46,25 +46,23 @@ pub const Ledger = struct {
     }
 };
 
-test "an answer is judged by its class against every epoch relation of every slot" {
+test "SUI-200 an answer is judged once by its class: stale reads drop, mutations settle, commits apply, over every slot, epoch relation and wrap" {
     const epochs = [_]u64{ 0, 1, 2, std.math.maxInt(u64) - 1, std.math.maxInt(u64) };
-    for (std.enums.values(Slot)) |slot| for (epochs) |current| for (epochs) |stamped| for (std.enums.values(Class)) |class| {
-        var ledger: Ledger = .{};
-        ledger.epochs[@backingInt(slot)] = current;
-        const expected: Verdict = if (stamped == current or class == .committed)
-            .apply
-        else switch (class) {
-            .read => .drop,
-            .mutation => .settle_stale,
-            .committed => unreachable,
-        };
-        try std.testing.expectEqual(expected, ledger.admit(.{ .slot = slot, .epoch = stamped }, class));
-    };
-}
-
-test "superseding a slot makes its earlier tickets stale, wraps, and leaves other slots alone" {
-    var ledger: Ledger = .{};
     for (std.enums.values(Slot)) |slot| {
+        for (epochs) |current| for (epochs) |stamped| for (std.enums.values(Class)) |class| {
+            var ledger: Ledger = .{};
+            ledger.epochs[@backingInt(slot)] = current;
+            const expected: Verdict = if (stamped == current or class == .committed)
+                .apply
+            else switch (class) {
+                .read => .drop,
+                .mutation => .settle_stale,
+                .committed => unreachable,
+            };
+            try std.testing.expectEqual(expected, ledger.admit(.{ .slot = slot, .epoch = stamped }, class));
+        };
+
+        var ledger: Ledger = .{};
         const first = ledger.issue(slot);
         try std.testing.expectEqual(Verdict.apply, ledger.admit(first, .read));
         ledger.supersede(slot);
