@@ -1,4 +1,5 @@
 const std = @import("std");
+const failure_report = @import("../../failure_report.zig");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -393,6 +394,69 @@ fn instructionSkillAndHostedText() !void {
     try std.testing.expect(!storage.isFenced());
 }
 
+/// A failed Turn's text is the provider's words, saved inline as its report: found by the code or the message, with the cut mark
+/// the one-line rendering shows, and a Turn with no report has no text.
+fn failureReportText() !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-report-config");
+    var long: [300]u8 = undefined;
+    @memset(&long, 'y');
+    @memcpy(long[0..9], "longstart");
+    // Code only, message only, both, a message cut at its bound, and none.
+    const reports = [_]failure_report.Report{
+        report("codeonlyword", ""),
+        report("", "messageonlyword"),
+        report("bothcode", "bothmessage"),
+        report("", &long),
+        failure_report.Report.empty,
+    };
+    for (reports, 0..) |failure, index| {
+        const key = try std.fmt.allocPrint(arena, "search-report-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, key, key, session.slice(), "work");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = failure } }, .ordinary, .{});
+    }
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.turn_ended) };
+    const cases = [_]struct { query: []const u8, hits: usize }{
+        .{ .query = "CODEONLYWORD", .hits = 1 },
+        .{ .query = "messageonlyword", .hits = 1 },
+        .{ .query = "bothcode: bothmessage", .hits = 1 },
+        .{ .query = "longstart", .hits = 1 },
+        // The cut mark is part of the rendering, so a search can find where a part was cut.
+        .{ .query = "yy…", .hits = 1 },
+        // The outcome code is not the provider's words.
+        .{ .query = "provider_http_400", .hits = 0 },
+    };
+    for (cases) |case| {
+        try request.query.set(case.query);
+        try storage.searchActivity(&request, result);
+        try std.testing.expectEqual(case.hits, result.count);
+        if (case.hits != 0) {
+            try std.testing.expectEqual(activity_kind_turn_ended, result.items[0].kind);
+            try std.testing.expectEqual(@as(usize, 1), result.items[0].count);
+        }
+    }
+}
+
+const activity_kind_turn_ended = @import("../../activity_facts.zig").Item.Kind.turn_ended;
+
+fn report(code: []const u8, message: []const u8) failure_report.Report {
+    var read: failure_report.Report = .{};
+    for ([_]*failure_report.Part{ &read.code, &read.message }, [_][]const u8{ code, message }) |part, bytes| {
+        _ = part.append(bytes);
+        part.finish();
+    }
+    return read;
+}
+
 test "INS-8 searchActivity matches only documented public text with bounded snippets, budget and continuation" {
     // Kinds, newest-first paging, window edges and ASCII case folding.
     try windowEdgesKindsAndPaging();
@@ -400,6 +464,8 @@ test "INS-8 searchActivity matches only documented public text with bounded snip
     try textPartsAreSearchedEachAlone();
     // Instruction text, skill text and a hosted search's targets and pattern, and the filters that exclude them.
     try instructionSkillAndHostedText();
+    // A failed Turn's provider words, saved inline as its report.
+    try failureReportText();
     // The budget: an empty page keeps a usable cursor, and an entry that exactly exhausts it has none.
     try budgetEmptyPageKeepsUsableCursor();
     try exactBudgetEntryHasNoContinuation();

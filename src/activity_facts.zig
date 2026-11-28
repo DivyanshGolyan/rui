@@ -42,6 +42,8 @@ pub const Item = struct {
         call: struct { name: activity_read.ProposalFieldReference, arguments: activity_read.ProposalFieldReference },
         /// A hosted call's text is its served targets, then its pattern, joined by newlines.
         hosted: HostedBody,
+        /// A failed Turn's text is the provider's words as one line, `Report.joined`; they are saved inline, not as content.
+        report: *const failure_report.Report,
     };
 
     /// The exact strings of a hosted call in reading order: the field a reader names is an index into `refs()`.
@@ -63,7 +65,7 @@ pub const Item = struct {
             .skill => |skill| .{ .value = .{ .text = skill.content } },
             .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
             .tool_result => |result| .{ .value = result.content },
-            .turn_ended => |ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else .none,
+            .turn_ended => |*ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else if (!ended.report.isEmpty()) .{ .report = &ended.report } else .none,
             .hosted_call => |hosted| blk: {
                 // A search that saved nothing to open (a Store older than its facts) has no text, like any row without one.
                 const text = hosted.action.body();

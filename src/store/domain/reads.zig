@@ -994,6 +994,8 @@ const SearchScratch = struct {
     cursor: content_parts.Cursor = undefined,
     item: activity_facts.Item = undefined,
     workspace: Bounded(workspace_path.max_bytes) = undefined,
+    /// A failure report's one line, which the matcher reads like a content window.
+    report_line: [outcome_code.max_report_bytes]u8 = undefined,
 };
 
 pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySearch, out: *activity_facts.Search) !void {
@@ -1046,6 +1048,13 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
                 },
                 .hosted => |text| {
                     try searchFields(a, scratch, text.refs(), &budget);
+                    collectHits(scratch, null);
+                },
+                .report => |report| {
+                    const line = report.joined(&scratch.report_line);
+                    const searched = line[0..@min(line.len, budget)];
+                    scratch.matcher.feed(searched);
+                    budget -= searched.len;
                     collectHits(scratch, null);
                 },
                 .value => if (located) |content| switch (content.value) {
