@@ -166,7 +166,7 @@ test "the Palette maps description matches through normalization and clipping wi
     }
 }
 
-test "SUI-184 Palette keeps readable descriptions beside full names" {
+test "SUI-192 Palette keeps readable descriptions beside full names" {
     const entries = [_]skill_suggestions.Entry{
         .{ .name = "interface-craft", .description = "Interface design" },
         .{ .name = "help", .description = "Craft help" },
