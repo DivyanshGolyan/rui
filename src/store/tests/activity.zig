@@ -1,7 +1,6 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const conversation_read = @import("../../conversation_read.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const content_domain = @import("../domain/content.zig");
@@ -88,54 +87,29 @@ test "a page's rows share their rounds, so a full page takes as many as one row"
                 call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
             }
             try settleCallsForTesting(&storage, &tmp, binding, "rounds-output", &calls);
-            var conversation: conversation_read.ConversationPage = .{};
-            try conversation.session.set(session.slice());
             var activity: protocol.ActivityPage = .{};
             try activity.session.set(session.slice());
-            const full = try pageRounds(&storage, &conversation, &activity);
-            try std.testing.expectEqual(@as(usize, 16), full.conversation);
-            try std.testing.expectEqual(@as(usize, 16), full.activity);
-            conversation = .{ .session = conversation.session, .end = full.end, .before_position = full.results, .before_ordinal = 2 };
+            const full = try pageRounds(&storage, &activity);
+            try std.testing.expectEqual(@as(usize, 16), full.count);
             activity.end = try store_testing.queryU64(&storage, "SELECT min(session_position) FROM model_output_item WHERE item_kind=3", .{});
-            const small = try pageRounds(&storage, &conversation, &activity);
-            try std.testing.expectEqual(@as(usize, 2), small.conversation);
-            try std.testing.expect(small.activity < 16);
+            const small = try pageRounds(&storage, &activity);
+            try std.testing.expect(small.count < 16);
             try std.testing.expectEqual(small.rounds, full.rounds);
         }
     }.run);
 }
 
-const PageRounds = struct { rounds: [2]u32, conversation: usize, activity: usize, results: u64, end: u64 };
+const PageRounds = struct { rounds: u32, count: usize };
 
-fn pageRounds(storage: *Store, conversation: *const conversation_read.ConversationPage, activity: *const protocol.ActivityPage) !PageRounds {
-    var result: PageRounds = undefined;
-    var public_page: reads_domain.PublicConversationPage = undefined;
+fn pageRounds(storage: *Store, activity: *const protocol.ActivityPage) !PageRounds {
     var activity_page: protocol.ActivityFacts = undefined;
-    {
-        const entry = try store_core.enter(storage, .none);
-        defer entry.release();
-        var a: reads_domain.ReadAccess = .open(&entry);
-        defer a.deinit();
-        const before = storage.testing_content_work.rounds;
-        const row_reads = try std.testing.allocator.create([reads_domain.PublicConversationPage.capacity]reads_domain.PublicRowRead);
-        defer std.testing.allocator.destroy(row_reads);
-        try reads_domain.publicConversationPage(&a, conversation, &public_page, row_reads);
-        result.rounds[0] = storage.testing_content_work.rounds - before;
-    }
-    {
-        const entry = try store_core.enter(storage, .none);
-        defer entry.release();
-        var a: reads_domain.ReadAccess = .open(&entry);
-        defer a.deinit();
-        const before = storage.testing_content_work.rounds;
-        try reads_domain.activityPage(&a, activity, &activity_page);
-        result.rounds[1] = storage.testing_content_work.rounds - before;
-    }
-    result.conversation = public_page.count;
-    result.activity = activity_page.count;
-    result.results = public_page.items[0].position;
-    result.end = public_page.end;
-    return result;
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var a: reads_domain.ReadAccess = .open(&entry);
+    defer a.deinit();
+    const before = storage.testing_content_work.rounds;
+    try reads_domain.activityPage(&a, activity, &activity_page);
+    return .{ .rounds = storage.testing_content_work.rounds - before, .count = activity_page.count };
 }
 
 test "an activity page reports the queued Messages at its end, until applied or stopped" {
@@ -361,7 +335,7 @@ test "queued input is pending from the newer of its admission and the latest out
                         try submitTestMessage(&storage, &tmp, "stepped-queue-input", "stepped-queue-input", session.slice(), "queued");
                         var diagnostic: [512]u8 = undefined;
                         const quota: @import("../../transport_policy.zig").Quota = .{ .refusal = .quota, .resets_at = 1792940000 };
-                        try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = "" } }, .ordinary, .{});
+                        try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = quota.failureCode(), .diagnostic = quota.format(&diagnostic), .request_id = .{}, .report = .empty } }, .ordinary, .{});
                         try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=200 WHERE command_key='stepped-queue-input';UPDATE turn SET outcome_at=100", .{});
                     },
                     .after_the_outcome => {
@@ -424,18 +398,19 @@ test "completed tool labels trust admission while model replay authenticates pay
             try settleTwoActionsForTesting(&storage, &tmp, binding, "replay-calls");
             var stop = try completeSessionStop("replay-stop", session.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            var request: conversation_read.ConversationPage = .{};
+            var request: protocol.ActivityPage = .{ .kinds = .initMany(&.{ .user, .assistant, .tool_result, .hosted_call }) };
             try request.session.set(session.slice());
-            const before = try store_core.publicConversationPageForTesting(&storage, request);
+            const before = try store_core.activityPageForTesting(&storage, request);
             try store_testing.zeroContent(&storage, "SELECT name_content_id FROM model_tool_call");
-            const after = try store_core.publicConversationPageForTesting(&storage, request);
+            const after = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(before.count, after.count);
             var results: usize = 0;
             for (before.items[0..before.count], after.items[0..after.count]) |original, observed| {
-                if (original.presentation) |presentation| {
+                if (original.value == .tool_result) {
                     results += 1;
-                    try std.testing.expectEqualStrings(presentation.line.?.words.slice(), observed.presentation.?.line.?.words.slice());
-                    try std.testing.expectEqual(presentation.code, observed.presentation.?.code);
+                    const presentation = original.value.tool_result.presentation;
+                    try std.testing.expectEqualStrings(presentation.line.?.words.slice(), observed.value.tool_result.presentation.line.?.words.slice());
+                    try std.testing.expectEqual(presentation.code, observed.value.tool_result.presentation.code);
                 }
             }
             try std.testing.expectEqual(@as(usize, 2), results);
@@ -643,25 +618,27 @@ test "a web search call shows as its line, in the conversation and the activity,
                 .{ "Open ziglang.org/x", .failed },
                 .{ "Search “zig 0.17 \"notes\"”", .succeeded },
             };
-            var request: conversation_read.ConversationPage = .{};
+            var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initMany(&.{ .user, .assistant, .tool_result, .hosted_call }) };
             try request.session.set(session.slice());
-            const page = try store_core.publicConversationPageForTesting(&storage, request);
+            const page = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 5), page.count);
-            try std.testing.expect(page.items[0].kind == .assistant);
+            try std.testing.expect(page.items[0].value == .assistant);
             for (page.items[1..4], expected, 0..) |item, want, index| {
-                try std.testing.expect(item.kind == .hosted_call);
+                try std.testing.expect(item.value == .hosted_call);
                 try std.testing.expectEqual(@as(u64, 0), item.ordinal);
                 try std.testing.expectEqual(page.items[0].position - 1 - index, item.position);
-                try std.testing.expectEqualStrings(want[0], item.presentation.?.line.?.words.slice());
-                try std.testing.expectEqual(want[1], item.presentation.?.code);
-                try std.testing.expectEqual(item.position, item.presentation.?.publication_position.?);
+                const presentation = item.value.hosted_call.presentation;
+                try std.testing.expectEqualStrings(want[0], presentation.line.?.words.slice());
+                try std.testing.expectEqual(want[1], presentation.code);
+                try std.testing.expectEqual(item.position, presentation.publication_position.?);
             }
-            try std.testing.expect(page.items[4].kind == .user);
+            try std.testing.expect(page.items[4].value == .user);
             request.end = page.end;
-            request.before_position = page.items[2].position;
-            const older = try store_core.publicConversationPageForTesting(&storage, request);
+            request.position = page.items[2].position;
+            request.ordinal = page.items[2].ordinal;
+            const older = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 2), older.count);
-            try std.testing.expectEqualStrings(expected[2][0], older.items[0].presentation.?.line.?.words.slice());
+            try std.testing.expectEqualStrings(expected[2][0], older.items[0].value.hosted_call.presentation.line.?.words.slice());
             try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = page.items[1].position, .ordinal = 0 }));
 
             // The facts each search saved, newest first: its action, every target in provider order, how many, and the pattern.
@@ -871,7 +848,7 @@ test "the step to format 96 reads a search saved as a sentence as a search with 
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT hosted_action FROM model_output_item WHERE item_kind=5", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item WHERE (hosted_action IS NOT NULL)<>(item_kind=5)", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM hosted_target", .{}));
-            var request: conversation_read.ConversationPage = .{};
+            var request: protocol.ActivityPage = .{};
             try request.session.set("d8mv7p");
             const page = try store_core.activityPageForTesting(&storage, .{ .session = request.session, .direction = .backward });
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item WHERE item_kind=5 AND hosted_action=0", .{}));

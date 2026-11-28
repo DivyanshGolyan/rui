@@ -22,7 +22,7 @@ The CLI uses shallow resource-first commands with one canonical spelling per ope
 
 | Resource | Operations |
 | --- | --- |
-| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-conversation`, `list-parts`, `read-part`, human `resume` |
+| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-content`, `list-parts`, `read-part`, human `resume` |
 | `request` | `inspect`, `wait`, `recover`, `read-result`, `list` |
 | `action` | `inspect`, `allow`, `deny`, `background`, `stop`, `publish`, `list-parts`, `read-part`, explicit saved-content reads |
 | `host` | `start`, `stop`, `status`, `serve` |
@@ -141,7 +141,7 @@ Each row also has four required decimal strings: `state_change_at`, `subtree_sta
 A partial approval decision and automatic tool completion do not advance it.
 An automatic compaction before the first input projection uses the saved admission time until the input is projected.
 `subtree_state_change_at` is the maximum of that clock for the Session and its eligible creator descendants.
-The counts exclude the Session itself. `descendant_needs_you_count` counts descendants whose shared work state is approval or Bash with a pending approval.
+The counts exclude the Session itself. `descendant_needs_you_count` counts descendants that ask for a decision: a shared work state of approval or Bash with a pending approval, or any state with `actions.decide` served.
 The requested Workspace and archive filters apply at each creator link. An excluded Session cuts that link, while a pin does not.
 Page boundaries do not limit the descendants included in a row.
 The MySQL Store connection sets its recursive-query limit to one more than the number of valid Session IDs, including after reconnect.

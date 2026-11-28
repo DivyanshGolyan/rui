@@ -1446,6 +1446,26 @@ pub fn settleTestActionParts(storage: *Store, tmp: *std.testing.TmpDir, binding:
     try std.testing.expectEqual(@import("domain/action.zig").ActionSettlement.Outcome.effect, reply);
 }
 
+/// The Conversation rows (what the person and model said, and each Tool Result) newest first, read through Activity:
+/// `end` fixes the page's last position, and `before_position` and `before_ordinal` continue below a row a page ended on.
+pub const ConversationRows = struct {
+    session: Bounded(session_id.max_reference_bytes) = .{},
+    end: u64 = 0,
+    before_position: u64 = 0,
+    before_ordinal: u64 = 0,
+};
+
+pub fn conversationRows(storage: *Store, request: ConversationRows) !@import("../activity_facts.zig").Page {
+    return store_core.activityPageForTesting(storage, .{
+        .session = request.session,
+        .direction = .backward,
+        .kinds = .initMany(&.{ .user, .assistant, .tool_result, .hosted_call }),
+        .end = if (request.end == 0) null else request.end,
+        .position = request.before_position,
+        .ordinal = if (request.before_position == 0) null else request.before_ordinal,
+    });
+}
+
 pub fn testingPublicProjection(
     storage: *Store,
     tmp: *std.testing.TmpDir,
@@ -1453,8 +1473,8 @@ pub fn testingPublicProjection(
 ) !protocol.ConversationContent {
     const session = try configureTestSession(storage, "projection-config");
     try answerTestTurn(storage, tmp, session.slice(), "projection", parts);
-    const page = try store_core.publicConversationPageForTesting(storage, .{ .session = session });
-    try std.testing.expect(page.items[0].kind == .assistant);
+    const page = try store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.assistant) });
+    try std.testing.expect(page.items[0].value == .assistant);
     return .{ .session = session, .position = page.items[0].position };
 }
 

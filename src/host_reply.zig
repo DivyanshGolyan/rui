@@ -258,6 +258,8 @@ pub const HostInfo = struct {
     custody_occupied: u64,
     paused: bool,
     connections: []const @import("provider_route.zig").Entry,
+    /// What each served connection last reported, in `connections` order; empty when the Host keeps no readings.
+    usage: []const ?protocol.UsageReading = &.{},
     doublewrite: ?[]const u8,
     /// SHA-256 of the frozen settings frame a detached Host started with; null for a foreground Host.
     settings_digest: ?@import("host_settings_handoff.zig").Digest,
@@ -273,7 +275,8 @@ pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     try response.append(shape.connections_head);
     for (info.connections, 0..) |*entry, index| {
         if (index != 0) try response.append(",");
-        try response.appendShape(shape.connection_entry, .{ entry.name.slice(), entry.label.slice(), entry.route });
+        const reading: ?protocol.UsageReadingJson = if (index < info.usage.len) if (info.usage[index]) |value| .{ .value = value } else null else null;
+        try response.appendShape(shape.connection_entry, .{ entry.name.slice(), entry.label.slice(), entry.route, reading });
     }
     try response.append(shape.connections_tail);
 }
@@ -501,6 +504,14 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     with_connections.connections = &full;
     try host_info.render(renderHostInfo, .{with_connections});
     try std.testing.expect(host_info.len <= protocol.max_host_info_response_bytes);
+    // Every connection also reports two windows at their largest values.
+    const widest: protocol.UsageWindow = .{ .used_percent = protocol.max_usage_percent * 2, .minutes = max, .reset_at = max };
+    const worst_reading: ?protocol.UsageReading = .{ .observed_at = max, .primary = widest, .secondary = widest };
+    const worst_readings: [provider_route.max_served]?protocol.UsageReading = @splat(worst_reading);
+    with_connections.usage = &worst_readings;
+    host_info.len = 0;
+    try host_info.render(renderHostInfo, .{with_connections});
+    try std.testing.expect(host_info.len <= protocol.max_host_info_response_bytes);
 
     const observations = protocol.command_observation_reply;
     const message: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{
@@ -582,7 +593,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .origin = .{ .peer = peer } } },
         .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max, .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
-        .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes } } },
+        .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes }, .provider = @import("connection.zig").Name.parse(&@as([16]u8, @splat('a'))) } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
         .{ .instruction = .{ .turn = max, .revision = max, .content = text } },
         .{ .skill = .{ .admission = max, .turn = max, .ordinal = max, .name = .{ .bytes = @splat(1), .len = @import("skill_reference.zig").max_name_bytes }, .content = text } },

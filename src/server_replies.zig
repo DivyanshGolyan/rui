@@ -7,6 +7,8 @@ const os = @import("os");
 const socket_os = os.socket;
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const connection = @import("connection.zig");
+const provider_route = @import("provider_route.zig");
 const command_spec = @import("command_spec.zig");
 const core_tools = @import("core_tools.zig");
 const failed_responses = @import("failed_responses.zig");
@@ -17,6 +19,7 @@ const output_retention = @import("output_retention.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
 const server_mcp_relist = @import("server_mcp_relist.zig");
 const ModelLists = @import("ModelLists.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 const server_host = @import("server_host.zig");
 const execution_owner = @import("execution_owner.zig");
 const server_reply = @import("server_reply.zig");
@@ -70,6 +73,7 @@ pub const Shared = struct {
     probes: *Probes,
     retention: *output_retention.Queue,
     model_lists: *ModelLists,
+    usage: *ConnectionUsage,
     scratch_used: *const std.atomic.Value(u64),
     environments: ?*SessionEnvironments,
 };
@@ -89,10 +93,17 @@ pub const Facts = struct {
 /// The Host's answers. `init` copies the shared pointers and the start-time facts once. `execution` answers the
 /// Execution facts of a report, the capacity of Host info and the MCP lists a request asks for; `lists` holds the
 /// model lists the execution thread publishes.
+/// The latest reading of each served connection, in served order; a connection nothing was read from has none.
+fn readingsOf(usage: *ConnectionUsage, entries: []const provider_route.Entry, out: *[connection.max_served]?protocol.UsageReading) []const ?protocol.UsageReading {
+    for (entries, 0..) |entry, index| out[index] = usage.get(entry.name);
+    return out[0..entries.len];
+}
+
 pub const Replies = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     lists: *ModelLists,
+    usage: *ConnectionUsage,
     lease: *const platform.StoreLease,
     store: *store_module.Store,
     lifecycle: *Lifecycle,
@@ -120,6 +131,7 @@ pub const Replies = struct {
             .io = shared.io,
             .allocator = shared.allocator,
             .lists = shared.model_lists,
+            .usage = shared.usage,
             .lease = shared.lease,
             .store = shared.store,
             .lifecycle = shared.lifecycle,
@@ -172,7 +184,6 @@ pub const Replies = struct {
             .read_action_call_id => |*command| Replies.deliverActionContent(self, reply, command, true),
             .inspect_session => |*request_value| try Replies.replyInspectSession(self, reply, request_value, number),
             .list_sessions => |*request_value| try Replies.replyListSessions(self, reply, request_value, number),
-            .conversation_content => |*command| try Replies.prepareConversationContent(self, reply, command),
             .activity_page => |*command| try Replies.replyActivityPage(self, reply, command),
             .activity_search => |*command| try Replies.replyActivitySearch(self, reply, command),
             .public_parts => |*command| try Replies.replyPublicParts(self, reply, command, number),
@@ -340,6 +351,9 @@ pub const Replies = struct {
 
     noinline fn replyHostInfo(self: *Replies, fd: *Reply) !void {
         if (!self.lifecycle.launchAllowed()) return refuse(fd, 503, .host_unavailable, "dispatch_fenced");
+        const entries = self.served.items();
+        var readings: [connection.max_served]?protocol.UsageReading = undefined;
+        const usage = readingsOf(self.usage, entries, &readings);
         try replyJson(fd, 200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
             .store = self.lease.paths.store_identity.slice(),
             .instance = self.instance,
@@ -349,7 +363,8 @@ pub const Replies = struct {
             .started_at = self.started_at,
             .custody_occupied = self.execution.facts().custody_occupied,
             .paused = self.lifecycle.turnsHeld(),
-            .connections = self.served.items(),
+            .connections = entries,
+            .usage = usage,
             .doublewrite = self.store.admissionDiagnostic().doublewrite,
             .settings_digest = self.settings_digest,
         }});
@@ -599,22 +614,6 @@ pub const Replies = struct {
         try replyJson(fd, 200, protocol.tools_status_reply.maxBytes(host_settings.max_mcp_servers), host_reply.renderToolsStatus, .{ self.instance, rows[0..count] });
     }
 
-    fn deliverConversationContent(self: *Replies, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
-        var reply: Reply = undefined;
-        reply.init(self.io, self.allocator, null);
-        defer reply.deinit();
-        try Replies.prepareConversationContent(self, &reply, &command);
-        sendReply(self.io, fd, &reply) catch |err| self.fenceIfStoreFailed("public content", err);
-    }
-
-    noinline fn prepareConversationContent(self: *Replies, fd: *Reply, command: *const protocol.ConversationContent) !void {
-        const location = self.store.openPublicConversationContent(command) catch |err| switch (err) {
-            error.ContentNotFound, error.RangeOutOfBounds, error.ContentIsParts => return refuse(fd, 409, .conversation_unavailable, @errorName(err)),
-            else => return Replies.refuseRead(self, fd, "conversation content", err),
-        };
-        return Replies.deliverPublicContent(self, fd, location, command.start, command.stream);
-    }
-
     fn deliverPublicContent(self: *Replies, fd: *Reply, location: store_module.ContentLocation, start: u64, stream: bool) !void {
         _ = fd.start(.{ .content = .{ .location = location, .start = start, .stream = stream, .public = true } }, .{}) catch |err| {
             self.lifecycle.fenceDispatch("public content", err);
@@ -755,6 +754,21 @@ fn overlayConfiguration(base: *wire_request.Configuration, override: *const wire
     if (override.preferences) |preferences| base.preferences = preferences;
 }
 
+test "CM-67 host info reads each served connection's usage by its name, in served order" {
+    var usage: ConnectionUsage = .init(std.testing.io);
+    const week: @import("provider.zig").AllowanceWindow = .{ .used = .{ .value = 7 }, .minutes = .{ .value = 10080 } };
+    const work = connection.Name.parse("work").?;
+    usage.record(.{ .binding = std.mem.zeroes(@FieldType(@import("provider.zig").AllowanceObservation, "binding")), .provider = work, .status = 200, .observed_at = 9, .primary = week, .secondary = .{} });
+    var served: provider_route.Served = .{};
+    try served.put(.{ .name = connection.Name.parse("codex").?, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .codec = .@"openai-responses/3", .web_search = true });
+    try served.put(.{ .name = work, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_device, .codec = .@"openai-responses/2", .web_search = true });
+    var out: [connection.max_served]?protocol.UsageReading = undefined;
+    const readings = readingsOf(&usage, served.items(), &out);
+    try std.testing.expectEqual(@as(usize, 2), readings.len);
+    try std.testing.expectEqual(@as(?protocol.UsageReading, null), readings[0]);
+    try std.testing.expectEqual(@as(u64, 9), readings[1].?.observed_at);
+}
+
 test "preset overlay retains or replaces the whole preferences object" {
     var base: wire_request.Configuration = .{ .preferences = .{} };
     base.preferences.?.reasoning_effort.state = .value;
@@ -777,6 +791,7 @@ pub const testing_parts = if (builtin.is_test) struct {
             .probes = host.probes,
             .retention = host.retention,
             .model_lists = &host.model_lists,
+            .usage = &host.usage,
             .scratch_used = &host.scratch_used,
             .environments = host.environments,
         };
@@ -840,7 +855,16 @@ fn replyJsonGrowing(fd: *Reply, status: u16, max_bytes: usize, comptime render: 
     _ = try fd.start(try Answer.json(server_reply.allocatorOf(fd), status, max_bytes, .growing, render, args), .{});
 }
 
-test "Conversation stream native delivery reads each byte once and closes on failed handoff" {
+fn deliverActivityContentForTesting(replies: *Replies, fd: std.posix.fd_t, request: @FieldType(wire_request.Request, "activity_content")) !void {
+    var command = request;
+    var reply: Reply = undefined;
+    reply.init(replies.io, replies.allocator, null);
+    defer reply.deinit();
+    try Replies.replyActivityContent(replies, &reply, &command);
+    sendReply(replies.io, fd, &reply) catch |err| replies.fenceIfStoreFailed("public content", err);
+}
+
+test "INS-5 activity content stream native delivery reads each byte once and closes on failed handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -851,11 +875,11 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
     const expected = @as([8189]u8, @splat('x')) ++ @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail";
-    var command = try store_module.testingPublicProjection(&storage, &tmp, &.{
+    const projected = try store_module.testingPublicProjection(&storage, &tmp, &.{
         .{ .encoded = &@as([8189]u8, @splat('x')), .decoded = &@as([8189]u8, @splat('x')) },
         .{ .encoded = @as([257 * "\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @bitCast(@as([257]["\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".len]u8, @splat("\\u00e9\\u4e2d\\ud83d\\ude42\\n\\\\\\\"\\/".*)))) ++ "tail", .decoded = @as([257 * "é中🙂\n\\\"/".len]u8, @bitCast(@as([257]["é中🙂\n\\\"/".len]u8, @splat("é中🙂\n\\\"/".*)))) ++ "tail" },
     });
-    command.stream = true;
+    const command: @FieldType(wire_request.Request, "activity_content") = .{ .session = projected.session, .position = projected.position };
     var host = Fixture{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     var host_parts: TestParts = undefined;
     host_parts.attach(&host, undefined);
@@ -922,7 +946,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
             thread.join();
         }
         var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
-        try Replies.deliverConversationContent(&replies, sockets[0], command);
+        try deliverActivityContentForTesting(&replies, sockets[0], command);
     }
     try std.testing.expectEqual(@as(u64, expected.len), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
@@ -932,7 +956,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     try std.testing.expectEqualStrings(expected, peer.received[body_start..peer.used]);
     storage.testing_content_work = .{};
     var replies = Replies.init(testing_parts.sharedOf(&host), testing_parts.factsOf(&host), &execution_state);
-    try Replies.deliverConversationContent(&replies, -1, command);
+    try deliverActivityContentForTesting(&replies, -1, command);
     try std.testing.expectEqual(@as(u64, protocol.content_window_bytes), storage.testing_content_work.read.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), storage.testing_content_work.closes.load(.monotonic));
     try std.testing.expect(!storage.isFenced());

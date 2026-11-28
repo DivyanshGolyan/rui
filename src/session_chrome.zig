@@ -3,6 +3,7 @@ const session_line = @import("session_line.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const TerminalText = @import("TerminalText.zig");
 const marks = @import("marks.zig");
+const say_text = @import("testing/say_text.zig");
 
 pub const Say = marks.Say;
 
@@ -164,34 +165,11 @@ test "notice text flattens result lines and escapes terminal controls before Foo
 
 pub const stop_key = session_line.stop_hint;
 
-pub const Send = struct { needs: ?[]const u8 = null, progress: ?[]const u8 = null };
+pub const Send = struct { needs: ?Say = null, progress: ?Say = null };
 
-pub fn send(status: ?[]const u8, in_flight: bool) Send {
-    const text = status orelse return .{};
-    return if (text.len == 0) .{} else if (in_flight) .{ .progress = text } else .{ .needs = text };
-}
-
-test "opening and decision progress share the footer while unresolved decisions retain their state" {
-    const same = struct {
-        fn text(want: ?[]const u8, got: ?[]const u8) !void {
-            try std.testing.expectEqual(want == null, got == null);
-            if (want) |expected| try std.testing.expectEqualStrings(expected, got.?);
-        }
-        fn check(want: Send, got: Send) !void {
-            try text(want.needs, got.needs);
-            try text(want.progress, got.progress);
-        }
-    }.check;
-    try same(.{ .progress = "Opening…" }, send("Opening…", true));
-    try same(.{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false));
-    try same(.{}, send("", false));
-    for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
-    try std.testing.expectEqualStrings("Unknown command /x", bar(.{ .progress = "Opening…", .notice = Say.attention("Unknown command /x"), .width = 80 }).notice.?.words);
-    const opening = bar(.{ .progress = "Opening…", .width = 80 });
-    try std.testing.expectEqualStrings("", opening.left);
-    try std.testing.expectEqualStrings("Opening…", opening.notice.?.words);
-    try std.testing.expectEqual(Tone.quiet, opening.tone);
-    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = Say.quiet("Copied 3 lines"), .progress = "Opening…", .width = 80 }).left);
+pub fn send(status: ?Say, in_flight: bool) Send {
+    const said = status orelse return .{};
+    return if (said.words.len == 0) .{} else if (in_flight) .{ .progress = said } else .{ .needs = said };
 }
 
 pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.ellipsis.len + @import("model_capability.zig").max_model_bytes + session_line.max_effort_bytes + session_line.Context.footer_bytes + 4 * " · ".len + @import("session_archive.zig").State.longest_badge;
@@ -321,15 +299,16 @@ pub const Tone = enum { quiet, attention };
 
 pub const Bar = struct {
     notice: ?Say = null,
-    left: []const u8 = "",
+    /// What the status row says; its sign, if any, is drawn with its words.
+    left: Say = .quiet(""),
     tone: Tone = .quiet,
     stop: bool = false,
     stop_column: u16 = 0,
 };
 
 pub const Facts = struct {
-    needs: ?[]const u8 = null,
-    progress: ?[]const u8 = null,
+    needs: ?Say = null,
+    progress: ?Say = null,
     notice: ?Say = null,
     stoppable: bool = false,
     width: u16,
@@ -339,14 +318,14 @@ pub const Facts = struct {
 const gap = 2;
 
 pub fn bar(facts: Facts) Bar {
-    var result: Bar = .{ .notice = facts.notice orelse if (facts.progress) |progress| Say.quiet(progress) else null };
+    var result: Bar = .{ .notice = facts.notice orelse facts.progress };
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
     }
     if (!facts.stoppable) return result;
     const stop_cells = session_line.cells(stop_key, facts.method);
-    const left_cells = session_line.cells(result.left, facts.method);
+    const left_cells = session_line.cells(result.left.sign(), facts.method) + session_line.cells(result.left.words, facts.method);
     const used = if (left_cells == 0) 0 else left_cells + gap;
     if (used + stop_cells + 1 > facts.width) return result;
     result.stop = true;
@@ -421,8 +400,8 @@ test "a notice goes after about five seconds or at the next key; the newest repl
 
     try std.testing.expectEqual(Tone.quiet, bar(.{ .notice = Say.quiet("Copied 12 lines"), .width = 80 }).tone);
     try std.testing.expectEqualStrings("Unknown command /x", bar(.{ .notice = Say.attention("Unknown command /x"), .width = 80 }).notice.?.words);
-    const unconfirmed = bar(.{ .needs = "! Not confirmed · ctrl+r retries", .notice = Say.quiet("Copied 12 lines"), .width = 80 });
-    try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", unconfirmed.left);
+    const unconfirmed = bar(.{ .needs = .attention("Not confirmed · ctrl+r retries"), .notice = Say.quiet("Copied 12 lines"), .width = 80 });
+    try say_text.expect("! Not confirmed · ctrl+r retries", unconfirmed.left);
     try std.testing.expectEqual(Tone.attention, unconfirmed.tone);
 }
 
@@ -430,16 +409,16 @@ test "the stop key shows on the right while work can be stopped, and drops first
     const alone = bar(.{ .stoppable = true, .width = 80 });
     try std.testing.expect(alone.stop);
     try std.testing.expectEqual(@as(u16, 80 - 11 - 1), alone.stop_column);
-    try std.testing.expectEqualStrings("", alone.left);
+    try std.testing.expectEqualStrings("", alone.left.words);
 
-    const needs = "! Not confirmed · ctrl+r retries";
+    const needs: Say = .attention("Not confirmed · ctrl+r retries");
     const both = bar(.{ .needs = needs, .stoppable = true, .width = 80 });
     try std.testing.expect(both.stop);
-    try std.testing.expectEqualStrings(needs, both.left);
+    try say_text.expect(needs, both.left);
     try std.testing.expect(bar(.{ .needs = needs, .stoppable = true, .width = 46 }).stop);
     const narrow = bar(.{ .needs = needs, .stoppable = true, .width = 45 });
     try std.testing.expect(!narrow.stop);
-    try std.testing.expectEqualStrings(needs, narrow.left);
+    try say_text.expect(needs, narrow.left);
     try std.testing.expect(!bar(.{ .stoppable = true, .width = 11 }).stop);
     try std.testing.expect(bar(.{ .stoppable = true, .width = 12 }).stop);
     try std.testing.expect(!bar(.{ .stoppable = false, .width = 80 }).stop);
@@ -671,38 +650,38 @@ test "footer facts domain fits the context threshold at both widths and never ca
 
 test "SUI-14 send state and transient notice occupy their intended footer slots" {
     const Case = struct {
-        status: ?[]const u8,
+        status: ?Say,
         in_flight: bool,
-        needs: ?[]const u8,
-        progress: ?[]const u8,
+        needs: ?Say,
+        progress: ?Say,
     };
     const cases = [_]Case{
         .{ .status = null, .in_flight = false, .needs = null, .progress = null },
         .{ .status = null, .in_flight = true, .needs = null, .progress = null },
-        .{ .status = "", .in_flight = false, .needs = null, .progress = null },
-        .{ .status = "", .in_flight = true, .needs = null, .progress = null },
-        .{ .status = "Opening…", .in_flight = true, .needs = null, .progress = "Opening…" },
-        .{ .status = "Sending…", .in_flight = true, .needs = null, .progress = "Sending…" },
-        .{ .status = "! Decision not confirmed · ctrl+r retries original", .in_flight = false, .needs = "! Decision not confirmed · ctrl+r retries original", .progress = null },
-        .{ .status = "Rejected · /discard", .in_flight = false, .needs = "Rejected · /discard", .progress = null },
+        .{ .status = .quiet(""), .in_flight = false, .needs = null, .progress = null },
+        .{ .status = .quiet(""), .in_flight = true, .needs = null, .progress = null },
+        .{ .status = .quiet("Opening…"), .in_flight = true, .needs = null, .progress = .quiet("Opening…") },
+        .{ .status = .quiet("Sending…"), .in_flight = true, .needs = null, .progress = .quiet("Sending…") },
+        .{ .status = .attention("Decision not confirmed · ctrl+r retries original"), .in_flight = false, .needs = .attention("Decision not confirmed · ctrl+r retries original"), .progress = null },
+        .{ .status = .quiet("Rejected · /discard"), .in_flight = false, .needs = .quiet("Rejected · /discard"), .progress = null },
     };
-    const checkText = struct {
-        fn check(expected: ?[]const u8, actual: ?[]const u8) !void {
+    const checkSay = struct {
+        fn check(expected: ?Say, actual: ?Say) !void {
             try std.testing.expectEqual(expected == null, actual == null);
-            if (expected) |text| try std.testing.expectEqualStrings(text, actual.?);
+            if (expected) |said| try say_text.expect(said, actual.?);
         }
     }.check;
     for (cases) |case| {
         const result = send(case.status, case.in_flight);
-        try checkText(case.needs, result.needs);
-        try checkText(case.progress, result.progress);
+        try checkSay(case.needs, result.needs);
+        try checkSay(case.progress, result.progress);
         for ([_]u16{ 46, 140 }) |width| {
             const ordinary = bar(.{ .needs = result.needs, .progress = result.progress, .width = width });
-            try std.testing.expectEqualStrings(case.needs orelse "", ordinary.left);
-            try checkText(case.progress, if (ordinary.notice) |said| said.words else null);
+            try say_text.expect(case.needs orelse Say.quiet(""), ordinary.left);
+            try checkSay(case.progress, ordinary.notice);
             try std.testing.expectEqual(if (case.needs == null) Tone.quiet else Tone.attention, ordinary.tone);
             const with_notice = bar(.{ .needs = result.needs, .progress = result.progress, .notice = Say.attention("Usage: /new"), .width = width });
-            try std.testing.expectEqualStrings(case.needs orelse "", with_notice.left);
+            try say_text.expect(case.needs orelse Say.quiet(""), with_notice.left);
             try std.testing.expectEqualStrings("Usage: /new", with_notice.notice.?.words);
         }
     }

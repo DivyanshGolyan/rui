@@ -7,6 +7,7 @@
 const std = @import("std");
 const activity_read = @import("activity_read.zig");
 const bounded = @import("bounded.zig");
+const connection = @import("connection.zig");
 const content_value = @import("content_value.zig");
 const facts = @import("activity_facts.zig");
 const tool_presentation = @import("tool_presentation.zig");
@@ -32,7 +33,7 @@ fn leaf(comptime Owner: type, comptime name: []const u8, comptime T: type) Leaf 
         .bool => .flag,
         .@"enum" => .tag,
         .array => |array| if (array.child == activity_read.ProposalFieldReference) .body else bad(Owner, name, T),
-        .@"struct" => if (bounded.isBounded(Base))
+        .@"struct" => if (bounded.isBounded(Base) or Base == connection.Name)
             .quoted
         else if (Base == tool_presentation.ToolPresentation)
             .presentation

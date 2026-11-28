@@ -112,7 +112,7 @@ const Ctx = struct {
                 const target = cx.named(item.file, method) orelse return null;
                 if (!cx.isFunction(target)) return null;
                 if (cx.selfField(id, base)) |field| {
-                    if (!item.takes_self or !argsAre(tree, call.ast.params, sig.names[1..])) return null;
+                    if (!item.takesSelf() or !argsAre(tree, call.ast.params, sig.names[1..])) return null;
                     return .{ .forwarder = .{ .target = target, .fields = try cx.arena.dupe(ItemId, &.{field}) } };
                 }
                 if (Names.resolvePath(cx.items, cx.sources, item.parent orelse return null, item.file, base) == null) return null;
@@ -159,7 +159,7 @@ const Ctx = struct {
     /// The field of self that `node` names as `self.f`, when `id` takes self.
     fn selfField(cx: Ctx, id: ItemId, node: Ast.Node.Index) ?ItemId {
         const item = cx.items.get(id);
-        if (!item.takes_self) return null;
+        if (!item.takesSelf()) return null;
         const tree = &cx.sources.files[@backingInt(item.file)].ast;
         if (tree.nodeTag(node) != .field_access) return null;
         const base, const name = tree.nodeData(node).node_and_token;

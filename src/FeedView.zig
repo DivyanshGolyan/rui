@@ -780,7 +780,7 @@ test "FeedView multiple collapsed targets and lowest visible peer use keyed byte
     try prepared.prepare();
     const first_mark = prepared.collapsed(0, prepared.text().len).last.?;
     const first = std.mem.indexOf(u8, prepared.text(), "┄").?;
-    const a: View.Collapsed = .{ .source = .activity, .position = 11, .ordinal = 0, .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .row = true };
+    const a: View.Collapsed = .{ .position = 11, .ordinal = 0, .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .row = true };
     var b = a;
     b.position = 12;
     try window.append(&.{.{ .key = .{ .position = 20 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{ .{ .offset = first, .target = a }, .{ .offset = first_mark, .target = b } } }});
@@ -999,7 +999,7 @@ test "FeedView terminal aggregate blocks Ctrl-O and clicks without opening earli
     try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\n");
     try prepared.prepare();
     const aggregate = prepared.collapsed(0, prepared.length).last.?;
-    const target: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
+    const target: View.Collapsed = .{ .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
     try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = target }} }});
     var anchor: Feed = .{};
     var view: Self = .{ .window = window, .anchor = &anchor };
@@ -1146,7 +1146,7 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
     var prepared: viewport.Sized(1024, true) = .{};
     try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\nplain " ++ Text.link_open ++ Text.session_link ++ "k7m2qx" ++ Text.link_end ++ "Review this plan" ++ Text.link_close ++ " end\n");
     try prepared.prepare();
-    const message: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
+    const message: View.Collapsed = .{ .position = 44, .ordinal = 3, .content = .{ .text = .{ .length = 10, .digest = @splat(2) } }, .row = false };
     try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = message }} }});
     var anchor: Feed = .{};
     var actions: Actions = .{};
@@ -1462,7 +1462,7 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         const original = try std.testing.allocator.dupe(u8, window.document.text());
         defer std.testing.allocator.free(original);
         var anchor: Feed = .{};
-        var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .text = "Not confirmed · ctrl+r retries original" } };
+        var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .say = .quiet("Not confirmed · ctrl+r retries original") } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try testFrame(&view, arena.allocator(), width, 6);
@@ -1737,7 +1737,7 @@ fn decoratedRows() !void {
     });
     var anchor: Feed = .{};
     var actions: Actions = .{};
-    var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .text = "Not confirmed" }, .handler = .{ .userdata = &actions, .on_external = Actions.open, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
+    var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .say = .quiet("Not confirmed") }, .handler = .{ .userdata = &actions, .on_external = Actions.open, .on_notice = Actions.notice, .on_scroll = Actions.scroll } };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };

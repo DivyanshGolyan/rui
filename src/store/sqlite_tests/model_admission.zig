@@ -3,7 +3,6 @@ const tests = @import("../tests.zig");
 const std = @import("std");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
-const conversation_read = @import("../../conversation_read.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
 const output_decode = @import("../../output_decode.zig");
@@ -455,13 +454,14 @@ test "continued accepted output allows model revisions and keeps public text rea
         .request_id = .{},
     };
     try storage.settleModelSuccess(binding, &output, .{});
-    var public_request = conversation_read.ConversationPage{};
-    try public_request.session.set(created_session_0.slice());
-    const public_page = try store_core.publicConversationPageForTesting(&storage, public_request);
+    const rows: protocol.ActivityPage.Kinds = .initMany(&.{ .user, .assistant, .tool_result, .hosted_call });
+    var public_session: protocol.ActivityPage = .{};
+    try public_session.session.set(created_session_0.slice());
+    const public_page = try store_core.activityPageForTesting(&storage, .{ .session = public_session.session, .direction = .backward, .kinds = rows });
     try std.testing.expectEqual(@as(usize, 2), public_page.count);
-    try std.testing.expect(public_page.items[0].kind == .assistant);
+    try std.testing.expect(public_page.items[0].value == .assistant);
     var public_reader: ContentReader = undefined;
-    public_reader.open(try storage.openPublicConversationContent(&.{ .session = public_request.session, .position = public_page.items[0].position }));
+    public_reader.open(try storage.openPublicConversationContent(&.{ .session = public_session.session, .position = public_page.items[0].position }));
     {
         const backing = try sqlite.prepare(storage.sqliteDatabase(), "SELECT text.private,bag.private FROM model_output_item item " ++
             "JOIN content text ON text.content_id=item.message_content_id " ++
@@ -477,13 +477,16 @@ test "continued accepted output allows model revisions and keeps public text rea
     try std.testing.expectEqual(@as(usize, 6), try public_reader.read(0, &decoded));
     try std.testing.expectEqualStrings("answer", &decoded);
     public_reader.close();
-    const before_answer = try store_core.publicConversationPageForTesting(&storage, .{
-        .session = public_request.session,
+    const before_answer = try store_core.activityPageForTesting(&storage, .{
+        .session = public_session.session,
         .end = public_page.end,
-        .before_position = public_page.items[0].position,
+        .position = public_page.items[0].position,
+        .ordinal = public_page.items[0].ordinal,
+        .direction = .backward,
+        .kinds = rows,
     });
     try std.testing.expectEqual(@as(usize, 1), before_answer.count);
-    try std.testing.expect(before_answer.items[0].kind == .user);
+    try std.testing.expect(before_answer.items[0].value == .user);
     try std.testing.expect(!storage.isFenced());
     try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));

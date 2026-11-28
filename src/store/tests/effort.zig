@@ -237,7 +237,7 @@ test "effort refusal requires an emitted Operation update across configure cycle
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 const emitted = !legacy_codec and (scenario == .genuine or scenario == .skipped_choice);
                 try std.testing.expectEqual(@intFromBool(emitted), try store_testing.queryU64(&storage, "SELECT effort_update FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
-                try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+                try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = .ofMessage("unsupported_value: reasoning.effort") } }, .effort_change_refused, .{});
                 try std.testing.expectEqual(@intFromBool(emitted), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND field='reasoning_effort_refused'", .{session.slice()}));
                 const expected = if (emitted) initial else selected;
                 try std.testing.expectEqual(expected, (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
@@ -253,7 +253,7 @@ test "effort refusal requires an emitted Operation update across configure cycle
                     try view.settings(&settings);
                     try std.testing.expectEqual(initial, settings.reasoning_effort);
                     try std.testing.expect(!settings.effort_update);
-                    try storage.settleModelAttemptFailure(retried, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+                    try storage.settleModelAttemptFailure(retried, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = .ofMessage("unsupported_value: reasoning.effort") } }, .effort_change_refused, .{});
                     try std.testing.expect(try storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE refused_operation_id=?1", .{binding.operation_id}));
                 } else try std.testing.expect(try storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
@@ -315,7 +315,7 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 if (before == .after_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
                 try expectEffort(&storage, binding, rejected);
-                try store_testing.settleModelFailureWithTimings(&storage, binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: effort update" } }, .effort_change_refused, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
+                try store_testing.settleModelFailureWithTimings(&storage, binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = .ofMessage("unsupported_value: effort update") } }, .effort_change_refused, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND latency_ms=999 AND first_event_ms=111", .{binding.operation_id}));
                 const refused = try storage.inspectSessionForTesting(session.slice());
                 try std.testing.expectEqual(effort, refused.reasoning_effort);
@@ -497,7 +497,7 @@ test "effort refusal eligibility excludes a source refused by any Operation" {
             try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,999,0,reasoning_effort,1,'failed',1,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window FROM model_operation WHERE operation_id=?1", .{binding.operation_id});
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, binding.operation_id));
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, 999));
-            try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+            try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = .ofMessage("unsupported_value: reasoning.effort") } }, .effort_change_refused, .{});
             try std.testing.expect(!try EffortCarryRead.refusalEligible(&storage, binding.operation_id));
             try std.testing.expect(!try EffortCarryRead.refusalEligible(&storage, 999));
             try change.key.set("eligible-new-choice");

@@ -184,7 +184,7 @@ test "the queued Messages cost the queue, not the history after a page's end" {
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
-test "a saved tool label reads as one line on every publication route, and only invalid UTF-8 fences" {
+test "a saved tool label reads as one line on every route, and only invalid UTF-8 fences" {
     const invalid = [_]struct { sql: []const u8, words: ?[]const u8 }{
         .{ .sql = "' '", .words = "Tool call" },
         .{ .sql = "'Read' || char(10) || 'files'", .words = "Read files" },
@@ -194,7 +194,7 @@ test "a saved tool label reads as one line on every publication route, and only 
         .{ .sql = "CAST(X'80' AS TEXT)", .words = null },
     };
     for (invalid) |description| {
-        for ([_]enum { current, full, live_activity, settled_activity, conversation }{ .current, .full, .live_activity, .settled_activity, .conversation }) |route| {
+        for ([_]enum { current, full, live_activity, settled_activity }{ .current, .full, .live_activity, .settled_activity }) |route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
@@ -210,10 +210,12 @@ test "a saved tool label reads as one line on every publication route, and only 
             const healthy = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(u64, 2), healthy.aggregates.?.call_activity.total);
             try std.testing.expectEqualStrings("Run first command", healthy.aggregates.?.call_activity.entries[0].presentation.line.?.words.slice());
-            if (route == .settled_activity or route == .conversation) {
+            if (route == .settled_activity) {
                 var stop = try completeSessionStop("label-stop", session.slice());
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-                try std.testing.expectEqual(@as(usize, 3), (try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })).count);
+                var rows = request;
+                rows.kinds = .initMany(&.{ .user, .assistant, .tool_result, .hosted_call });
+                try std.testing.expectEqual(@as(usize, 3), (try store_core.activityPageForTesting(&storage, rows)).count);
             }
             var sql: [256]u8 = undefined;
             try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE model_tool_call SET label={s} WHERE call_ordinal=0", .{description.sql}, 0));
@@ -232,7 +234,6 @@ test "a saved tool label reads as one line on every publication route, and only 
                     };
                     break :blk {};
                 } else |err| err,
-                .conversation => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
             };
             if (description.words == null) {
                 try std.testing.expectError(error.CorruptStore, result);

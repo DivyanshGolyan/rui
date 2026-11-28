@@ -7,7 +7,7 @@ The pinned **Settings** row opens the **Rui** panel. It shows defaults for new c
 - **Model**, **Effort**, **Permissions** and **Notifications** edit app settings. Permissions offers **run without asking** and **ask first**.
 - **Sign-in** opens the account dialog. **Version** starts Upgrade.
 - **Memory**, when available, shows Rui and tool memory use. It is read only.
-- **Keys** is the last selectable row. It includes **enter**, **esc**, **⇧enter**, **tab**, **⇧tab**, **ctrl+x**, **↑↓**, **←→**, **ctrl+o**, **ctrl+p**, **ctrl+r**, **/**, **alt+↑↓**, **alt+a** and **ctrl+c**.
+- **Keys** is the second last selectable row, before **Connections**. It includes **enter**, **esc**, **⇧enter**, **tab**, **⇧tab**, **ctrl+x**, **↑↓**, **←→**, **ctrl+o**, **ctrl+p**, **ctrl+r**, **/**, **alt+↑↓**, **alt+a** and **ctrl+c**.
 
 ## How to get to it (user POV)
 
@@ -15,9 +15,9 @@ On Overview press End then Enter, or click **Settings** in the list beside a wid
 
 ## Driving it with verify-rui
 
-Run `$V frames FULLSHA --only settings,settings-field-hover,mouse-settings,keys`.
+Run `$V frames FULLSHA --only settings,settings-field-hover,mouse-settings,keys,settings-connections`.
 
-Frame states: `settings`, `settings-field-hover`, `mouse-settings`, `keys`, `panels-settings`
+Frame states: `settings`, `settings-field-hover`, `mouse-settings`, `keys`, `settings-connections`, `panels-settings`
 
 Check both sizes. Hovering Notifications must leave the selection unchanged. Compare keyboard and mouse entry into Settings. Keys must show aligned pairs at 140 columns and one column at 46, without a title, footer or command list. Model captures belong to [Model choice](./model-choice.md).
 

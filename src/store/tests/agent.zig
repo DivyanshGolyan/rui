@@ -1,5 +1,6 @@
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
+const failure_report = @import("../../failure_report.zig");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
 const tool_defs = @import("../../tools.zig");
@@ -594,7 +595,14 @@ test "child ending Message includes bounded provider report done answer and quie
                 try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
                 try submitTestMessage(&storage, &tmp, "report-task", "report-task", child.slice(), "answer");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                const report: [protocol.max_report_bytes]u8 = @splat('r');
+                var report: failure_report.Report = .{};
+                for ([_]*failure_report.Part{ &report.code, &report.message }) |part| {
+                    part.text.len = failure_report.max_part_bytes;
+                    @memset(part.text.bytes[0..part.text.len], 'r');
+                    part.cut = true;
+                }
+                var joined_report: [protocol.max_report_bytes]u8 = undefined;
+                const report_text = report.joined(&joined_report);
                 if (ending == .done) {
                     try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
                 } else if (ending == .stopped) {
@@ -611,7 +619,7 @@ test "child ending Message includes bounded provider report done answer and quie
                         .failed => "malformed_provider_output",
                         .out_of_quota => "provider_quota",
                         else => "provider_http_400",
-                    }, .request_id = .{}, .report = &report } }, .ordinary, .{});
+                    }, .request_id = .{}, .report = report } }, .ordinary, .{});
                 }
                 try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{}));
                 try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));
@@ -624,7 +632,7 @@ test "child ending Message includes bounded provider report done answer and quie
                         try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{model.turn_id}));
                     } else {
                         var expected: [96 + protocol.max_report_bytes]u8 = undefined;
-                        const text = try std.fmt.bufPrint(&expected, "[Rui: this agent's Turn ended without an answer: {s}.]{s}{s}", .{ @tagName(ending), if (ending == .stopped) "" else "\n", if (ending == .stopped) "" else &report });
+                        const text = try std.fmt.bufPrint(&expected, "[Rui: this agent's Turn ended without an answer: {s}.]{s}{s}", .{ @tagName(ending), if (ending == .stopped) "" else "\n", if (ending == .stopped) "" else report_text });
                         var reader: ContentReader = undefined;
                         reader.open(try storage.openContent(try testingContentReference(&storage, content_id)));
                         defer reader.close();
@@ -664,7 +672,7 @@ test "child ending forward is the single durable owed fact across recovery for e
                     try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
                 } else if (ending == .failed) {
                     const report = "saved failure";
-                    try storage.settleModelAttemptFailure(model, .{ .correlated = .{ .code = "malformed_provider_output", .request_id = .{}, .report = report } }, .ordinary, .{});
+                    try storage.settleModelAttemptFailure(model, .{ .correlated = .{ .code = "malformed_provider_output", .request_id = .{}, .report = .ofMessage(report) } }, .ordinary, .{});
                 } else {
                     var stop = try completeSessionStop("once-stop", if (ending == .quiet) parent.slice() else child.slice());
                     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);

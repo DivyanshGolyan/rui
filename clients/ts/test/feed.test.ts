@@ -79,7 +79,8 @@ function narrowed(entry: FeedEntry): void {
 		case "session_changed": {
 			const field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "reasoning_effort_refused" | "label" | "app_tools" = entry.field;
 			const providerText: string | null = entry.providerText;
-			void [field, providerText];
+			const provider: string | null = entry.provider;
+			void [field, providerText, provider];
 			break;
 		}
 		case "compacted": {
@@ -208,7 +209,7 @@ for (const follow of [false, true]) {
 
 
 test("a refused effort change retains its revision and inline provider text", async () => {
-    const row = { position: "4", ordinal: "0", at: "9", value: { session_changed: { revision: "2", field: "reasoning_effort_refused", provider_text: "unsupported_value: high is not supported" } } };
+    const row = { position: "4", ordinal: "0", at: "9", value: { session_changed: { revision: "2", field: "reasoning_effort_refused", provider_text: "unsupported_value: high is not supported", provider: null } } };
     const link: Link = { exchange: async (path) => {
         assert.equal(path, "/v1/activity-page");
         return Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: [row], more: false, end: "4" }));

@@ -12,9 +12,16 @@ The separate `rui auth login chatgpt` command still opens a browser automaticall
 A code sign-in needs Codex device code authorization turned on in ChatGPT security settings first, or your workspace admin to allow it; keep the code private.
 The [Host guide](host.md#run-in-the-foreground) covers signing in from scripts.
 
+## Connections and usage
+
+Open **Settings › Connections** to see each connection the Host serves, how it is signed in and how much of its limits it has used, as a bar for each window with its percent used (`full` when the limit is reached), the time to reset below it and how old the reading is beside the sign-in.
+Usage is shown for device-code sign-ins and appears after the connection has answered a turn; a browser sign-in shows `no usage for browser sign-ins` until a limit is hit.
+The list is read-only: Esc returns to Settings.
+When a connection has reached a limit, the model list for it says `limit reached on <name>` beside each model and names another connection that serves it, such as `· try home`; switch with the chat's Account row.
+
 ## Keys
 
-Open **Settings › Keys** for the full key list. In the overview, End then Enter opens the pinned Settings row; select the last **Keys** row and press Enter.
+Open **Settings › Keys** for the full key list. In the overview, End then Enter opens the pinned Settings row; select **Keys** (the second last row) and press Enter.
 In a wide conversation, click the pinned Settings row without leaving the chat.
 Esc returns to Settings; another Esc returns to the conversation or overview.
 The footer shows the keys available in the current state. In a chat, a typed `?` is ordinary draft text, not a shortcut; on the overview, printable keys and paste do nothing.

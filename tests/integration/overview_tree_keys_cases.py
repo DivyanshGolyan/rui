@@ -10,6 +10,7 @@ LEFT = b"\x1b[D"
 RIGHT = b"\x1b[C"
 HOME = b"\x1b[H"
 DOWN = b"\x1b[B"
+UP = b"\x1b[A"
 FIRST_ROW = HOME + b"\x1b[1;2B" * 2
 ENCODINGS = ((b"\x1b[1;3D", b"\x1b[1;3C"), (b"\x1bb", b"\x1bf"))
 
@@ -62,7 +63,7 @@ def tree_key_custody():
                             screen.wait(lambda frame: "Notifications" in frame and "Version" in frame,
                                         "Settings owns input")
                             if owner == "Keys":
-                                screen.keys(DOWN * 6 + b"\r")
+                                screen.keys(DOWN * 10 + UP + b"\r")  # Down stops on the last row, Connections; Keys is the one above
                                 screen.wait(lambda frame: "earlier message" in frame and "tool output" in frame,
                                             "Settings Keys panel owns input")
                             if owner != "paste":

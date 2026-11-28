@@ -3,14 +3,17 @@ const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const reads_domain = @import("../domain/reads.zig");
+const skills_domain = @import("../domain/skills.zig");
 const store_testing = @import("../testing.zig");
+const canonicalCwd = store_testing.canonicalCwd;
+const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
 const settleItemsForTesting = store_testing.settleItemsForTesting;
 const submitTestMessage = store_testing.submitTestMessage;
 const testingPublicProjection = store_testing.testingPublicProjection;
 const testingStore = store_testing.testingSqliteStore;
 
-test "searchActivity streams window edges filters kinds and pages newest first" {
+fn windowEdgesKindsAndPaging() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -62,7 +65,7 @@ test "searchActivity streams window edges filters kinds and pages newest first" 
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity budget returns an empty page with a usable next cursor" {
+fn budgetEmptyPageKeepsUsableCursor() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -93,7 +96,7 @@ test "searchActivity budget returns an empty page with a usable next cursor" {
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity never searches private provider extras" {
+fn privateProviderExtrasAreNotSearched() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -119,43 +122,34 @@ test "searchActivity never searches private provider extras" {
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity fences private content substituted into a public message" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const session = try configureTestSession(&storage, "search-corruption");
-    try submitTestMessage(&storage, &tmp, "search-corrupt-message", "search-corrupt-message", session.slice(), "secret");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-corrupt-message')", .{});
-    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
-    var request: protocol.ActivitySearch = .{ .session = session };
-    try request.query.set("secret");
-    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
-    try std.testing.expect(storage.isFenced());
+/// Content the search reads is verified against the Store's own facts even when its text does not match: private content under a
+/// public message and damaged bytes fence the Store instead of being skipped.
+fn corruptContentFences() !void {
+    const Case = struct { config: []const u8, key: []const u8, text: []const u8, query: []const u8, damage: [:0]const u8 };
+    const cases = [_]Case{
+        .{ .config = "search-corruption", .key = "search-corrupt-message", .text = "secret", .query = "secret", .damage = "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-corrupt-message')" },
+        .{ .config = "search-digest", .key = "search-digest-message", .text = "correct", .query = "absent", .damage = "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-digest-message')" },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const session = try configureTestSession(&storage, case.config);
+        try submitTestMessage(&storage, &tmp, case.key, case.key, session.slice(), case.text);
+        try store_testing.sqlite_only.exec(&storage, case.damage, .{});
+        const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+        var request: protocol.ActivitySearch = .{ .session = session };
+        try request.query.set(case.query);
+        try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+        try std.testing.expect(storage.isFenced());
+    }
 }
 
-test "searchActivity verifies canonical content even when its text does not match" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const session = try configureTestSession(&storage, "search-digest");
-    try submitTestMessage(&storage, &tmp, "search-digest-message", "search-digest-message", session.slice(), "correct");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-digest-message')", .{});
-    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
-    var request: protocol.ActivitySearch = .{ .session = session };
-    try request.query.set("absent");
-    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
-    try std.testing.expect(storage.isFenced());
-}
-
-test "searchActivity exhausted exact-budget entry has no continuation" {
+fn exactBudgetEntryHasNoContinuation() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -177,7 +171,7 @@ test "searchActivity exhausted exact-budget entry has no continuation" {
     try std.testing.expect(!storage.isFenced());
 }
 
-test "searchActivity fences missing assistant entries only in its scanned range" {
+fn missingAssistantFencesOnlyInScannedRange() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -201,7 +195,7 @@ test "searchActivity fences missing assistant entries only in its scanned range"
     try std.testing.expect(storage.isFenced());
 }
 
-test "INS-8 searchActivity matches Text parts, names each part and skips Image bytes" {
+fn textPartsAreSearchedEachAlone() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -285,4 +279,133 @@ test "INS-8 searchActivity matches Text parts, names each part and skips Image b
     try std.testing.expectEqualStrings(image_marker ++ " needle", result.items[0].hits[0].snippet.slice());
     try std.testing.expect(result.next == null);
     try std.testing.expect(!storage.isFenced());
+}
+
+fn instructionSkillAndHostedText() !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const catalog = skills_domain.Initial{ .ready = .{
+        .encoded = "{\"entries\":[{\"name\":\"audit\",\"description\":\"Audit a change\",\"path\":\"/skills/audit/SKILL.md\"}]}",
+        .instruction = "Available skills: audit with instrword at /skills/audit/SKILL.md",
+    } };
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var create = try completeConfiguration("search-kinds-config", "", workspace, "model-a");
+    const session = (try storage.configureWithInitialSkills(&create, null, &catalog, .{})).accepted.session;
+    try store_testing.submitTestMessageWithSkills(&storage, &tmp, "search-kinds-input", "search-kinds-input", session.slice(), "use the skill", &.{
+        .{ .name = "audit", .bytes = "Check every change for skillword first." },
+    });
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&storage, &tmp, binding, &.{
+        "{\"type\":\"web_search_call\",\"id\":\"ws1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"queries\":[\"alphatarget\",\"betatarget\"]}}",
+        "{\"type\":\"web_search_call\",\"id\":\"ws2\",\"status\":\"completed\",\"action\":{\"type\":\"find_in_page\",\"url\":\"gammahost.example\",\"pattern\":\"deltapattern\"}}",
+        "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+    }, "done");
+
+    // Each row's position, read from the Activity page that serves it.
+    const page = try arena.create(protocol.ActivityFacts);
+    try storage.activityPage(&.{ .session = session }, page);
+    var instruction: ?u64 = null;
+    var skill: ?u64 = null;
+    var hosted: [2]u64 = undefined;
+    var hosted_count: usize = 0;
+    for (page.items[0..page.count]) |item| switch (item.value) {
+        .instruction => instruction = item.position,
+        .skill => skill = item.position,
+        .hosted_call => {
+            hosted[hosted_count] = item.position;
+            hosted_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), hosted_count);
+    // The page is oldest first: the search settled before the find-in-page.
+    const Case = struct { query: []const u8, kind: protocol.ActivityItem.Kind, position: u64 };
+    const cases = [_]Case{
+        .{ .query = "INSTRWORD", .kind = .instruction, .position = instruction.? },
+        .{ .query = "skillword", .kind = .skill, .position = skill.? },
+        .{ .query = "alphatarget", .kind = .hosted_call, .position = hosted[0] },
+        .{ .query = "BetaTarget", .kind = .hosted_call, .position = hosted[0] },
+        .{ .query = "gammahost", .kind = .hosted_call, .position = hosted[1] },
+        .{ .query = "deltapattern", .kind = .hosted_call, .position = hosted[1] },
+    };
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    for (cases) |case| {
+        try request.query.set(case.query);
+        try storage.searchActivity(&request, result);
+        try std.testing.expectEqual(@as(usize, 1), result.count);
+        const item = &result.items[0];
+        try std.testing.expectEqual(case.kind, item.kind);
+        try std.testing.expectEqual(case.position, item.position);
+        try std.testing.expectEqual(@as(usize, 1), item.count);
+        const hit = &item.hits[0];
+        try std.testing.expectEqual(@as(?u32, null), hit.part);
+        try std.testing.expect(std.ascii.eqlIgnoreCase(case.query, hit.snippet.slice()[hit.offset..][0..hit.length]));
+        try std.testing.expect(result.next == null);
+    }
+
+    // A hosted row's fields are one stream with a newline between them: a space does not span two targets, a newline does, as for a call's name and arguments.
+    try request.query.set("alphatarget betatarget");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try request.query.set("alphatarget\nbetatarget");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqualStrings("alphatarget\nbetatarget", result.items[0].hits[0].snippet.slice());
+    try request.query.set("gammahost.example\ndeltapattern");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+
+    // The budget is charged each field's bytes: two targets, a target and a pattern.
+    request.kinds = .initOne(.hosted_call);
+    try request.query.set("absent");
+    const before = storage.testing_content_work.read.load(.monotonic);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expectEqual(@as(u64, "alphatarget".len + "betatarget".len + "gammahost.example".len + "deltapattern".len), storage.testing_content_work.read.load(.monotonic) - before);
+    request.kinds = .initOne(.instruction);
+    const instruction_before = storage.testing_content_work.read.load(.monotonic);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(u64, catalog.ready.instruction.?.len), storage.testing_content_work.read.load(.monotonic) - instruction_before);
+
+    // A filter without the kind finds none of its text.
+    for (cases) |case| {
+        request.kinds = .initOne(.assistant);
+        try request.query.set(case.query);
+        try storage.searchActivity(&request, result);
+        try std.testing.expectEqual(@as(usize, 0), result.count);
+    }
+    // Only the named kind is found when two words share a filter.
+    request.kinds = .initMany(&.{ .instruction, .skill });
+    try request.query.set("alphatarget");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try request.query.set("skillword");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "INS-8 searchActivity matches only documented public text with bounded snippets, budget and continuation" {
+    // Kinds, newest-first paging, window edges and ASCII case folding.
+    try windowEdgesKindsAndPaging();
+    // Text parts alone, each naming its part, Image bytes never, and the manifest charged to the budget.
+    try textPartsAreSearchedEachAlone();
+    // Instruction text, skill text and a hosted search's targets and pattern, and the filters that exclude them.
+    try instructionSkillAndHostedText();
+    // The budget: an empty page keeps a usable cursor, and an entry that exactly exhausts it has none.
+    try budgetEmptyPageKeepsUsableCursor();
+    try exactBudgetEntryHasNoContinuation();
+    // Private provider material is never searched; private or damaged content under a public entry fences.
+    try privateProviderExtrasAreNotSearched();
+    try corruptContentFences();
+    // Fencing a missing assistant entry only in the range the scan covered.
+    try missingAssistantFencesOnlyInScannedRange();
 }

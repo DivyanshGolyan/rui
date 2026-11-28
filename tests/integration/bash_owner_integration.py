@@ -262,18 +262,12 @@ def main():
         session = second_session
         result_item = next(row for row in conversation_rows(fields["socket"], retention_store, session)
                            if row_kind(row) == "tool_result")
-        content = b""
-        while True:
-            content_request = {"version": host_process.WIRE_VERSION, "kind": "conversation_content",
-                               "store": str(retention_store), "session": session,
-                               "position": result_item["position"], "ordinal": result_item["ordinal"],
-                               "start": str(len(content))}
-            head, body = raw_request(fields["socket"], "/v1/conversation-content",
-                                     json.dumps(content_request, separators=(",", ":")).encode())
-            assert head.startswith(b"HTTP/1.1 200 "), (head, body)
-            if not body:
-                break
-            content += body
+        content_request = {"version": host_process.WIRE_VERSION, "kind": "activity_content",
+                           "store": str(retention_store), "session": session,
+                           "position": result_item["position"], "ordinal": result_item["ordinal"]}
+        head, content = raw_request(fields["socket"], "/v1/activity-content",
+                                    json.dumps(content_request, separators=(",", ":")).encode())
+        assert head.startswith(b"HTTP/1.1 200 "), (head, content)
         assert content == second_result.encode(), (content, second_result)
         after = fixture.wait_for(
             lambda: execution_idle(

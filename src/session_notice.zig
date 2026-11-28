@@ -5,12 +5,14 @@ const Text = @import("TerminalText.zig");
 const protocol = @import("protocol.zig");
 const Say = @import("marks.zig").Say;
 const keymap = @import("keymap.zig");
+const say_text = @import("testing/say_text.zig");
 
 const retry_words = keymap.retry_hint ++ " original";
 
 pub const Held = struct { kind: submission.Kind, state: submission.State, failure: ?Failure = null };
 
-pub const Failure = struct { line: []const u8, key: Key };
+/// A held original that failed: what the line says (the sign is drawn from its tone) and the key that ends it.
+pub const Failure = struct { say: Say, key: Key };
 
 pub const Key = enum { retry, discard, status };
 
@@ -24,8 +26,8 @@ fn keyWords(action: Key) []const u8 {
 }
 
 pub const Presentation = struct {
-    note: ?[]const u8 = null,
-    status: ?[]const u8 = null,
+    note: ?Say = null,
+    status: ?Say = null,
     action: ?Key = null,
     /// `keyWords(action)`, or empty when nothing offers an action.
     action_words: []const u8 = "",
@@ -39,12 +41,12 @@ pub const Presentation = struct {
 
 /// What ends a rejected original's line: the key that discards it.
 pub const rejection_suffix = " · " ++ keyWords(.discard);
-pub const too_large = "! Environment too large; nothing sent · " ++ keyWords(.status);
+pub const too_large: Say = .attention("Environment too large; nothing sent · " ++ keyWords(.status));
 
 /// The refusal of a chat Message whose Session's provider this Host does not serve; the fix is in the Host's settings.
 pub fn writeUnserved(writer: *std.Io.Writer, provider: ?@import("connection.zig").Name) !void {
     const shown = if (provider) |name| if (@import("provider_route.zig").builtInOf(name)) |built_in| built_in.shown() else name.slice() else "This Session's provider";
-    try writer.print("! {s}{s}", .{ shown, unserved_advice });
+    try writer.print("{s}{s}", .{ shown, unserved_advice });
 }
 
 const unserved_advice = " isn't served by this Host. Check rui host settings, then rui host pause and rui host start.";
@@ -52,19 +54,26 @@ pub const unserved_capacity = blk: {
     var longest: usize = "This Session's provider".len;
     for (std.meta.tags(protocol.Provider)) |provider| longest = @max(longest, provider.shown().len);
     longest = @max(longest, @import("connection.zig").max_name_bytes);
-    break :blk "! ".len + longest + unserved_advice.len;
+    break :blk longest + unserved_advice.len;
 };
+
+/// The longest words a held original's line can carry: a rejection quotes the Host's code, and the unserved refusal names the provider.
+pub const max_line_bytes = @max(
+    "Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
+    unserved_capacity + rejection_suffix.len,
+    too_large.words.len,
+);
 
 pub fn presentation(opening: bool, waiting: bool, held: ?Held) Presentation {
     var result: Presentation = .{};
     if (held) |original| {
-        const shown: struct { line: ?[]const u8, action: ?Key } = if (original.failure) |failure|
-            .{ .line = failure.line, .action = failure.key }
+        const shown: struct { line: ?Say, action: ?Key } = if (original.failure) |failure|
+            .{ .line = failure.say, .action = failure.key }
         else switch (original.state) {
-            .not_started => .{ .line = "Not sent · " ++ comptime keyWords(.retry), .action = .retry },
-            .submitting => .{ .line = if (original.kind == .decision) "Sending…" else null, .action = null },
-            .unconfirmed => .{ .line = if (original.kind == .decision) "! Decision not confirmed · " ++ comptime keyWords(.retry) else "Not confirmed · " ++ comptime keyWords(.retry), .action = .retry },
-            .rejected => .{ .line = "Rejected · " ++ comptime keyWords(.discard), .action = .discard },
+            .not_started => .{ .line = .quiet("Not sent · " ++ comptime keyWords(.retry)), .action = .retry },
+            .submitting => .{ .line = if (original.kind == .decision) .quiet("Sending…") else null, .action = null },
+            .unconfirmed => .{ .line = if (original.kind == .decision) .attention("Decision not confirmed · " ++ comptime keyWords(.retry)) else .quiet("Not confirmed · " ++ comptime keyWords(.retry)), .action = .retry },
+            .rejected => .{ .line = .quiet("Rejected · " ++ comptime keyWords(.discard)), .action = .discard },
         };
         if (original.kind == .message) result.note = shown.line else result.status = shown.line;
         result.action = shown.action;
@@ -74,17 +83,17 @@ pub fn presentation(opening: bool, waiting: bool, held: ?Held) Presentation {
             .discard => keyWords(.discard),
             .status => "alt+d details",
         } else "";
-        if (original.failure) |failure| std.debug.assert(std.mem.endsWith(u8, failure.line, keyWords(failure.key)));
+        if (original.failure) |failure| std.debug.assert(std.mem.endsWith(u8, failure.say.words, keyWords(failure.key)));
         result.details = original.state != .submitting;
         result.details_available = true;
         result.repair_details = result.details and original.failure != null and shown.action == .status;
         result.in_flight = original.kind == .decision and original.state == .submitting;
     }
     if (opening) {
-        result.status = "Opening…";
+        result.status = .quiet("Opening…");
         result.in_flight = true;
     } else if (waiting) {
-        result.status = "";
+        result.status = .quiet("");
         result.in_flight = false;
     }
     return result;
@@ -169,7 +178,7 @@ test "a Session link leaves only where Esc would, and never past a waiting Actio
     try std.testing.expectEqualStrings("Links open once the command ends.", follow(null, false, true, false, true).stay);
 }
 
-test "original presentation preserves placement actions repair and opening precedence" {
+test "SUI-14 a held original fixes its slot, action, details and in-flight over every kind and state, and opening or waiting supersedes it" {
     try std.testing.expectEqualDeep(Presentation{}, presentation(false, false, null));
     for ([_]submission.Kind{ .message, .decision }) |kind| {
         for ([_]submission.State{ .not_started, .submitting, .unconfirmed, .rejected }) |state| {
@@ -187,7 +196,7 @@ test "original presentation preserves placement actions repair and opening prece
             };
             const line = if (kind == .message) shown.note else shown.status;
             try std.testing.expectEqual(words == null, line == null);
-            if (words) |expected| try std.testing.expectEqualStrings(expected, line.?);
+            try say_text.expectOptional(words, line);
             try std.testing.expect((if (kind == .message) shown.status else shown.note) == null);
             const action: ?Key = switch (state) {
                 .not_started, .unconfirmed => .retry,
@@ -197,18 +206,18 @@ test "original presentation preserves placement actions repair and opening prece
             try std.testing.expectEqual(action, shown.action);
             try std.testing.expectEqual(action, key(held));
         }
-        const refused: Held = .{ .kind = kind, .state = .not_started, .failure = .{ .line = too_large, .key = .status } };
+        const refused: Held = .{ .kind = kind, .state = .not_started, .failure = .{ .say = too_large, .key = .status } };
         const shown = presentation(false, false, refused);
-        try std.testing.expectEqualStrings(too_large, (if (kind == .message) shown.note else shown.status).?);
+        try say_text.expect(too_large, (if (kind == .message) shown.note else shown.status).?);
         try std.testing.expect(shown.details and shown.details_available and shown.repair_details);
         try std.testing.expectEqual(@as(?Key, .status), shown.action);
         try std.testing.expectEqual(@as(?Key, .status), key(refused));
         const opening = presentation(true, true, refused);
-        try std.testing.expectEqualStrings("Opening…", opening.status.?);
+        try say_text.expect("Opening…", opening.status.?);
         try std.testing.expect(opening.in_flight);
-        if (kind == .message) try std.testing.expectEqualStrings(too_large, opening.note.?);
+        if (kind == .message) try say_text.expect(too_large, opening.note.?);
         const waiting = presentation(false, true, refused);
-        try std.testing.expectEqualStrings("", waiting.status.?);
+        try say_text.expect("", waiting.status.?);
         try std.testing.expect(!waiting.in_flight);
     }
 }
@@ -317,12 +326,7 @@ test "SUI-14 message and decision notices retain their placement during opening 
         .{ .held = .{ .kind = .decision, .state = .unconfirmed }, .note = null, .status = "! Decision not confirmed · ctrl+r retries original", .action = .retry, .details = true, .in_flight = false },
         .{ .held = .{ .kind = .decision, .state = .rejected }, .note = null, .status = "Rejected · /discard", .action = .discard, .details = true, .in_flight = false },
     };
-    const checkText = struct {
-        fn check(expected: ?[]const u8, actual: ?[]const u8) !void {
-            try std.testing.expectEqual(expected == null, actual == null);
-            if (expected) |text| try std.testing.expectEqualStrings(text, actual.?);
-        }
-    }.check;
+    const checkText = say_text.expectOptional;
     for (cases) |case| {
         for ([_]bool{ false, true }) |opening| {
             for ([_]bool{ false, true }) |waiting| {
@@ -332,7 +336,7 @@ test "SUI-14 message and decision notices retain their placement during opening 
                 try std.testing.expectEqual(case.action, shown.action);
                 if (!opening and !waiting) if (case.action) |action| {
                     try std.testing.expectEqualStrings(keyWords(action), shown.action_words);
-                    const line = (shown.note orelse shown.status).?;
+                    const line = (if (shown.note) |note| note else shown.status.?).words;
                     try std.testing.expect(std.mem.endsWith(u8, line, keyWords(action)));
                     try std.testing.expect(std.mem.endsWith(u8, line[0 .. line.len - keyWords(action).len], " · "));
                 } else try std.testing.expectEqualStrings("", shown.action_words);
@@ -486,8 +490,27 @@ test "a refused chat Message names its unserved provider and the settings fix" {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writeUnserved(&writer, @import("connection.zig").Name.parse("openai"));
-    try std.testing.expectEqualStrings("! OpenAI isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
+    try std.testing.expectEqualStrings("OpenAI isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
     writer = std.Io.Writer.fixed(&buffer);
     try writeUnserved(&writer, null);
-    try std.testing.expectEqualStrings("! This Session's provider isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
+    try std.testing.expectEqualStrings("This Session's provider isn't served by this Host. Check rui host settings, then rui host pause and rui host start.", writer.buffered());
+}
+
+test "SUI-172 a held original's line draws the sign from its tone: only a failure and an unconfirmed decision are attention" {
+    for ([_]submission.Kind{ .message, .decision }) |kind| {
+        for ([_]submission.State{ .not_started, .submitting, .unconfirmed, .rejected }) |state| {
+            const shown = presentation(false, false, .{ .kind = kind, .state = state });
+            const line = (if (kind == .message) shown.note else shown.status) orelse continue;
+            try std.testing.expect(!std.mem.startsWith(u8, line.words, "!"));
+            try std.testing.expectEqualStrings(if (kind == .decision and state == .unconfirmed) "! " else "", line.sign());
+        }
+        const refused = presentation(false, false, .{ .kind = kind, .state = .rejected, .failure = .{ .say = too_large, .key = .status } });
+        const line = (if (kind == .message) refused.note else refused.status).?;
+        try std.testing.expect(!std.mem.startsWith(u8, line.words, "!"));
+        try std.testing.expectEqualStrings("! ", line.sign());
+    }
+    var buffer: [unserved_capacity]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeUnserved(&writer, null);
+    try std.testing.expect(!std.mem.startsWith(u8, writer.buffered(), "!"));
 }

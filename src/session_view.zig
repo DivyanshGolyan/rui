@@ -159,17 +159,13 @@ fn peerName(sink: anytype, peer: protocol.NamedPeer, resume_style: []const u8) !
 }
 
 pub const Collapsed = struct {
-    source: enum { activity, conversation },
     position: u64,
     ordinal: u64,
     content: content_value.Value,
     row: bool,
 
     pub fn at(self: Collapsed) value_reads.At {
-        return .{ .source = switch (self.source) {
-            .activity => .activity,
-            .conversation => .conversation,
-        }, .position = self.position, .ordinal = self.ordinal };
+        return .{ .position = self.position, .ordinal = self.ordinal };
     }
 };
 
@@ -1242,7 +1238,7 @@ fn messageWith(reads: client.SessionReads, scratch: std.Io.File, item: protocol.
         .person, .action, .server_event => {},
     }
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
-    const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
+    const block: Collapsed = .{ .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
     const display = try open(reads, scratch, item, value.content);
     var body: UserBody(@TypeOf(sink)) = undefined;
@@ -1382,6 +1378,47 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
         try sink.feed(Style.normal.code(colour));
     }
     try sink.feed("\n");
+}
+
+/// The quiet line for a change of connection. Only that change has a row: its `provider` fact is set for that field alone.
+fn switched(sink: anytype, change: protocol.ActivityItem.SessionChanged, colour: bool) !void {
+    const name = change.provider orelse return;
+    try leader(sink, .sent, marks.marks.get(.sent).unicode, colour);
+    try sink.feed(Style.quiet.code(colour));
+    try sink.feed(" Switched to ");
+    try sink.feed(name.slice());
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed("\n");
+}
+
+test "SUI-187 a change of connection draws one quiet line naming it and no other change draws a row" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+        pub fn excluding(_: *@This(), _: u64) void {}
+    };
+    const work = @import("connection.zig").Name.parse("work").?;
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    for ([_]struct { bool, []const u8 }{
+        .{ false, "→ Switched to work\n" },
+        .{ true, "\x1b[90m→\x1b[39m\x1b[90m Switched to work\x1b[39m\n" },
+    }) |case| {
+        out.end = 0;
+        const item: protocol.ActivityItem = .{ .position = 3, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = .provider, .provider = work } } };
+        try std.testing.expect(!try render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, case[0], "", .{ .viewport = .wcwidth }, .none));
+        try std.testing.expectEqualStrings(case[1], row_text.visible(out.buffered()));
+    }
+    out.end = 0;
+    inline for (comptime std.enums.values(protocol.SessionField)) |field| {
+        if (field == .provider) continue;
+        const item: protocol.ActivityItem = .{ .position = 3, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = field } } };
+        for ([_]bool{ false, true }) |colour| try std.testing.expect(!try render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none));
+    }
+    try std.testing.expectEqual(@as(usize, 0), out.end);
 }
 
 fn workEnded(sink: anytype, ended: protocol.TurnEnding, code: []const u8, provider: ?@import("connection.zig").Name, colour: bool) !void {
@@ -1564,8 +1601,9 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
                 try ending(sink, .{ .mark = .stopped, .words = protocol.TurnEnding.stopped.words().? }, colour);
             }
         },
+        .session_changed => |change| try switched(sink, change, colour),
         // A kind whose role is `detail` draws nothing in the conversation; a kind that gains the conversation role fails to compile here.
-        inline .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction, .skill => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
+        inline .call, .approval_requested, .compacted, .model_call, .instruction, .skill => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
     }
     return false;
 }
