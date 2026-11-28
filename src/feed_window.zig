@@ -5,6 +5,7 @@ const unicode = @import("terminal_unicode");
 const viewport = @import("ConversationViewport.zig");
 const View = @import("session_view.zig");
 const keymap = @import("keymap.zig");
+const Say = @import("marks.zig").Say;
 
 pub const Key = struct {
     position: u64,
@@ -75,7 +76,7 @@ pub const Opened = struct {
 pub const LatestEnding = @import("feed_reads.zig").Ending(Key);
 pub const RetryHit = union(enum) { link: Key, padding };
 pub const message_note_capacity = 64 + 4 * @import("outcome_code.zig").max_bytes;
-pub const MessageNote = struct { key: [36]u8, text: []const u8 };
+pub const MessageNote = struct { key: [36]u8, say: Say };
 pub const Presentation = struct {
     latest_ending: ?LatestEnding = null,
     retry_actionable: bool = false,
@@ -90,7 +91,8 @@ const NoteLine = struct {
         if (!std.mem.eql(u8, &key, &note.key) or window.document.lineEnd(offset) + 1 != entry.offset + entry.length) return false;
         self.document.width_method = window.document.width_method;
         self.document.append("\x1b[90m  ") catch unreachable;
-        self.document.append(note.text) catch unreachable;
+        self.document.append(note.say.sign()) catch unreachable;
+        self.document.append(note.say.words) catch unreachable;
         self.document.append("\x1b[0m\n") catch unreachable;
         self.document.prepare() catch unreachable;
         return true;
@@ -1023,7 +1025,7 @@ test "feed_window target capacity admits whole entries atomically across trim re
     window.* = .{};
     var prepared: viewport.Sized(1024, true) = .{};
     var targets: [16]MessageTarget = undefined;
-    const reference: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .text = .{ .length = 99, .digest = @splat(7) } }, .row = false };
+    const reference: View.Collapsed = .{ .position = 1, .ordinal = 0, .content = .{ .text = .{ .length = 99, .digest = @splat(7) } }, .row = false };
     for (&targets, 0..) |*target, index| {
         target.* = .{ .offset = index * "┄\n".len, .target = reference };
         try prepared.append(View.Mark.summary ++ "┄" ++ View.Mark.reset ++ "\n");

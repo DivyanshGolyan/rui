@@ -113,6 +113,8 @@ test {
     _ = @import("domain/session_obligation.zig");
     _ = @import("rsql.zig");
     _ = @import("column_rules_tests.zig");
+    _ = @import("check_run.zig");
+    _ = @import("gone.zig");
     _ = @import("schema.zig");
     _ = @import("access.zig");
     _ = @import("queue.zig");
@@ -1206,7 +1208,6 @@ pub const EntryPoint = enum {
     observeCommand,
     commandResult,
     inspectSession,
-    publicConversationPage,
     openPublicConversationContent,
     activityPage,
     searchActivity,
@@ -1288,7 +1289,6 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .observeCommand = 3,
     .commandResult = 1,
     .inspectSession = 3,
-    .publicConversationPage = 4,
     .openPublicConversationContent = 2,
     .activityPage = 8,
     .searchActivity = 5,

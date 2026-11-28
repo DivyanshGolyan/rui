@@ -723,7 +723,7 @@ test "a drag over cells drawn before the text changed copies the text they showe
     try std.testing.expectEqualStrings("third", h.copies(&copied));
 }
 
-test "SUI-182 peer hover underlines one complete visible Session link" {
+test "SUI-189 peer hover underlines one complete visible Session link" {
     const link = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end;
     const separated = "See " ++ link ++ "One two" ++ TerminalText.link_close ++ " / " ++ link ++ "Again" ++ TerminalText.link_close ++ "\n";
     const adjacent = "See " ++ link ++ "One two" ++ TerminalText.link_close ++ link ++ "Again" ++ TerminalText.link_close ++ "\n";
@@ -766,7 +766,7 @@ test "SUI-182 peer hover underlines one complete visible Session link" {
     try widePeerHoverWitness();
 }
 
-test "SUI-186 DocumentView continuation hovers and activates its painted row" {
+test "SUI-191 DocumentView continuation hovers and activates its painted row" {
     const h = try Harness.init("first\nsecond\nthird\nfourth\n", .{ .width = 24, .height = 3 });
     defer h.deinit();
     h.document.top = .{};

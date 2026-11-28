@@ -2,7 +2,6 @@ const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
-const conversation_read = @import("../../conversation_read.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const content_domain = @import("../domain/content.zig");
@@ -93,11 +92,11 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     const session = try configureTestSession(&storage, "ordinary-config");
     try submitTestMessage(&storage, &tmp, "ordinary-input", "ordinary-key", session.slice(), "public input");
     _ = (try storage.admitNextModelAttempt(.{})).?;
-    var request = conversation_read.ConversationPage{};
+    var request = store_testing.ConversationRows{};
     request.session = session;
-    const valid = try store_core.publicConversationPageForTesting(&storage, request);
+    const valid = try store_testing.conversationRows(&storage, request);
     try std.testing.expectEqual(@as(usize, 1), valid.count);
-    try std.testing.expect(valid.items[0].kind == .user);
+    try std.testing.expect(valid.items[0].value == .user);
     if (foreign_turn) {
         const foreign_session = try configureTestSession(&storage, "foreign-config");
         try submitTestMessage(&storage, &tmp, "foreign-input", "foreign-key", foreign_session.slice(), "other input");
@@ -120,29 +119,29 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
             reader.close();
             break :blk {};
         } else |err| err
-    else if (store_core.publicConversationPageForTesting(&storage, request)) |_| {} else |err| err;
+    else if (store_testing.conversationRows(&storage, request)) |_| {} else |err| err;
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
+    try std.testing.expectError(error.StoreFenced, store_testing.conversationRows(&storage, request));
     try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
 }
 
-test "public ordinary private bytes and cursor fence" {
+test "INS-4 a private user row fences its bytes and cursor" {
     try testingOrdinaryPublicCorruption(.content, false);
     try testingOrdinaryPublicCorruption(.cursor, false);
 }
 
-test "public ordinary private page fences" {
+test "INS-4 a private user row fences its page" {
     try testingOrdinaryPublicCorruption(.page, false);
 }
 
-test "public foreign Turn bytes and cursor fence" {
+test "INS-4 a foreign Turn's user row fences its bytes and cursor" {
     try testingOrdinaryPublicCorruption(.content, true);
     try testingOrdinaryPublicCorruption(.cursor, true);
 }
 
-test "public foreign Turn page fences" {
+test "INS-4 a foreign Turn's user row fences its page" {
     try testingOrdinaryPublicCorruption(.page, true);
 }
 
@@ -161,12 +160,12 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     };
     try settleCallsForTesting(&storage, &tmp, binding, "tool-output", &calls);
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT rejection_content_id) FROM model_tool_call", .{}));
-    var request = conversation_read.ConversationPage{};
+    var request = store_testing.ConversationRows{};
     try request.session.set(session.slice());
-    const valid = try store_core.publicConversationPageForTesting(&storage, request);
+    const valid = try store_testing.conversationRows(&storage, request);
     try std.testing.expectEqual(@as(usize, 3), valid.count);
     const item = valid.items[if (target_sibling) 0 else 1];
-    try std.testing.expect(item.kind == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
+    try std.testing.expect(item.value == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
     {
         var reader: ContentReader = undefined;
         reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = item.position, .ordinal = item.ordinal }));
@@ -197,10 +196,10 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
             reader.close();
             break :blk {};
         } else |err| err
-    else if (store_core.publicConversationPageForTesting(&storage, request)) |_| {} else |err| err;
+    else if (store_testing.conversationRows(&storage, request)) |_| {} else |err| err;
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
+    try std.testing.expectError(error.StoreFenced, store_testing.conversationRows(&storage, request));
     try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
 }
@@ -209,21 +208,21 @@ test "public private tool bytes fence" {
     try testingToolPublicCorruption(.content, .private, false);
 }
 
-test "public private tool page fences" {
+test "INS-4 a private tool result fences its page" {
     try testingToolPublicCorruption(.page, .private, false);
 }
 
-test "public private tool cursor fences" {
+test "INS-4 a private tool result fences its cursor" {
     try testingToolPublicCorruption(.cursor, .private, false);
 }
 
-test "public completed tool group with missing exposed content fences" {
+test "INS-4 a completed tool group with missing content fences" {
     try testingToolPublicCorruption(.page, .missing, false);
     try testingToolPublicCorruption(.content, .missing, false);
     try testingToolPublicCorruption(.cursor, .missing, false);
 }
 
-test "public completed tool group with corrupt sibling provenance fences" {
+test "INS-4 a completed tool group with corrupt sibling provenance fences" {
     for ([_]TestingPublicReadRoute{ .page, .cursor, .content }) |route| {
         try testingToolPublicCorruption(route, .sibling_ordinal, true);
         try testingToolPublicCorruption(route, .sibling_call_id, true);
@@ -233,7 +232,7 @@ test "public completed tool group with corrupt sibling provenance fences" {
     }
 }
 
-test "public completed Action sibling corruption fences first Conversation read" {
+test "INS-4 a completed Action sibling's corruption fences the first conversation read" {
     const faults = [_][:0]const u8{
         "UPDATE model_tool_call SET item_ordinal=item_ordinal+1000 WHERE call_ordinal=0",
         "UPDATE model_tool_call SET call_id_content_id=(SELECT name_content_id FROM model_tool_call WHERE call_ordinal=1) WHERE call_ordinal=0",
@@ -266,7 +265,7 @@ test "public completed Action sibling corruption fences first Conversation read"
             try sqlite.exec(storage.sqliteDatabase(), fault);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
             try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
-            var request: conversation_read.ConversationPage = .{ .end = position };
+            var request: store_testing.ConversationRows = .{ .end = position };
             try request.session.set(session.slice());
             if (route == .cursor) {
                 request.before_position = position;
@@ -279,17 +278,17 @@ test "public completed Action sibling corruption fences first Conversation read"
                     reader.close();
                     break :blk {};
                 } else |err| err
-            else if (store_core.publicConversationPageForTesting(&storage, request)) |_| {} else |err| err;
+            else if (store_testing.conversationRows(&storage, request)) |_| {} else |err| err;
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
+            try std.testing.expectError(error.StoreFenced, store_testing.conversationRows(&storage, request));
             try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         }
     }
 }
 
-test "public assistant message provenance binds the exact accepted item" {
+test "INS-4 an assistant row's provenance binds the exact accepted item" {
     const faults = [_][:0]const u8{
         "DELETE FROM conversation_entry WHERE entry_kind=3",
         "UPDATE conversation_entry SET source_item_ordinal=source_item_ordinal+1 WHERE entry_kind=3",
@@ -313,7 +312,7 @@ test "public assistant message provenance binds the exact accepted item" {
             try storage.close();
             try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
-                .page => if (store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })) |_| {} else |err| err,
+                .page => if (store_testing.conversationRows(&storage, .{ .session = request.session })) |_| {} else |err| err,
                 .bytes => if (storage.openPublicConversationContent(&request)) |location| blk: {
                     var owned: ContentReader = undefined;
                     owned.open(location);
@@ -340,7 +339,7 @@ test "public assistant message provenance binds the exact accepted item" {
     }
 }
 
-test "missing assistant certificates respect page windows and fixed ends" {
+test "INS-4 missing assistant certificates respect page windows and fixed ends" {
     for ([_]bool{ false, true }) |activity| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -358,7 +357,7 @@ test "missing assistant certificates respect page windows and fixed ends" {
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
         try storage.close();
         try testingStore(&storage, &tmp, std.testing.io);
-        _ = try store_core.publicConversationPageForTesting(&storage, .{ .session = missing.session, .end = missing.position - 1 });
+        _ = try store_testing.conversationRows(&storage, .{ .session = missing.session, .end = missing.position - 1 });
         _ = try store_core.activityPageForTesting(&storage, .{ .session = missing.session, .end = missing.position - 1 });
         if (activity) {
             const latest = try store_core.activityPageForTesting(&storage, .{ .session = missing.session, .direction = .backward });
@@ -380,10 +379,10 @@ test "missing assistant certificates respect page windows and fixed ends" {
                 cursor = older.items[older.count - 1];
             }
         } else {
-            const latest = try store_core.publicConversationPageForTesting(&storage, .{ .session = missing.session });
+            const latest = try store_testing.conversationRows(&storage, .{ .session = missing.session });
             try std.testing.expectEqual(@as(usize, 16), latest.count);
             try std.testing.expect(latest.more);
-            try std.testing.expectError(error.CorruptStore, store_core.publicConversationPageForTesting(&storage, .{
+            try std.testing.expectError(error.CorruptStore, store_testing.conversationRows(&storage, .{
                 .session = missing.session,
                 .end = latest.end,
                 .before_position = latest.items[latest.count - 1].position,

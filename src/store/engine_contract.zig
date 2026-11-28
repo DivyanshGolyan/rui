@@ -1868,16 +1868,11 @@ fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, repl
     try std.testing.expectEqual(2, read_bytes);
     _ = replies.keep(bytes[0..read_bytes]);
     try meter.stop(.readOwnedContent);
-    var request: conversation_read.ConversationPage = .{};
-    try request.session.set(session.slice());
-    var page: reads_domain.PublicConversationPage = undefined;
-    meter.start();
-    try storage.publicConversationPage(&request, &page, std.testing.allocator);
-    try meter.stop(.publicConversationPage);
-    _ = replies.keep(&page);
-    const answer = for (page.items[0..page.count]) |entry| {
-        if (entry.kind == .assistant) break entry.position;
-    } else return error.NoAnswer;
+    var answers: protocol.ActivityPage = .{ .kinds = .initOne(.assistant) };
+    try answers.session.set(session.slice());
+    const page = try replies.keep(store_core.activityPageForTesting(storage, answers));
+    if (page.count == 0) return error.NoAnswer;
+    const answer = page.items[0].position;
     meter.start();
     _ = try replies.keep(storage.openPublicConversationContent(&.{ .session = session, .position = answer }));
     try meter.stop(.openPublicConversationContent);

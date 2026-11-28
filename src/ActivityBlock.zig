@@ -6,6 +6,7 @@ const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const Chip = @import("Chip.zig");
+const Say = @import("marks.zig").Say;
 const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
@@ -24,7 +25,7 @@ pub const View = struct {
     work: ?work_line.Line = null,
     queued: ?queued_line.Waiting = null,
     local_queued: ?queued_line.Waiting = null,
-    queued_note: ?[]const u8 = null,
+    queued_note: ?Say = null,
     method: vaxis.gwidth.Method = .unicode,
     styles: Styles = .{},
 };
@@ -82,14 +83,20 @@ fn notePiece(self: *const Self, text: []const u8, width: usize) usize {
     return length;
 }
 
+/// The cells the note's sign takes on its first row; its words wrap after it.
+fn noteLead(self: *const Self, note: Say) usize {
+    return session_line.cells(note.sign(), self.view.method);
+}
+
 fn noteRows(self: *const Self, width: usize) ?usize {
     const note = self.view.queued_note orelse return 0;
     const room = width -| noteIndent(width);
-    if (room == 0) return null;
-    var remaining = note;
+    var remaining = note.words;
     var count: usize = 0;
     while (remaining.len != 0) {
-        const length = self.notePiece(remaining, room);
+        const row_room = room -| (if (count == 0) self.noteLead(note) else 0);
+        if (row_room == 0) return null;
+        const length = self.notePiece(remaining, row_room);
         if (length == 0) return null;
         remaining = remaining[length..];
         count += 1;
@@ -197,12 +204,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
     }
     if (kept.queued_note_rows != 0) {
-        var remaining = self.view.queued_note.?;
+        const note = self.view.queued_note.?;
+        var remaining = note.words;
         const indent: u16 = @intCast(noteIndent(width));
+        var first = true;
         while (remaining.len != 0) {
             defer index += 1;
-            const length = self.notePiece(remaining, width - indent);
-            if (index >= skip) _ = Chip.print(surface, self.view.method, indent, index - skip, remaining[0..length], self.view.styles.quiet, width);
+            const lead: u16 = if (first) @intCast(self.noteLead(note)) else 0;
+            const length = self.notePiece(remaining, width -| indent -| lead);
+            if (index >= skip) {
+                const at = if (first) Chip.print(surface, self.view.method, indent, index - skip, note.sign(), self.view.styles.quiet, width) else indent;
+                _ = Chip.print(surface, self.view.method, at, index - skip, remaining[0..length], self.view.styles.quiet, width);
+            }
+            first = false;
             remaining = remaining[length..];
         }
     }
@@ -394,7 +408,7 @@ fn queuedRecoveryDomain() !void {
         .view = .{
             .work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 1 } },
             .queued = .{ .line = "original", .count = 1 },
-            .queued_note = "Rejected · /discard",
+            .queued_note = .quiet("Rejected · /discard"),
         },
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -416,7 +430,7 @@ fn separateQueueDomain() !void {
             .work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 1 } },
             .queued = .{ .line = "durable", .count = 3 },
             .local_queued = .{ .line = "local", .count = 1 },
-            .queued_note = "Not confirmed · ctrl+r retries original",
+            .queued_note = .quiet("Not confirmed · ctrl+r retries original"),
         },
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -438,7 +452,7 @@ fn separateQueueDomain() !void {
     try std.testing.expectEqualStrings("◌ 3 · durable", try rowText(short, 1));
     try std.testing.expectEqualStrings("◌ local", try rowText(short, 2));
     block.view.queued = null;
-    block.view.queued_note = "Rejected · /discard";
+    block.view.queued_note = .quiet("Rejected · /discard");
     const rejected = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 5 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("  Rejected ·", try rowText(rejected, 2));
     try std.testing.expectEqualStrings("  /discard", try rowText(rejected, 3));

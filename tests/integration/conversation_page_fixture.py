@@ -63,13 +63,13 @@ def whole_stream_shape(length):
                 return next((row for row in conversation_rows(fields["socket"], store, session) if row_kind(row) == kind), None)
 
             item = wait_for(completed_row, "stream public identity")
-            identity = dict(position=item["position"], ordinal="0", start="0", stream=True)
-            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
+            identity = dict(position=item["position"], ordinal="0")
+            head, body = request(fields["socket"], store, "/v1/activity-content", "activity_content", session, **identity)
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected, (head, len(body), length)
             for name in ("Content-Length", "X-Rui-Content-Bytes", "X-Rui-Next-Offset"):
                 assert f"{name}: {length}\r\n".encode() in head + b"\r\n", head
-            for changes, status in (({"start": "1"}, 400), ({"ordinal": "1"}, 409), ({"position": str(2**64 - 1)}, 400)):
-                head, _ = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **(identity | changes))
+            for changes, status in (({"ordinal": "1"}, 409), ({"position": str(2**64 - 1)}, 400)):
+                head, _ = request(fields["socket"], store, "/v1/activity-content", "activity_content", session, **(identity | changes))
                 assert head.startswith(f"HTTP/1.1 {status} ".encode()), head
             wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "stream producer cleanup")
             stop_process(process)
@@ -85,7 +85,7 @@ def whole_stream_shape(length):
                     answer = database.execute("SELECT content_id FROM conversation_entry WHERE entry_kind=1").fetchone()[0]
                     database.execute("UPDATE content SET digest=? WHERE content_id=?", (b"\xff" * 32, answer))
             process, fields = start_host(store, provider)
-            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
+            head, body = request(fields["socket"], store, "/v1/activity-content", "activity_content", session, **identity)
             if length <= 4096:
                 assert head.startswith(b"HTTP/1.1 500 "), (length, head, len(body))
                 assert json.loads(body)["code"] == "canonical_store_failure", body

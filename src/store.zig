@@ -78,6 +78,7 @@ pub const ModelFailureClass = model_settlement_domain.ModelFailureClass;
 pub const ModelTimings = model_settlement_domain.ModelTimings;
 pub const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 pub const ModelInterruptionTarget = command_domain.ModelInterruptionTarget;
+pub const check_run = @import("store/check_run.zig");
 pub const OpenOptions = store_core.OpenOptions;
 pub const Target = store_core.Target;
 pub const Kind = @import("store_target.zig").Kind;

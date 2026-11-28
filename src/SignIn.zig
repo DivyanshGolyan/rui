@@ -1168,22 +1168,26 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
     var panel: Panel = .{
-        .title = title,
-        .subtitle = if (self.state.page == .account) "Sign in to begin. Your sign-in never enters a chat." else null,
-        .unicode = self.unicode,
-        .fields = fields,
-        .actions = labels,
-        .action_gap = 1,
-        .stacked_actions = button_width > width,
-        .natural_height = true,
-        .top_rule = !Dialog.framed(size),
-        .centered_heading = true,
+        .props = .{
+            .title = title,
+            .subtitle = if (self.state.page == .account) "Sign in to begin. Your sign-in never enters a chat." else null,
+            .unicode = self.unicode,
+            .fields = fields,
+            .actions = labels,
+            .action_gap = 1,
+            .stacked_actions = button_width > width,
+            .natural_height = true,
+            .top_rule = !Dialog.framed(size),
+            .centered_heading = true,
+            .style = .{
+                .ground = look.ground,
+                .selection = look.selection,
+                .quiet = look.quiet,
+                .title = look.title,
+                .rule = look.stitch(.horizontal),
+            },
+        },
         .selected = selected,
-        .ground = look.ground,
-        .selection = look.selection,
-        .quiet = look.quiet,
-        .title_style = look.title,
-        .rule = look.stitch(.horizontal),
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = fit.height - footer_height }));

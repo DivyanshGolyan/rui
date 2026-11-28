@@ -1376,8 +1376,15 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
+        fn connections(raw: *anyopaque) ?@import("app_settings.zig").ConnectionsSnapshot {
+            const self_ = owner(raw);
+            return switch (client.hostStatus(self_.init.io, self_.options.store)) {
+                .ready => |host| .{ .facts = host.capabilities.connections, .now = @intCast(@max(std.Io.Clock.real.now(self_.init.io).toSeconds(), 0)) },
+                else => null,
+            };
+        }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue, .connections = Callbacks.connections };
 }
 
 fn destroy(self: *Self) void {
@@ -1776,7 +1783,7 @@ fn memoryValue(raw: *anyopaque) ?view.Memory {
 fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
     const self: *Self = @ptrCast(@alignCast(raw));
     const state = &self.state;
-    return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady() };
+    return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision, .ready = state.modelsReady(), .limited = if (state.host) |host| host.limited else .{} };
 }
 
 fn configureKeys(raw: *anyopaque, out_keys: *[view.max_requests]@import("configure_outcome.zig").Original) usize {
@@ -2019,7 +2026,7 @@ fn startHost(self: *Self) HostLaunch {
 fn hostFacts(self: *Self) HostRead {
     const observation: HostObservation = switch (client.hostStatus(self.init.io, self.options.store)) {
         .ready => |host| .{ .ready = .{
-            .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied, .served = servedNames(host.capabilities.connections) },
+            .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied, .served = servedNames(host.capabilities.connections), .limited = @import("connection_limits.zig").limitedNames(host.capabilities.connections.slice(), @intCast(@max(std.Io.Clock.real.now(self.init.io).toSeconds(), 0))) },
             .paused = host.paused,
         } },
         .unavailable => .{ .stopped = platform.StoreLease.lastStop(self.init.io, self.options.store) },
@@ -2192,7 +2199,7 @@ const Seen = struct {
 
 fn fixtureWork(value: protocol.session_work.Work) protocol.session_work.Work {
     var served = value;
-    const standing = protocol.session_work.standing(served.state);
+    const standing = protocol.session_work.standing(served.state, false);
     served.actions.stop = switch (standing) {
         .needs_you, .working, .queued => true,
         .failed, .done => false,
@@ -4619,7 +4626,7 @@ fn sui4NestedKeys() !void {
         try overview.root.openSettings(&ctx);
         overview.root.settings_page.select(.keys);
         try overview.root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-        try std.testing.expect(overview.root.settings_page.keys_open);
+        try std.testing.expect(overview.root.settings_page.reference_open);
         var shown = try rig.shown(width, 24);
         defer shown.deinit();
         const text = try shown.text();
@@ -4628,7 +4635,7 @@ fn sui4NestedKeys() !void {
         try std.testing.expect(std.mem.indexOf(u8, text, "/help") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Ctrl-X twice") == null);
         try std.testing.expect(try rig.press("\x1b") == null);
-        try std.testing.expect(!overview.root.settings_page.keys_open);
+        try std.testing.expect(!overview.root.settings_page.reference_open);
         try std.testing.expect(overview.root.input.layer.settingsOpen());
         try std.testing.expect(overview.root.session == null);
         try std.testing.expect(try rig.press("\x1b") == null);

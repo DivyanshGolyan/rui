@@ -63,7 +63,7 @@ test "a quota reset is read from a saved record and never fences" {
                 const session = try configureTestSession(&storage, key);
                 try submitTestMessage(&storage, &tmp, message, message, session.slice(), "q");
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                const failure: ModelFailure = if (case.diagnostic) |detail| .{ .rejected = .{ .code = case.code, .diagnostic = detail, .request_id = .{}, .report = "" } } else .{ .uncorrelated = case.code };
+                const failure: ModelFailure = if (case.diagnostic) |detail| .{ .rejected = .{ .code = case.code, .diagnostic = detail, .request_id = .{}, .report = .empty } } else .{ .uncorrelated = case.code };
                 try storage.settleModelAttemptFailure(binding, failure, .ordinary, .{});
                 var request: protocol.ActivityPage = .{};
                 try request.session.set(session.slice());

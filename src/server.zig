@@ -47,6 +47,7 @@ const server_execution = @import("server_execution.zig");
 const execution_owner = @import("execution_owner.zig");
 const server_host = @import("server_host.zig");
 const ModelLists = @import("ModelLists.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 const child_exit_wake = @import("child_exit_wake.zig");
 const line_intake = @import("line_intake.zig");
 const signal_stack = @import("signal_stack.zig");
@@ -1289,6 +1290,7 @@ fn serveOpened(
     if (started_at <= 0) return error.ClockReadFailed;
     var model_lists: ModelLists = .init(io, allocator, served);
     defer model_lists.deinit();
+    var usage: ConnectionUsage = .init(io);
     const replies_shared: server_replies.Shared = .{
         .io = io,
         .allocator = allocator,
@@ -1298,6 +1300,7 @@ fn serveOpened(
         .probes = &probes,
         .retention = &retention,
         .model_lists = &model_lists,
+        .usage = &usage,
         .scratch_used = &scratch_used,
         .environments = environments,
     };
@@ -1333,6 +1336,7 @@ fn serveOpened(
         .probes = &probes,
         .retention = &retention,
         .model_lists = &model_lists,
+        .usage = &usage,
         .environments = environments,
         .allowance_diagnostic = &allowance_diagnostic,
         .github_environment = github_environment,
@@ -1601,7 +1605,6 @@ const Route = enum {
     read_action_arguments,
     inspect,
     list_sessions,
-    conversation_content,
     activity_page,
     activity_search,
     activity_content,
@@ -1727,8 +1730,6 @@ const HeaderReader = struct {
             .inspect
         else if (std.mem.eql(u8, path, "/v1/list-sessions"))
             .list_sessions
-        else if (std.mem.eql(u8, path, "/v1/conversation-content"))
-            .conversation_content
         else if (std.mem.eql(u8, path, "/v1/activity-search"))
             .activity_search
         else if (std.mem.eql(u8, path, "/v1/activity-page"))
@@ -4007,9 +4008,7 @@ test "SH-51 a route that cannot serve a parts value refuses it as ordinary and l
         // Text-only routes on a parts Message and a parts Action Resolution.
         .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\"}}", .{ session.slice(), admission_position }), .status = "409", .has = "ContentIsParts" },
         .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\"}}", .{ session.slice(), message_position }), .status = "409", .has = "ContentIsParts" },
-        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\",\"start\":\"0\",\"stream\":true}}", .{ session.slice(), message_position }), .status = "409", .has = "ContentIsParts" },
         .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
-        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\",\"start\":\"0\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
         .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\",\"offset\":\"1\"}}", .{ session.slice(), selected.action_id }), .status = "400", .has = "invalid_cursor" },
         // Both parts routes on a text value.
         .{ .path = "public-parts", .body = try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}}", .{ session.slice(), text_admission }), .status = "409", .has = "ContentIsText" },

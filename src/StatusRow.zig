@@ -28,9 +28,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var used: usize = 0;
     const tone = if (self.bar.tone == .attention) self.attention else self.quiet;
     const left_end: u16 = if (self.bar.stop) self.bar.stop_column -| 2 else size.width;
-    const keyed = self.key.label.len != 0 and std.mem.endsWith(u8, self.bar.left, self.key.label);
-    const words = if (keyed) self.bar.left[0 .. self.bar.left.len - self.key.label.len] else self.bar.left;
-    const column = Chip.print(surface, self.method, 0, 0, words, tone, left_end);
+    const said = self.bar.left;
+    const keyed = self.key.label.len != 0 and std.mem.endsWith(u8, said.words, self.key.label);
+    const words = if (keyed) said.words[0 .. said.words.len - self.key.label.len] else said.words;
+    const column = Chip.print(surface, self.method, Chip.print(surface, self.method, 0, 0, said.sign(), tone, left_end), 0, words, tone, left_end);
     if (keyed and column < left_end) {
         self.key.style = tone;
         self.key.hover = Hover.underlined(tone);
@@ -72,7 +73,7 @@ test "the status row shows what needs the person with its key clickable, and the
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const needs = "! Not confirmed · ctrl+r retries";
+    const needs: chrome.Say = .attention("Not confirmed · ctrl+r retries");
     row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 80 });
     const drawn = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = 1 }, drawn.size);

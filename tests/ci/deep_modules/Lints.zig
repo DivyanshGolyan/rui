@@ -8,21 +8,25 @@ const Items = @import("Items.zig");
 const Diagnostic = @import("Diagnostic.zig");
 const FieldLeak = @import("FieldLeak.zig");
 const Graph = @import("Graph.zig");
+const Setters = @import("Setters.zig");
 const ModuleCycle = @import("ModuleCycle.zig");
 const References = @import("References.zig");
 const Shallow = @import("Shallow.zig");
 const Tangle = @import("Tangle.zig");
+const TestCode = @import("TestCode.zig");
 const Wrappers = @import("Wrappers.zig");
 
 /// Every lint's findings over `sources`, limited to `scope` when it is set, sorted by lint and then by key.
 pub fn run(arena: Allocator, sources: *const Sources, items: *const Items.Items, scope: ?Sources.NodeId) Allocator.Error![]Diagnostic.Diagnostic {
-    const refs = try References.collect(arena, sources, items);
+    const refs = try TestCode.production(arena, sources, items, try References.collect(arena, sources, items));
     var wrappers = try Wrappers.find(arena, items, sources, refs);
     const graph = try Graph.build(arena, items, refs, &wrappers);
     var found: std.ArrayList(Diagnostic.Diagnostic) = .empty;
     try found.appendSlice(arena, try ModuleCycle.check(arena, sources, items, refs, scope));
     try found.appendSlice(arena, try Tangle.check(arena, sources, items, refs, &graph, scope));
     try found.appendSlice(arena, try FieldLeak.check(arena, sources, items, refs, &graph, scope));
+    try found.appendSlice(arena, try Setters.check(arena, sources, items, refs, scope, .flag));
+    try found.appendSlice(arena, try Setters.check(arena, sources, items, refs, scope, .state));
     try found.appendSlice(arena, try Shallow.check(arena, sources, items, refs, &graph, &wrappers, scope));
     return sorted(arena, found.items);
 }
