@@ -224,6 +224,7 @@ const cores = .{
     .{ "utf8_validation.zig", @import("utf8_validation.zig") },
     .{ "ViewportPosition.zig", @import("ViewportPosition.zig") },
     .{ "widgets/Feed.zig", @import("widgets/Feed.zig") },
+    .{ "widgets/key_list_step.zig", @import("widgets/key_list_step.zig") },
     .{ "wire_field.zig", @import("wire_field.zig") },
     .{ "wire_version.zig", @import("wire_version.zig") },
     .{ "word_search.zig", @import("word_search.zig") },

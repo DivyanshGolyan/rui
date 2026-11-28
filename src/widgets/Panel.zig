@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
 const Hover = @import("Hover.zig");
+const key_list_step = @import("key_list_step.zig");
 const cell_line = @import("cell_line.zig");
 const RowInset = @import("RowInset.zig");
 
@@ -872,20 +873,6 @@ test "Panel natural custom choice measures once shrinks and keeps cursor and mou
     };
 }
 
-/// `value` moved by `delta`, kept within [0, most].
-fn offsetBy(value: usize, delta: isize, most: usize) usize {
-    const moved = @as(isize, @intCast(value)) + delta;
-    return @intCast(std.math.clamp(moved, 0, @as(isize, @intCast(most))));
-}
-
-/// The first row to show so that `block` is in view: the offset unchanged when it already is, else its first row, or its last row
-/// aligned to the bottom when the block fits the viewport of `height` rows.
-fn revealed(offset: usize, block: Block, height: usize) usize {
-    if (block.first < offset) return block.first;
-    if (block.end > offset + height) return @min(block.first, block.end -| height);
-    return offset;
-}
-
 /// The target of `block` in the viewport from row `offset`: only its visible rows, and zero high when it is scrolled out of view,
 /// so a target's index is its block's index.
 fn blockRect(block: Block, offset: usize, width: u16, height: usize) Hover.Rect {
@@ -895,15 +882,22 @@ fn blockRect(block: Block, offset: usize, width: u16, height: usize) Hover.Rect 
     return .{ .row = @intCast(top - offset), .width = width, .height = @intCast(bottom - top) };
 }
 
-/// `style` on the tinted row's background when a tint applies.
+/// `base` with the tint's background, and the tint's reverse and underline added to `base`'s: a highlight never removes an
+/// attribute the text already has.
 fn tinted(base: vaxis.Style, tint: ?vaxis.Style) vaxis.Style {
+    const colour = tint orelse return base;
     var out = base;
-    if (tint) |colour| out.bg = colour.bg;
+    out.bg = colour.bg;
+    out.reverse = base.reverse or colour.reverse;
+    if (colour.ul_style != .off) {
+        out.ul_style = colour.ul_style;
+        out.ul = colour.ul;
+    }
     return out;
 }
 
 /// Consecutive rows the user selects as one, such as a Connections block. Blocks index the fields of a single-column KeyList.
-pub const Block = struct { first: usize, end: usize };
+pub const Block = key_list_step.Block;
 
 pub const KeyList = struct {
     fields: []const Field = &.{},
@@ -912,8 +906,9 @@ pub const KeyList = struct {
     /// Draw one field per row, never in pairs, and start each value right after its own label (at the margin when it has none),
     /// so a row costs only its own width: for a list whose rows read down the page (the Connections reference).
     single_column: bool = false,
-    /// Non-empty for a list of selectable blocks: Up and Down move the selection, a left press selects the block under the pointer,
-    /// and the selected block takes the selection tint (a pointed-at one the hover tint). Empty for a plain list, which Up and Down scroll.
+    /// Non-empty for a list of selectable blocks: Up and Down move the selection (scrolling within a block taller than the viewport
+    /// first), a left press selects the block under the pointer, and the selected block takes the selection tint (a pointed-at one the
+    /// hover tint). Empty for a plain list, which Up and Down scroll. The selection and scroll policy is `key_list_step`'s.
     blocks: []const Block = &.{},
     selected: usize = 0,
     hover: Hover = .{},
@@ -947,20 +942,20 @@ pub const KeyList = struct {
         switch (input) {
             .key_press => |key| {
                 if (key.matches(vaxis.Key.up, .{})) {
-                    self.step(-1);
+                    self.apply(.{ .step = -1 });
                 } else if (key.matches(vaxis.Key.down, .{})) {
-                    self.step(1);
+                    self.apply(.{ .step = 1 });
                 } else if (key.matches(vaxis.Key.page_up, .{})) {
-                    self.page(-1);
+                    self.apply(.{ .page = -1 });
                 } else if (key.matches(vaxis.Key.page_down, .{})) {
-                    self.page(1);
+                    self.apply(.{ .page = 1 });
                 } else return;
             },
             .mouse => |mouse| {
                 if (mouse.button != .left or mouse.type != .press) return;
                 for (self.hover.targets, 0..) |rect, at| {
                     if (!rect.contains(mouse.col, mouse.row)) continue;
-                    self.selected = at;
+                    self.apply(.{ .press = at });
                     break;
                 } else return;
             },
@@ -969,35 +964,23 @@ pub const KeyList = struct {
         ctx.consumeAndRedraw();
     }
 
-    /// One step: the selection moves to the next block, or a plain list scrolls one row.
-    fn step(self: *KeyList, delta: isize) void {
-        if (self.blocks.len == 0) {
-            self.row_offset = offsetBy(self.row_offset, delta, self.total_rows -| self.viewport_height);
-        } else {
-            self.selected = offsetBy(self.selectedIndex(), delta, self.blocks.len - 1);
-        }
+    fn shape(self: *const KeyList) key_list_step.Shape {
+        return .{ .blocks = self.blocks, .total_rows = self.total_rows, .viewport_height = self.viewport_height };
     }
 
-    /// One page: a plain list scrolls its viewport, a block list moves about as many blocks as fit in it.
-    fn page(self: *KeyList, delta: isize) void {
-        const per_page = if (self.selectedBlock()) |block| self.viewport_height / @max(1, block.end - block.first) else self.viewport_height;
-        self.step(delta * @as(isize, @intCast(@max(1, per_page))));
-    }
-
-    fn selectedIndex(self: *const KeyList) usize {
-        return @min(self.selected, self.blocks.len -| 1);
-    }
-
-    fn selectedBlock(self: *const KeyList) ?Block {
-        if (self.blocks.len == 0) return null;
-        return self.blocks[self.selectedIndex()];
+    /// Stores the position `key_list_step` gives for `event` from the stored position.
+    fn apply(self: *KeyList, step: key_list_step.Event) void {
+        const at = key_list_step.next(self.shape(), .{ .selected = self.selected, .row_offset = self.row_offset }, step);
+        self.selected = at.selected;
+        self.row_offset = at.row_offset;
     }
 
     /// The tint of the row holding field `index`: the selection for the selected block, the hover for a pointed-at one, else none.
+    /// Called after `drawReference` has settled `selected`.
     fn tintAt(self: *const KeyList, index: usize, targets: []const Hover.Rect) ?vaxis.Style {
         for (self.blocks, 0..) |block, at| {
             if (index < block.first or index >= block.end) continue;
-            if (at == self.selectedIndex()) return self.style.selection;
+            if (at == self.selected) return self.style.selection;
             return if (self.hover.contains(targets[at])) self.style.hover else null;
         }
         return null;
@@ -1025,8 +1008,9 @@ pub const KeyList = struct {
         if (self.single_column) key_widths = .{ 0, 0 };
         self.total_rows = (self.fields.len + columns - 1) / columns;
         self.viewport_height = size.height;
-        self.row_offset = @min(self.row_offset, self.total_rows -| self.viewport_height);
-        if (self.selectedBlock()) |block| self.row_offset = @min(revealed(self.row_offset, block, size.height), self.total_rows -| self.viewport_height);
+        const at = key_list_step.settle(self.shape(), .{ .selected = self.selected, .row_offset = self.row_offset });
+        self.selected = at.selected;
+        self.row_offset = at.row_offset;
         const targets = try ctx.arena.alloc(Hover.Rect, self.blocks.len);
         for (self.blocks, targets) |block, *rect| rect.* = blockRect(block, self.row_offset, size.width, size.height);
         self.hover.targets = targets;
@@ -1089,16 +1073,16 @@ test "SUI-200 Up and Down move the selected block through zero, one, many and si
         _ = try list.widget().draw(testContext(&arena, 60));
         for (0..count + 2) |step| {
             try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
-            try std.testing.expectEqual(@min(step + 1, count -| 1), list.selectedIndex());
+            try std.testing.expectEqual(@min(step + 1, count -| 1), list.selected);
             if (count == 0) continue;
             const surface = try list.widget().draw(testContext(&arena, 60));
-            const selected = blocks[list.selectedIndex()];
+            const selected = blocks[list.selected];
             for (selected.first..selected.end) |row| {
                 try std.testing.expectEqual(list.style.selection.bg, surface.readCell(0, @intCast(row)).style.bg);
             }
         }
         for (0..count + 2) |_| try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.up } });
-        try std.testing.expectEqual(@as(usize, 0), list.selectedIndex());
+        try std.testing.expectEqual(@as(usize, 0), list.selected);
     }
 }
 
@@ -1125,6 +1109,25 @@ test "SUI-201 a left press selects the block under the pointer through zero, one
             }
         }
     }
+}
+
+test "SUI-207 Down scrolls a block taller than the viewport until its last row shows" {
+    const labels = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    var fields: [6]Field = undefined;
+    for (&fields, labels) |*field, label| field.* = .{ .label = label, .value = "" };
+    var blocks = [_]Block{.{ .first = 0, .end = 6 }};
+    var list: KeyList = .{ .fields = &fields, .blocks = &blocks };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    _ = try list.widget().draw(testContext(&arena, 4));
+    try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
+    try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
+    const surface = try list.widget().draw(testContext(&arena, 4));
+    try std.testing.expectEqual(@as(usize, 2), list.row_offset);
+    try std.testing.expectEqual(@as(usize, 0), list.selected);
+    try std.testing.expectEqualStrings("c", surface.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings("f", surface.readCell(1, 3).char.grapheme);
 }
 
 test "Panel KeyList fits measured columns and aligns values after the widest key in cells" {
