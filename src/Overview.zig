@@ -132,6 +132,8 @@ const HostObservation = union(enum) {
 pub const HostRead = struct {
     observation: HostObservation = .unavailable,
     memory: ?view.Memory = null,
+    /// The served connections with their latest usage and the Unix second they were read at, when the Host answered.
+    connections: ?AppSettings.ConnectionsSnapshot = null,
 };
 
 pub const Operations = struct {
@@ -383,6 +385,8 @@ release_watch: ReleaseWatch = .{},
 host_process: ?struct { started_at: u64, pid: i32 } = null,
 memory_override: ?view.Memory,
 host_observation: HostObservation = .unread,
+/// The connections the last Host read carried; Settings draws them and never reads the Host itself.
+connections_seen: ?AppSettings.ConnectionsSnapshot = null,
 host_launch: ?HostLaunch = null,
 restart_allowance: host_restart.Allowance = .unspent,
 upgrade_report: ?std.Io.Writer.Allocating = null,
@@ -1376,15 +1380,17 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
-        fn connections(raw: *anyopaque) ?@import("app_settings.zig").ConnectionsSnapshot {
-            const self_ = owner(raw);
-            return switch (client.hostStatus(self_.init.io, self_.options.store)) {
-                .ready => |host| .{ .facts = host.capabilities.connections, .now = @intCast(@max(std.Io.Clock.real.now(self_.init.io).toSeconds(), 0)) },
-                else => null,
-            };
+        fn seconds(raw: *anyopaque) u64 {
+            return @intCast(@max(std.Io.Clock.real.now(owner(raw).init.io).toSeconds(), 0));
+        }
+        fn connections(raw: *anyopaque) ?AppSettings.ConnectionsSnapshot {
+            return owner(raw).connections_seen;
+        }
+        fn askConnections(raw: *anyopaque) void {
+            owner(raw).queueHost();
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue, .connections = Callbacks.connections };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .available = Callbacks.available, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue, .connections = Callbacks.connections, .ask_connections = Callbacks.askConnections, .seconds = Callbacks.seconds };
 }
 
 fn destroy(self: *Self) void {
@@ -1855,6 +1861,7 @@ fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !
 fn takeHostRead(self: *Self, read: HostRead) !?Next {
     const previous = self.host_observation;
     self.host_observation = read.observation;
+    self.connections_seen = read.connections;
     if (read.observation == .ready) self.host_launch = null;
     const restart = host_restart.decide(.{
         .previous = previous.restartSeen(),
@@ -2024,7 +2031,9 @@ fn startHost(self: *Self) HostLaunch {
 }
 
 fn hostFacts(self: *Self) HostRead {
-    const observation: HostObservation = switch (client.hostStatus(self.init.io, self.options.store)) {
+    const status = client.hostStatus(self.init.io, self.options.store);
+    const seen: ?@TypeOf(status.ready) = if (status == .ready) status.ready else null;
+    const observation: HostObservation = switch (status) {
         .ready => |host| .{ .ready = .{
             .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied, .served = servedNames(host.capabilities.connections), .limited = @import("connection_limits.zig").limitedNames(host.capabilities.connections.slice(), @intCast(@max(std.Io.Clock.real.now(self.init.io).toSeconds(), 0))) },
             .paused = host.paused,
@@ -2034,7 +2043,11 @@ fn hostFacts(self: *Self) HostRead {
         .incompatible => .incompatible,
         .access_failure => .unreadable,
     };
-    return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null) };
+    const connections: ?AppSettings.ConnectionsSnapshot = switch (observation) {
+        .ready => if (seen) |host| .{ .facts = host.capabilities.connections, .now = @intCast(@max(std.Io.Clock.real.now(self.init.io).toSeconds(), 0)) } else null,
+        else => null,
+    };
+    return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null), .connections = connections };
 }
 
 fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {

@@ -4257,7 +4257,7 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     }
 }
 
-test "SUI-193 SessionFrontend uses the release cell for an in-feed quote and cancels on leave" {
+test "SUI-194 SessionFrontend uses the release cell for an in-feed quote and cancels on leave" {
     for (std.enums.values(DragEndpointPath)) |path| try dragEndpointWitness(path);
 }
 
