@@ -4257,15 +4257,13 @@ test "SUI-143 SessionFrontend selection routes Root targets while links and quot
     }
 }
 
-test "SUI-193 SessionFrontend drag endpoint witness compares plain and Alt release after last motion" {
-    try dragEndpointWitness(.inside);
+test "SUI-193 SessionFrontend uses the release cell for an in-feed quote and cancels on leave" {
+    for (std.enums.values(DragEndpointPath)) |path| try dragEndpointWitness(path);
 }
 
-test "SessionFrontend drag endpoint witness compares plain and Alt after leaving and returning" {
-    try dragEndpointWitness(.leave_and_return);
-}
+const DragEndpointPath = enum { inside, leave_and_return };
 
-fn dragEndpointWitness(path: enum { inside, leave_and_return }) !void {
+fn dragEndpointWitness(path: DragEndpointPath) !void {
     const Pointer = @import("testing/app_events.zig");
     const Reports = struct {
         fn send(ctx: *vxfw.EventContext, frame: vxfw.Surface, code: u8, point: ScreenPoint, suffix: u8) !void {
