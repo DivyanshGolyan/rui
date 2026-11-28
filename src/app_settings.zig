@@ -35,8 +35,10 @@ pub const Backend = struct {
     memory: ?*const fn (*anyopaque) ?view.Memory = null,
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
     sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
-    /// The Host's served connections with the usage each last reported, and the Unix second they are read at; null when the Host cannot be read.
+    /// The Host's served connections with the usage each last reported, and the Unix second they are read at, as the owner last read them (no I/O); null when the Host could not be read.
     connections: ?*const fn (*anyopaque) ?ConnectionsSnapshot = null,
+    /// Asks the owner to read the Host again off the event loop; the answer arrives through `connections`.
+    ask_connections: ?*const fn (*anyopaque) void = null,
     /// The Unix second now, on the clock `connections` reads its snapshot at; the open Connections reference re-reads when it has aged.
     seconds: ?*const fn (*anyopaque) u64 = null,
 };
@@ -243,7 +245,13 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     if (row == .keys or row == .connections) {
         self.reference = if (row == .keys) .keys else .connections;
         self.connection_facts = null;
-        if (row == .connections) self.readConnections();
+        if (row == .connections) {
+            self.readConnections();
+            if (self.backend) |backend| {
+                if (backend.ask_connections) |ask| ask(backend.context);
+                self.connections_read_at = if (backend.seconds) |seconds| seconds(backend.context) else 0;
+            }
+        }
         self.reference_open = true;
         self.reference_offset = 0;
         ctx.consumeAndRedraw();
@@ -346,7 +354,6 @@ fn readConnections(self: *Self) void {
     const backend = self.backend orelse return;
     const read = backend.connections orelse return;
     self.connection_facts = read(backend.context);
-    self.connections_read_at = if (backend.seconds) |seconds| seconds(backend.context) else 0;
 }
 
 /// Whether the open Connections reference has kept its reading long enough to ask the Host again.
@@ -380,9 +387,15 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         const was_saving = self.saving_row != null;
         try self.poll();
         if (was_saving) ctx.redraw = true;
-        if (self.connectionsAged()) {
+        if (self.reference_open and self.reference == .connections) {
+            if (self.connectionsAged()) {
+                if (self.backend) |backend| if (backend.ask_connections) |ask| ask(backend.context);
+                self.connections_read_at = if (self.backend.?.seconds) |seconds| seconds(self.backend.?.context) else 0;
+            }
+            const before = self.connection_facts;
             self.readConnections();
-            ctx.redraw = true;
+            const changed = (before == null) != (self.connection_facts == null) or (before != null and before.?.now != self.connection_facts.?.now);
+            if (changed) ctx.redraw = true;
         }
         return;
     }
@@ -458,17 +471,22 @@ const Fixture = struct {
     upgrades: usize = 0,
     snapshot: ?ConnectionsSnapshot = null,
     connection_reads: usize = 0,
+    connection_asks: usize = 0,
     clock: u64 = 0,
     last_edit: ?preferences.Edit = null,
     status: ?upgrade_status.Run = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } },
 
     fn backend(self: *Fixture) Backend {
-        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory, .connections = connections, .seconds = seconds };
+        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory, .connections = connections, .ask_connections = askConnections, .seconds = seconds };
     }
     fn connections(raw: *anyopaque) ?ConnectionsSnapshot {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         self.connection_reads += 1;
         return self.snapshot;
+    }
+    fn askConnections(raw: *anyopaque) void {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.connection_asks += 1;
     }
     fn seconds(raw: *anyopaque) u64 {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -1245,7 +1263,7 @@ test "Keys reclamps on resize and starts at the top when reopened" {
     try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
 }
 
-test "SUI-188 an open Connections reference asks the Host again once its reading is five seconds old, and the other screens never do" {
+test "SUI-188 an open Connections reference asks its owner for a newer reading once its own is five seconds old, and the other screens never do" {
     const start: u64 = 1_800_000_000;
     var snapshot: ConnectionsSnapshot = .{ .facts = .{}, .now = start };
     snapshot.facts.items[0] = .{ .name = connection.Name.parse("work").?, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .usage = .{ .observed_at = start - 60, .primary = .{ .used_percent = 10, .minutes = 10080, .reset_at = start + 86400 }, .secondary = null } };
@@ -1257,32 +1275,31 @@ test "SUI-188 an open Connections reference asks the Host again once its reading
     var page: Self = .{ .backend = fixture.backend() };
     try page.refresh();
     page.bind();
-    // Keys and the settings list read the Host never.
+    // Keys and the settings list ask never.
     try page.widget().handleEvent(&ctx, .tick);
     page.select(.keys);
     try press(&page, &ctx, vaxis.Key.enter);
     fixture.clock += 60;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqual(@as(usize, 0), fixture.connection_reads);
+    try std.testing.expectEqual(@as(usize, 0), fixture.connection_asks);
     page.reference_open = false;
     page.select(.connections);
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqual(@as(usize, 1), fixture.connection_reads);
-    // Before five seconds a tick reads nothing; at five it reads once and starts the wait again.
-    for ([_]struct { u64, usize, bool }{ .{ 4, 1, false }, .{ 1, 2, true }, .{ 4, 2, false }, .{ 1, 3, true } }) |step| {
+    try std.testing.expectEqual(@as(usize, 1), fixture.connection_asks);
+    // Before five seconds a tick asks nothing; at five it asks once and starts the wait again. The owner answers off the loop, so a tick only reads what it holds.
+    for ([_]struct { u64, usize }{ .{ 4, 1 }, .{ 1, 2 }, .{ 4, 2 }, .{ 1, 3 } }) |step| {
         fixture.clock += step[0];
-        ctx.redraw = false;
         try page.widget().handleEvent(&ctx, .tick);
-        try std.testing.expectEqual(step[1], fixture.connection_reads);
-        try std.testing.expectEqual(step[2], ctx.redraw);
+        try std.testing.expectEqual(step[1], fixture.connection_asks);
     }
-    // A newer reading replaces what is drawn, and a Host that cannot be read shows its line.
+    // A newer reading from the owner replaces what is drawn and redraws, and a Host that could not be read shows its line.
     fixture.snapshot.?.facts.items[0].usage.?.primary.?.used_percent = 90;
-    fixture.clock += 5;
+    fixture.snapshot.?.now += 5;
+    ctx.redraw = false;
     try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(ctx.redraw);
     try std.testing.expectEqual(@as(f64, 90), page.connection_facts.?.facts.items[0].usage.?.primary.?.used_percent);
     fixture.snapshot = null;
-    fixture.clock += 5;
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(page.connection_facts == null);
 }
