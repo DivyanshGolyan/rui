@@ -486,10 +486,7 @@ fn servedOpenAi(init: std.process.Init, settings: *const hs.Settings, entry: *hs
         try entry.endpoint.?.text.set(resolved.url);
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         switch (try connectionKeySource(init, served.name.slice(), &served.credential, &path_buffer)) {
-            .file => |path| {
-                entry.key.source = .{ .file = .{} };
-                try entry.key.source.file.text.set(path);
-            },
+            .file => |path| try entry.key.useFile(path),
             .env => |name| {
                 entry.key.source = .{ .env = .{} };
                 try entry.key.source.env.set(name);
@@ -518,8 +515,7 @@ fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !v
     if (key.source != .default) return;
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
-    key.source = .{ .file = .{} };
-    try key.source.file.text.set(path);
+    try key.useFile(path);
 }
 
 /// Sets each key connection the document names to its readiness: configured when its key loads and is

@@ -170,6 +170,11 @@ pub fn Secret(comptime initial: SecretDefault) type {
         pub fn value(self: *const @This()) []const u8 {
             return self.bytes.slice();
         }
+        /// Takes the key from the file at `file_path`, replacing whatever source it had.
+        pub fn useFile(self: *@This(), file_path: []const u8) error{SettingsInvalid}!void {
+            self.source = .{ .file = .{} };
+            try self.source.file.text.set(file_path);
+        }
     };
 }
 pub fn Named(comptime capacity: usize, comptime V: type) type {
@@ -2777,4 +2782,13 @@ test "Host provider credential policy derives fixture mode from the endpoint" {
         try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
         try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "providers.chatgpt.tokenEndpoint") != null);
     }
+}
+
+test "a secret takes its key from a file path and refuses a path past the bound" {
+    var key: Secret(.provider_saved) = .{};
+    try key.useFile("/home/user/.config/rui/key");
+    try std.testing.expectEqualStrings("/home/user/.config/rui/key", key.source.file.slice());
+    var too_long: [Path.max_bytes + 1]u8 = undefined;
+    @memset(&too_long, 'p');
+    try std.testing.expectError(error.SettingsInvalid, key.useFile(&too_long));
 }
