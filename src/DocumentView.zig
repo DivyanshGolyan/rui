@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const viewport = @import("ConversationViewport.zig");
 const selecting = @import("transcript_selection.zig");
+const interruption = @import("interruption.zig");
 const TerminalText = @import("TerminalText.zig");
 const Spot = selecting.Spot;
 const Self = @This();
@@ -84,8 +85,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
         .mouse => |value| try self.mouse(ctx, value),
         // vxfw sends no release once the pointer has left; focus loss likewise
         // cancels the held gesture without copying.
-        .mouse_leave, .focus_out => if (self.cancelSelection()) {
-            ctx.redraw = true;
+        .mouse_leave, .focus_out => {
+            const happened: interruption.Interruption = if (input == .focus_out) .focus_lost else .pointer_left;
+            if (interruption.cancels(happened, .document_copy) and self.cancelSelection()) ctx.redraw = true;
         },
         .tick => {
             const selection = if (self.selection) |*value| value else return;
