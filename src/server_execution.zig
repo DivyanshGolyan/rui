@@ -716,7 +716,7 @@ pub fn executionMain(shared: Shared, settings: Settings, execution_state: *execu
         run.shared.lifecycle.fenceDispatch("execution workspace allocation", err);
         return;
     };
-    run.turn_states.init(served_names, turn_states);
+    run.turn_states.init(served_names, turn_states, run.shared.usage);
     defer {
         run.turn_states.deinit();
         unmapZeroed(turn_states);
@@ -2593,14 +2593,12 @@ fn launchPreparedRequest(
         .rejection = served.credential.rejection(lease),
     });
     const active = &slot.provider;
-    const routing_owner = served.credential.routingOwner(lease);
-    if (served.credential.signIn() != null) run.shared.usage.begin(request.provider, routing_owner);
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
         .observe_allowance = served.credential.signIn() != null,
         .timing = run.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
-        .routing = .{ .turn_id = binding.turn_id, .owner = routing_owner },
+        .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
         .faults = run.shared.probes.transferFaults(),
         .response_workspace_bytes = if (owner.purpose == .compaction) @sizeOf(PendingFailure) else 0,
     }, &retained_response) catch |err| {

@@ -2,18 +2,22 @@ const std = @import("std");
 const connection = @import("connection.zig");
 const connection_names = @import("connection_names.zig");
 const provider = @import("provider.zig");
+const ConnectionUsage = @import("ConnectionUsage.zig");
 
 /// One TurnStates table per served connection name, keyed by name through the
 /// served set's table. Each name's table takes an equal share of the entries.
 pub const PerConnection = struct {
     tables: connection_names.NameArray(TurnStates) = .{},
+    /// Told each name's owner epoch as a request starts, so a usage reading follows the same owner change as the routing value.
+    usage: ?*ConnectionUsage = null,
 
     /// Initializes in place: the value is over 1 KiB and has one address on a Host thread.
-    pub fn init(self: *PerConnection, names: []const connection.Name, entries: []TurnStates.Entry) void {
+    pub fn init(self: *PerConnection, names: []const connection.Name, entries: []TurnStates.Entry, usage: ?*ConnectionUsage) void {
         std.debug.assert(names.len <= connection.max_served);
         std.debug.assert(if (names.len == 0) entries.len == 0 else entries.len % names.len == 0);
         const per_table = if (names.len == 0) 0 else entries.len / names.len;
         self.tables = .{};
+        self.usage = usage;
         for (names, 0..) |name, index| {
             self.tables.set(name, .{ .entries = entries[index * per_table ..][0..per_table] }) catch unreachable;
         }
@@ -36,6 +40,7 @@ pub const PerConnection = struct {
     fn replayFor(context: *anyopaque, served: connection.Name, turn_id: u64, owner: TurnStates.Owner) provider.TurnStateSink.Replay {
         const self: *PerConnection = @ptrCast(@alignCast(context));
         const replayed = self.get(served).replay(turn_id, owner);
+        if (self.usage) |usage| usage.begin(served, replayed.epoch);
         return .{ .epoch = replayed.epoch, .value = replayed.value };
     }
 
@@ -199,7 +204,7 @@ test "EXR-103 two connections' Turns keep their values while their different own
     const names = [_]connection.Name{ connection.Name.parse("codex").?, connection.Name.parse("openai").?, connection.Name.parse("alpha").? };
     var storage: [2 * names.len]TurnStates.Entry = @splat(.{});
     var states: PerConnection = undefined;
-    states.init(&names, &storage);
+    states.init(&names, &storage, null);
     defer states.deinit();
     const chatgpt: TurnStates.Owner = @splat(1);
     const key: TurnStates.Owner = @splat(0);
