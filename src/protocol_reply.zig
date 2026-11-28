@@ -61,7 +61,7 @@ pub const ActivityPage = struct {
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
-        const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
+        const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null, provider: ?JsonString(@import("connection.zig").max_name_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const HostedAction = struct { kind: JsonEnum(hosted_action.HostedAction), targets: JsonArray(Ref, protocol.HostedActionJson.max_served), targets_total: JsonString(20), pattern: ?Ref };
         const Instruction = struct { turn: ?JsonString(20), revision: ?JsonString(20), content: Ref };
@@ -121,8 +121,9 @@ pub const ActivityPage = struct {
                 },
                 .session_changed => |change| {
                     const revision = try id(change.revision, false);
-                    if (revision <= 1 or (change.field == .reasoning_effort_refused) != (change.provider_text != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .session_changed = .{ .revision = revision, .field = change.field, .provider_text = if (change.provider_text) |text| text.value else null } };
+                    if (revision <= 1 or (change.field == .reasoning_effort_refused) != (change.provider_text != null) or (change.field == .provider) != (change.provider != null)) return error.InvalidActivityPage;
+                    const provider = if (change.provider) |text| @import("connection.zig").Name.parse(text.slice()) orelse return error.InvalidActivityPage else null;
+                    fact.value = .{ .session_changed = .{ .revision = revision, .field = change.field, .provider_text = if (change.provider_text) |text| text.value else null, .provider = provider } };
                 },
                 .instruction => |instruction| {
                     // The skill-catalog instruction has neither a Turn nor an authored revision; every other one has both.
@@ -4215,25 +4216,27 @@ test "a hosted call's action names nothing under none and serves as many targets
     }
 }
 
-test "session change activity carries refusal text only for a refused later revision" {
+test "INS-21 a session_changed row decodes only with refusal text exactly for a refused later revision and a connection exactly for a provider change" {
     for (std.enums.values(protocol.SessionField)) |field| {
         for ([_]u64{ 1, 2 }) |revision| {
             for ([_]bool{ false, true }) |has_text| {
-                var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 2 } };
-                try facts.work.workspace.set("/w");
-                facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .session_changed = .{ .revision = revision, .field = field } } };
-                if (has_text) {
-                    facts.items[0].value.session_changed.provider_text = .{};
-                    try facts.items[0].value.session_changed.provider_text.?.set("unsupported_value: high \"effort\" is not supported");
-                }
-                var buffer: [activity_reply.max_page_bytes]u8 = undefined;
-                var writer = std.Io.Writer.fixed(&buffer);
-                try activity_reply.writePage(&writer, &facts);
-                if (revision > 1 and (field == .reasoning_effort_refused) == has_text) {
-                    const page = try ActivityPage.parse(writer.buffered(), .{});
-                    try std.testing.expectEqualDeep(facts.items[0].value.session_changed, page.facts.items[0].value.session_changed);
-                } else {
-                    try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+                for ([_]bool{ false, true }) |has_provider| {
+                    var facts: protocol.ActivityFacts = .{ .end = 1, .aggregates = .{ .as_of = 1 }, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 2 } };
+                    try facts.work.workspace.set("/w");
+                    facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .session_changed = .{ .revision = revision, .field = field, .provider = if (has_provider) @import("connection.zig").Name.parse("work") else null } } };
+                    if (has_text) {
+                        facts.items[0].value.session_changed.provider_text = .{};
+                        try facts.items[0].value.session_changed.provider_text.?.set("unsupported_value: high \"effort\" is not supported");
+                    }
+                    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+                    var writer = std.Io.Writer.fixed(&buffer);
+                    try activity_reply.writePage(&writer, &facts);
+                    if (revision > 1 and (field == .reasoning_effort_refused) == has_text and (field == .provider) == has_provider) {
+                        const page = try ActivityPage.parse(writer.buffered(), .{});
+                        try std.testing.expectEqualDeep(facts.items[0].value.session_changed, page.facts.items[0].value.session_changed);
+                    } else {
+                        try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+                    }
                 }
             }
         }

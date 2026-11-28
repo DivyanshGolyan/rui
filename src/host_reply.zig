@@ -593,7 +593,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .origin = .{ .peer = peer } } },
         .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max, .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
-        .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes } } },
+        .{ .session_changed = .{ .revision = max, .field = Worst.tag(protocol.SessionField), .provider_text = .{ .bytes = @splat(1), .len = protocol.max_report_bytes }, .provider = @import("connection.zig").Name.parse(&@as([16]u8, @splat('a'))) } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
         .{ .instruction = .{ .turn = max, .revision = max, .content = text } },
         .{ .skill = .{ .admission = max, .turn = max, .ordinal = max, .name = .{ .bytes = @splat(1), .len = @import("skill_reference.zig").max_name_bytes }, .content = text } },

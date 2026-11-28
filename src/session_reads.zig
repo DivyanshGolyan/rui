@@ -2081,7 +2081,7 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     try above.validate();
     try std.testing.expect(!above.kinds.contains(.call));
     try std.testing.expect(!above.kinds.contains(.approval_requested));
-    try std.testing.expect(!above.kinds.contains(.session_changed));
+    try std.testing.expect(above.kinds.contains(.session_changed));
     try std.testing.expect(!above.kinds.contains(.compacted));
     try std.testing.expect(above.kinds.eql(activity_read.conversation));
 }
