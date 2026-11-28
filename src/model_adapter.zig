@@ -4379,7 +4379,8 @@ test "a refused top-level effort remains an ordinary provider failure without a 
         try std.testing.expectEqual(@as(usize, 1), page.count);
         const ended = page.items[0].value.turn_ended;
         try std.testing.expectEqualStrings("provider_http_400", ended.code.slice());
-        try std.testing.expectEqual(protocol.contentDigest("unsupported effort"), ended.content.?.digest);
+        try std.testing.expect(ended.content == null);
+        try std.testing.expectEqualStrings("unsupported effort", ended.report.message.text.slice());
     }
 }
 

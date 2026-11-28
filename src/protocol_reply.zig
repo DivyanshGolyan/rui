@@ -7,6 +7,7 @@ const connection = @import("connection.zig");
 const command_spec = @import("command_spec.zig");
 const session_list = @import("session_list.zig");
 const activity_reply = @import("activity_reply.zig");
+const failure_report = @import("failure_report.zig");
 pub const SessionToken = @import("change_ring.zig").SessionToken;
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
@@ -59,7 +60,7 @@ pub const ActivityPage = struct {
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), origin: JsonOrigin, content: Ref };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
-        const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
+        const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref, report: ?JsonFailureReport };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null, provider: ?JsonString(@import("connection.zig").max_name_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
@@ -182,8 +183,15 @@ pub const ActivityPage = struct {
                     const done = ending.sign() == .finished;
                     const cancelled = ending.sign() == .stopped;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
-                        (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try textOf(reference) else null } };
+                        (done != (ended.content != null)) or ((done or cancelled) and ended.report != null)) return error.InvalidActivityPage;
+                    const report: failure_report.Report = if (ended.report) |*saved| failure_report.Report.restore(
+                        if (saved.code) |*text| text.slice() else null,
+                        saved.code_cut,
+                        if (saved.message) |*text| text.slice() else null,
+                        saved.message_cut,
+                    ) catch return error.InvalidActivityPage else .empty;
+                    if (ended.report != null and report.isEmpty()) return error.InvalidActivityPage;
+                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try textOf(reference) else null, .report = report } };
                 },
                 .stop => |stop| {
                     fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } };
@@ -2029,6 +2037,14 @@ pub const JsonFirstMessage = struct {
     }
 };
 
+/// The reader of a `FailureReport` member.
+const JsonFailureReport = struct {
+    code: ?JsonString(failure_report.max_part_bytes),
+    message: ?JsonString(failure_report.max_stored_bytes),
+    code_cut: bool,
+    message_cut: bool,
+};
+
 /// The one reader of a `ContentValue` member.
 pub const JsonContentValue = struct {
     value: content_value.Value,
@@ -2608,9 +2624,9 @@ test "an activity page's aggregates are read exactly when every kind is asked fo
     };
 }
 
-test "a turn_ended row's ending agrees with its saved code and content, and a final answer crosses" {
+test "a turn_ended row's ending agrees with its saved code, content and report, and a final answer crosses" {
     const content: content_value.Reference = .{ .length = 1, .digest = @splat(1) };
-    const Case = struct { ending: protocol.TurnEnding, code: []const u8, content: ?content_value.Reference, valid: bool };
+    const Case = struct { ending: protocol.TurnEnding, code: []const u8, content: ?content_value.Reference, valid: bool, report: ?failure_report.Report = null };
     for ([_]Case{
         .{ .ending = .done, .code = "completed", .content = content, .valid = true },
         .{ .ending = .done, .code = "completed", .content = null, .valid = false },
@@ -2619,14 +2635,18 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
         .{ .ending = .interrupted, .code = "cancelled", .content = null, .valid = true },
         .{ .ending = .interrupted, .code = "cancelled", .content = content, .valid = false },
         .{ .ending = .failed, .code = "cancelled", .content = null, .valid = false },
-        .{ .ending = .provider_refused, .code = "provider_policy", .content = content, .valid = true },
+        .{ .ending = .provider_refused, .code = "provider_policy", .content = content, .valid = false },
+        .{ .ending = .provider_refused, .code = "provider_policy", .content = null, .valid = true },
+        .{ .ending = .provider_refused, .code = "provider_policy", .content = null, .valid = true, .report = failure_report.Report.ofMessage("denied") },
+        .{ .ending = .done, .code = "completed", .content = content, .valid = false, .report = failure_report.Report.ofMessage("denied") },
+        .{ .ending = .stopped, .code = "cancelled", .content = null, .valid = false, .report = failure_report.Report.ofMessage("denied") },
         .{ .ending = .context_full, .code = "ResourceExceeded", .content = null, .valid = true },
     }) |case| {
         var code: protocol.Bounded(protocol.max_code_bytes) = .{};
         try code.set(case.code);
         var facts: protocol.ActivityFacts = .{ .end = 2, .aggregates = .{ .as_of = 2 }, .count = 2, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .assistant = .{ .content = content, .final = case.ending == .done } } };
-        facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
+        facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content, .report = case.report orelse .empty } } };
         try facts.work.workspace.set("/w");
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);

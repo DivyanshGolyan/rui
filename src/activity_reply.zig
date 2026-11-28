@@ -43,7 +43,7 @@ pub const ItemJson = struct {
         pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, ",", H{ .json = ContentValueJson }, "]" } ++ call_details ++ .{"}"};
         pub const tool_result = .{ "{\"content\":", H{ .json = ContentValueJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
         pub const hosted_call = .{ "{\"presentation\":", H{ .json = ToolPresentationJson }, ",\"action\":", H{ .json = protocol.HostedActionJson }, "}" };
-        pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = ContentValueJson }, "}" };
+        pub const turn_ended = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"turn\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"ending\":\"", H{ .tag = protocol.TurnEnding }, "\",\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = protocol.ContentTextJson }, ",\"report\":", H{ .optional_json = protocol.FailureReportJson }, "}" };
         pub const stop = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"cutoff\":\"", H.decimal, "\",\"completion\":\"", H{ .tag = protocol.SessionStopCompletion }, "\"}" };
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
         pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, ",\"provider\":", H{ .optional_string = @import("connection.zig").max_name_bytes }, "}" };
@@ -90,7 +90,7 @@ pub const ItemJson = struct {
                 for (call.fields, &fields) |field, *content| content.* = .text(.{ .length = field.length, .digest = field.digest });
                 try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2], optionalText(&call.description), optionalText(&call.tool), optionalText(&call.server) });
             },
-            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ContentValueJson.optionalText(ended.content) }),
+            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), if (ended.content) |reference| protocol.ContentTextJson{ .reference = reference } else null, protocol.FailureReportJson.optional(ended.report) }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
         try writeShape(out, tail, .{});

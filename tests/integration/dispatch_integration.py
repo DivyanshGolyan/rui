@@ -576,8 +576,8 @@ def http_quota_cases(state, processes, endpoints):
         assert operation["resolution"]["code"] == code, operation
         diagnostic = operation["resolution"]["content"]["text"]
         assert json.loads(diagnostic) == {"refusal": refusal, "resets_at": reset}, diagnostic
-        assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(
-            f"{provider_code}: Provider prose stays out of the diagnostic."), report
+        # The provider's words are the Turn's report, not its content: the session report's outcome content is the answer only.
+        assert report["full"]["turns"][0]["outcome"]["content"] is None, report
         assert observe(store, key)["result"] == result["result"]
         stop_host(reopened)
         processes.remove(reopened)
@@ -628,7 +628,7 @@ def http_quota_cases(state, processes, endpoints):
         assert result["result"] == {"status": "failed", "code": code}, result
         assert result["binding"]["attempt"] == "1", result
         report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
-        assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(words), report
+        assert report["full"]["turns"][0]["outcome"]["content"] is None, report
         stop_host(host)
         processes.remove(host)
         assert len(endpoint.requests) == 1, endpoint.requests
@@ -820,11 +820,8 @@ def stream_failure_cases(state, processes, endpoints):
             detail = json.loads(operation["resolution"]["content"]["text"])
             assert detail == {"reason": "TemporaryProviderFailure", "stage": "event", "byte_offset": "6", "output_index": None}, detail
         outcome = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["turns"][0]["outcome"]
-        if code.startswith("provider_"):
-            provider_code = label.split("-", 1)[1]
-            assert outcome["content"] == content_reference(f"{provider_code}: Words for {provider_code}."), (label, outcome)
-        elif code == "retry_exhausted":
-            assert outcome["content"] == content_reference("server_is_overloaded"), (label, outcome)
+        # A failed Turn keeps the provider's words as its report, never as content.
+        assert outcome["content"] is None, (label, outcome)
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:

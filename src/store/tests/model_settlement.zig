@@ -627,7 +627,7 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
                 defer tmp.cleanup();
                 const detail = "{\"reason\":\"UnsupportedMessagePhase\",\"stage\":\"item\",\"byte_offset\":\"37\",\"output_index\":1}";
                 const request_id = if (fault == .import) "" else "request-\"quoted\"\\path";
-                var failure: ModelFailure = .{ .rejected = .{ .code = "unsupported_provider_output", .diagnostic = detail, .request_id = .{}, .report = .empty } };
+                var failure: ModelFailure = .{ .rejected = .{ .code = "unsupported_provider_output", .diagnostic = detail, .request_id = .{}, .report = .ofMessage("provider words") } };
                 try failure.rejected.request_id.set(request_id);
                 var binding: AttemptBinding = undefined;
                 var session: protocol.Bounded(protocol.max_session_bytes) = undefined;
@@ -682,6 +682,8 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
                     try std.testing.expectEqual(@as(u64, if (request_id.len == 0) 0 else 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE request_id IS NOT NULL", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
                     try expectActivityOutcome(&storage, session.slice(), binding, .failed, "unsupported_provider_output");
+                    // The provider's words are the Turn's report and the diagnostic is only the Operation's content: the Turn links no content.
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_report_message=?1 AND outcome_content_id IS NULL", .{"provider words"}));
                 }
             }
         }
@@ -737,59 +739,6 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
     }.run);
 }
 
-test "a failed Turn's activity outcome references the provider's report" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSession(&storage, "report-config");
-            const report = "cyber_policy: This request has been flagged.";
-            for ([_][]const u8{ report, "" }, 0..) |words, index| {
-                var key: [16]u8 = undefined;
-                const message = try std.fmt.bufPrint(&key, "report-{d}", .{index});
-                try submitTestMessage(&storage, &tmp, message, message, session.slice(), "work");
-                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_policy", .request_id = .{}, .report = .ofMessage(words) } }, .ordinary, .{});
-                try expectActivityOutcome(&storage, session.slice(), binding, .provider_refused, "provider_policy");
-                var request: protocol.ActivityPage = .{ .direction = .backward };
-                try request.session.set(session.slice());
-                const outcome = (try store_core.activityPageForTesting(&storage, request)).items[0].value.turn_ended;
-                if (words.len == 0) {
-                    try std.testing.expect(outcome.content == null);
-                } else {
-                    try std.testing.expectEqual(@as(u64, words.len), outcome.content.?.length);
-                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(words), &outcome.content.?.digest);
-                }
-            }
-        }
-    }.run);
-}
-
-test "a failure whose report equals its new diagnostic saves one content row for both" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSession(&storage, "same-words-config");
-            try submitTestMessage(&storage, &tmp, "same-words-input", "same-words-message", session.slice(), "work");
-            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const words = "provider_rejected: the same words twice";
-            const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_rejected", .diagnostic = words, .request_id = .{}, .report = .ofMessage(words) } }, .ordinary, .{});
-            try std.testing.expect(!storage.isFenced());
-            try std.testing.expectEqual(before + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN turn t ON t.operation_id=o.operation_id " ++
-                "WHERE o.resolution_content_id IS NOT NULL AND o.resolution_content_id=t.outcome_content_id", .{}));
-        }
-    }.run);
-}
-
 test "retryable stream rejections retain only the settling Attempt diagnostic through reopen" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -835,10 +784,8 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
             try std.testing.expectEqualStrings(diagnostic, resolution.get("content").?.object.get("text").?.string);
             const outcome = parsed.value.object.get("full").?.object.get("turns").?.array.items[0].object.get("outcome").?.object;
             try std.testing.expectEqualStrings("retry_exhausted", outcome.get("code").?.string);
-            const words = "server_is_overloaded: Try again later.";
-            const reference = outcome.get("content").?.object;
-            try std.testing.expectEqualStrings(std.fmt.comptimePrint("{d}", .{words.len}), reference.get("bytes").?.string);
-            try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest(words), .lower), reference.get("sha256").?.string);
+            // The session report's outcome content is a done Turn's answer; the provider's words are the Turn's `report`, read from its Activity row.
+            try std.testing.expect(outcome.get("content").? == .null);
         }
     }.run);
 }

@@ -18,6 +18,7 @@ const workspace_path = @import("workspace_path.zig");
 const store_path = @import("store_path.zig");
 const provider_route = @import("provider_route.zig");
 const outcome_code = @import("outcome_code.zig");
+const failure_report = @import("failure_report.zig");
 const content_string = @import("content_string.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const tool_name = @import("tool_name.zig");
@@ -2356,6 +2357,30 @@ pub const OwnerJson = struct {
             .message => |id| try writeShape(out, message_shape, .{id}),
             .action => |id| try writeShape(out, action_shape, .{id}),
         }
+    }
+};
+
+/// A provider's failure as the Store kept it: the provider's code and message, each with a flag that says it was cut, and no cut mark.
+pub const FailureReportJson = struct {
+    value: failure_report.Report,
+
+    pub const openapi_name = "FailureReport";
+    pub const json_shape = .{ "{\"code\":", Hole{ .optional_string = failure_report.max_part_bytes }, ",\"message\":", Hole{ .optional_string = failure_report.max_stored_bytes }, ",\"code_cut\":", Hole.boolean, ",\"message_cut\":", Hole.boolean, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    /// A Turn that ended without the provider's words has no report.
+    pub fn optional(report: failure_report.Report) ?FailureReportJson {
+        return if (report.isEmpty()) null else .{ .value = report };
+    }
+
+    pub fn writeJson(self: *const FailureReportJson, out: *std.Io.Writer) !void {
+        const report = &self.value;
+        try writeShape(out, json_shape, .{
+            if (report.code.text.len == 0) null else report.code.text.slice(),
+            if (report.message.text.len == 0) null else report.message.text.slice(),
+            report.code.cut,
+            report.message.cut,
+        });
     }
 };
 

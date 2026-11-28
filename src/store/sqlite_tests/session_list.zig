@@ -782,7 +782,7 @@ fn damaged(storage: *Store, tmp: *std.testing.TmpDir, damage: anytype) !protocol
         },
         .unknown_outcome => {
             const session = try TestingWorkShape.finished.make(storage, tmp, "sl7-unknown");
-            try store_testing.sqlite_only.exec(storage, "UPDATE turn SET outcome_code='bogus' WHERE session_ref=?1", .{session.slice()});
+            try store_testing.sqlite_only.exec(storage, "UPDATE turn SET outcome_code='bogus',outcome_content_id=NULL WHERE session_ref=?1", .{session.slice()});
             return session;
         },
         .running_without_call => {

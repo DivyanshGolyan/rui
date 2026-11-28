@@ -8,15 +8,18 @@ const rsql = @import("../rsql.zig");
 const model_admission_domain = @import("model_admission.zig");
 const continues_without_input_sql = model_admission_domain.continues_without_input_sql;
 const failure_class = @import("../../failure_class.zig");
+const failure_report = @import("../../failure_report.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 
+/// How a Turn ended. A completed Turn saved its answer as content; a Turn that ended in a provider failure saved the provider's
+/// words as its Report (see `report_columns`), never as content.
 pub const TurnOutcome = union(enum) {
     completed: i64,
     cancelled,
-    retry_exhausted: ?i64,
-    resource_exceeded: ?i64,
-    failed: Failed,
-
-    const Failed = struct { code: []const u8, report: ?i64 };
+    retry_exhausted,
+    resource_exceeded,
+    /// The provider's failure code.
+    failed: []const u8,
     pub const Tag = std.meta.Tag(TurnOutcome);
 
     pub const completed_code = "completed";
@@ -32,15 +35,22 @@ pub const TurnOutcome = union(enum) {
     }
 
     pub fn code(outcome: TurnOutcome) []const u8 {
-        return fixedCode(outcome) orelse outcome.failed.code;
+        return fixedCode(outcome) orelse outcome.failed;
     }
 
+    /// The answer a completed Turn saved.
     pub fn content(outcome: TurnOutcome) ?i64 {
         return switch (outcome) {
             .completed => |answer| answer,
-            .retry_exhausted, .resource_exceeded => |report| report,
-            .failed => |failed| failed.report,
-            .cancelled => null,
+            .cancelled, .retry_exhausted, .resource_exceeded, .failed => null,
+        };
+    }
+
+    /// Whether this ending carries the provider's words.
+    pub fn reports(outcome: TurnOutcome) bool {
+        return switch (outcome) {
+            .retry_exhausted, .resource_exceeded, .failed => true,
+            .completed, .cancelled => false,
         };
     }
 
@@ -50,7 +60,7 @@ pub const TurnOutcome = union(enum) {
             .cancelled => if (stopped) .stopped else .interrupted,
             .retry_exhausted => .provider_unavailable,
             .resource_exceeded => .context_full,
-            .failed => |failed| switch (failure_class.of(failed.code)) {
+            .failed => |failed| switch (failure_class.of(failed)) {
                 .quota => .out_of_quota,
                 .policy, .plan, .model, .sign_in, .api_key, .refused => .provider_refused,
                 .unreachable_provider, .retries_exhausted => .provider_unavailable,
@@ -65,14 +75,38 @@ pub const TurnOutcome = union(enum) {
         const tag: Tag = for (std.enums.values(Tag)) |candidate| {
             if (fixedCode(candidate)) |fixed| if (std.mem.eql(u8, fixed, saved)) break candidate;
         } else .failed;
+        if (tag != .completed and content_id != null) return error.CorruptStore;
         return switch (tag) {
             .completed => .{ .completed = content_id orelse return error.CorruptStore },
-            .retry_exhausted => .{ .retry_exhausted = content_id },
-            .resource_exceeded => .{ .resource_exceeded = content_id },
-            .failed => .{ .failed = .{ .code = saved, .report = content_id } },
-            .cancelled => if (content_id == null) .cancelled else error.CorruptStore,
+            .retry_exhausted => .retry_exhausted,
+            .resource_exceeded => .resource_exceeded,
+            .failed => .{ .failed = saved },
+            .cancelled => .cancelled,
         };
     }
+
+    /// The Report a Turn row saved, which is empty exactly when the ending carries no provider words.
+    pub fn decodeReport(outcome: TurnOutcome, saved: *const SavedReport) error{CorruptStore}!failure_report.Report {
+        const report = failure_report.Report.restore(
+            if (saved.code) |*part| part.slice() else null,
+            saved.code_cut,
+            if (saved.message) |*part| part.slice() else null,
+            saved.message_cut,
+        ) catch return error.CorruptStore;
+        if (!outcome.reports() and !report.isEmpty()) return error.CorruptStore;
+        return report;
+    }
+};
+
+/// The columns a Turn's saved Report is read from, in the order of `SavedReport`'s fields.
+pub const report_columns = "t.outcome_report_code,t.outcome_report_message,t.outcome_report_code_cut,t.outcome_report_message_cut";
+
+/// A Turn row's Report columns as a Row carries them.
+pub const SavedReport = struct {
+    code: ?Bounded(failure_report.max_part_bytes),
+    message: ?Bounded(failure_report.max_stored_bytes),
+    code_cut: bool,
+    message_cut: bool,
 };
 
 pub const stopped_turn = rsql.Read(.{
@@ -88,9 +122,20 @@ pub const stopped_turn = rsql.Read(.{
 
 fn CloseTurn(comptime otherwise: anyerror) type {
     return rsql.Write(.{
-        .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now " ++
+        .sql = "UPDATE turn SET outcome_code=?2,outcome_content_id=?3,outcome_position=?4,outcome_at=@now," ++
+            "outcome_report_code=?6,outcome_report_message=?7,outcome_report_code_cut=?8,outcome_report_message_cut=?9 " ++
             "WHERE turn_id=?1 AND session_ref=@session(?5) AND outcome_code IS NULL",
-        .Args = struct { turn_id: u64, code: []const u8, content_id: ?u64, position: u64, session: rsql.SessionHead },
+        .Args = struct {
+            turn_id: u64,
+            code: []const u8,
+            content_id: ?u64,
+            position: u64,
+            session: rsql.SessionHead,
+            report_code: ?[]const u8,
+            report_message: ?[]const u8,
+            report_code_cut: bool,
+            report_message_cut: bool,
+        },
         .expect = .{ .exact = .{ .rows = 1, .otherwise = otherwise } },
     });
 }
@@ -104,18 +149,24 @@ const record_continuation = rsql.Write(.{
 });
 
 pub fn queueClose(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome) !void {
-    return queueCloseOr(a, positions, turn_id, outcome, error.CorruptStore);
+    return queueCloseOr(a, positions, turn_id, outcome, &failure_report.Report.empty, error.CorruptStore);
 }
 
-pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome, comptime otherwise: anyerror) !void {
+/// Close a Turn with how it ended. `report` is the provider's words: queued statements read it in place, so the caller's frame keeps it.
+pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64, outcome: TurnOutcome, report: *const failure_report.Report, comptime otherwise: anyerror) !void {
     const content_id = outcome.content();
     std.debug.assert(std.meta.activeTag(TurnOutcome.decode(outcome.code(), content_id) catch unreachable) == std.meta.activeTag(outcome));
+    std.debug.assert(outcome.reports() or report.isEmpty());
     a.write(CloseTurn(otherwise), .{
         .turn_id = turn_id,
         .code = outcome.code(),
         .content_id = if (content_id) |id| @intCast(id) else null,
         .position = try positions.take(1),
         .session = positions.head,
+        .report_code = if (report.code.text.len == 0) null else report.code.text.slice(),
+        .report_message = if (report.message.text.len == 0) null else report.message.text.slice(),
+        .report_code_cut = report.code.cut,
+        .report_message_cut = report.message.cut,
     });
     try @import("forward.zig").queue(a, &positions.head.ref, &positions.head.ref, .ending, turn_id);
 }

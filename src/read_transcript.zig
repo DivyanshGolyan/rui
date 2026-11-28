@@ -4,6 +4,7 @@ const protocol = @import("protocol.zig");
 const core = @import("core_tools.zig");
 const storage = @import("store.zig");
 const utf8_validation = @import("utf8_validation.zig");
+const outcome_code = @import("outcome_code.zig");
 const content_value = @import("content_value.zig");
 const part_text = @import("part_text.zig");
 const entry_text = @import("entry_text.zig");
@@ -374,6 +375,14 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
                 origin = end + 1;
             }
             text = bytes;
+        },
+        .report => |report| {
+            // The provider's words as one line, the same text a search of the row matched.
+            var line: [outcome_code.max_report_bytes]u8 = undefined;
+            const joined = report.joined(&line);
+            total = joined.len;
+            if (offset > total) return error.InvalidOffset;
+            text = try arena.dupe(u8, joined[@intCast(offset)..][0..@min(window_bytes, joined.len - @as(usize, @intCast(offset)))]);
         },
         .none => {
             if (offset != 0) return error.InvalidOffset;

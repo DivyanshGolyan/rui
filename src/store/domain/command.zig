@@ -52,6 +52,7 @@ const MessageCommitted = Store.MessageCommitted;
 const MessageObservation = reads_domain.MessageObservation;
 const session_work = @import("../../session_work.zig");
 const TurnOutcome = turn_domain.TurnOutcome;
+const failure_report = @import("../../failure_report.zig");
 
 pub fn sessionStopCutoffSql(comptime session: []const u8) []const u8 {
     return "SELECT admission_cutoff FROM session_stop WHERE session_ref=" ++ session ++ " ORDER BY admission_cutoff DESC LIMIT 1";
@@ -871,7 +872,7 @@ fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const 
 }
 
 const owed_ending_facts = rsql.Read(.{
-    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,c.byte_length,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,c.byte_length," ++ turn_domain.report_columns ++ "," ++
         action_domain.ending_stop_sql ++ " FROM session_forward e JOIN turn t ON t.turn_id=e.source_id " ++
         "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.source_id=?1 AND e.message_delivered=0",
     .Args = struct { turn_id: u64 },
@@ -882,7 +883,10 @@ const owed_ending_facts = rsql.Read(.{
         outcome_content_id: ?rsql.Positive,
         digest: ?[32]u8,
         byte_length: ?u64,
-        report: ?Bounded(outcome_code.max_report_bytes),
+        outcome_report_code: ?Bounded(failure_report.max_part_bytes),
+        outcome_report_message: ?Bounded(failure_report.max_stored_bytes),
+        outcome_report_code_cut: bool,
+        outcome_report_message_cut: bool,
         stopped: bool,
         quiet: bool,
     },
@@ -941,7 +945,9 @@ pub const DeliverChildEnding = struct {
                 r.write(settle_owed_ending, .{ .turn_id = t.input.turn_id });
                 if (found.quiet) return finish(r);
                 t.outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
-                t.text = endingText(&t.input.ending.text_buffer, t.outcome.ending(found.stopped), if (found.report) |*report| report.slice() else null);
+                const report = try t.outcome.decodeReport(&.{ .code = found.outcome_report_code, .message = found.outcome_report_message, .code_cut = found.outcome_report_code_cut, .message_cut = found.outcome_report_message_cut });
+                var line: [outcome_code.max_report_bytes]u8 = undefined;
+                t.text = endingText(&t.input.ending.text_buffer, t.outcome.ending(found.stopped), if (report.isEmpty()) null else report.joined(&line));
                 readTarget(r, found.parent.slice(), &t.receiver);
                 t.message = if (t.outcome == .completed) .{ .length = found.byte_length orelse return error.CorruptStore, .digest = found.digest orelse return error.CorruptStore, .private = false } else .ofBytes(t.text, false);
                 content_domain.lookup(r, &t.message);
@@ -2259,7 +2265,7 @@ pub const InterruptModel = struct {
         if (rejection == null) {
             const head = t.target.?.session;
             interrupt_operation.queue(r, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
-            if (!t.pending.pending) try turn_domain.queueCloseOr(r, try r.positions(head), command.turn_id, .cancelled, error.InterruptionTargetChanged);
+            if (!t.pending.pending) try turn_domain.queueCloseOr(r, try r.positions(head), command.turn_id, .cancelled, &failure_report.Report.empty, error.InterruptionTargetChanged);
         }
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         t.trace = r.faults().control_trace;

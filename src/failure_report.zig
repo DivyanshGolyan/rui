@@ -1,12 +1,16 @@
 //! A provider's failure as the provider said it: a short code and a short message, each kept whole or
 //! cut to its bound, with a flag that says which was cut.
 //! Control bytes are rewritten to spaces when a part is read, so a part is always one line of UTF-8.
+//! A Report saved in a Store is these parts and nothing else: the cut mark belongs to a one-line rendering.
 const std = @import("std");
 const outcome_code = @import("outcome_code.zig");
-const protocol = @import("protocol.zig");
+const Bounded = @import("bounded.zig").Bounded;
 const utf8_validation = @import("utf8_validation.zig");
 
-pub const max_part_bytes = 256;
+/// A part read from a provider is cut at this many bytes.
+pub const max_part_bytes = outcome_code.max_report_part_bytes;
+/// A part restored from a Store holds up to this many bytes: a failure saved before format 99 is one whole line in the message.
+pub const max_stored_bytes = outcome_code.max_report_bytes;
 /// The mark a one-line rendering shows after a cut part. Stored parts never contain it.
 pub const cut_mark = "…";
 
@@ -15,7 +19,7 @@ comptime {
 }
 
 pub const Part = struct {
-    text: protocol.Bounded(max_part_bytes) = .{},
+    text: Bounded(max_stored_bytes) = .{},
     cut: bool = false,
 
     pub fn clear(self: *Part) void {
@@ -26,7 +30,7 @@ pub const Part = struct {
     /// Add bytes while they fit. When they do not, keep what fits up to the longest valid prefix, mark the part
     /// cut and return false.
     pub fn append(self: *Part, bytes: []const u8) bool {
-        const kept = @min(bytes.len, self.text.bytes.len - self.text.len);
+        const kept = @min(bytes.len, max_part_bytes - self.text.len);
         @memcpy(self.text.bytes[self.text.len..][0..kept], bytes[0..kept]);
         self.text.len += kept;
         if (kept == bytes.len) return true;
@@ -37,7 +41,10 @@ pub const Part = struct {
 
     /// End of reading: drop a part that is not UTF-8 and make the rest one line.
     pub fn finish(self: *Part) void {
-        if (!std.unicode.utf8ValidateSlice(self.text.slice())) self.text.len = 0;
+        if (!std.unicode.utf8ValidateSlice(self.text.slice())) {
+            self.text.len = 0;
+            self.cut = false;
+        }
         for (self.text.bytes[0..self.text.len]) |*byte| if (byte.* < 0x20 or byte.* == 0x7f) {
             byte.* = ' ';
         };
@@ -64,6 +71,25 @@ pub const Report = struct {
 
     pub fn isEmpty(self: *const Report) bool {
         return self.code.text.len == 0 and self.message.text.len == 0;
+    }
+
+    /// A Report as a Store keeps it: each part is the text it kept, a cut part has text, no part holds a control byte or invalid UTF-8,
+    /// and the one-line rendering fits.
+    pub fn restore(code: ?[]const u8, code_cut: bool, message: ?[]const u8, message_cut: bool) error{Invalid}!Report {
+        var report: Report = .{};
+        for ([_]*Part{ &report.code, &report.message }, [_]?[]const u8{ code, message }, [_]bool{ code_cut, message_cut }) |part, saved, cut| {
+            const bytes = saved orelse "";
+            if (bytes.len == 0 and (saved != null or cut)) return error.Invalid;
+            part.text.set(bytes) catch return error.Invalid;
+            if (!std.unicode.utf8ValidateSlice(bytes)) return error.Invalid;
+            for (bytes) |byte| if (byte < 0x20 or byte == 0x7f) return error.Invalid;
+            part.cut = cut;
+        }
+        if (report.code.text.len > max_part_bytes) return error.Invalid;
+        const marks = (if (report.code.cut) cut_mark.len else 0) + (if (report.message.cut) cut_mark.len else 0);
+        const separator = if (report.code.text.len != 0 and report.message.text.len != 0) ": ".len else 0;
+        if (report.code.text.len + report.message.text.len + separator + marks > outcome_code.max_report_bytes) return error.Invalid;
+        return report;
     }
 
     /// One line, "code: message", with the cut mark after each cut part.

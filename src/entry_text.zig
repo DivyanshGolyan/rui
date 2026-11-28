@@ -10,6 +10,8 @@ const bounded = @import("bounded.zig");
 const connection = @import("connection.zig");
 const content_value = @import("content_value.zig");
 const facts = @import("activity_facts.zig");
+const failure_report = @import("failure_report.zig");
+const outcome_code = @import("outcome_code.zig");
 const tool_presentation = @import("tool_presentation.zig");
 
 /// Fields no token is printed for, each owned by another part of the line.
@@ -21,7 +23,7 @@ const skipped = .{
     .{ "ApprovalRequested", "description" },
 };
 
-const Leaf = enum { integer, flag, tag, quoted, presentation, hosted, body };
+const Leaf = enum { integer, flag, tag, quoted, presentation, hosted, report, body };
 
 fn leaf(comptime Owner: type, comptime name: []const u8, comptime T: type) Leaf {
     const Base = switch (@typeInfo(T)) {
@@ -39,6 +41,8 @@ fn leaf(comptime Owner: type, comptime name: []const u8, comptime T: type) Leaf 
             .presentation
         else if (Base == facts.Item.HostedAction)
             .hosted
+        else if (Base == failure_report.Report)
+            .report
         else if (Base == content_value.Reference or Base == activity_read.ProposalFieldReference)
             .body
         else
@@ -102,6 +106,12 @@ fn writeField(out: *std.Io.Writer, comptime Owner: type, comptime name: []const 
         .presentation => try writePresentation(out, present),
         // The kind and how many targets the Store holds; the targets and the pattern are the row's body.
         .hosted => try out.print(" {s}.kind={s} {s}.targets_total={d}", .{ name, @tagName(present.kind), name, present.targets_total }),
+        // The provider's words as one line, "code: message", with a cut mark after a cut part.
+        .report => if (!present.isEmpty()) {
+            var line: [outcome_code.max_report_bytes]u8 = undefined;
+            try out.print(" {s}=", .{name});
+            try std.json.Stringify.value(present.joined(&line), .{}, out);
+        },
         .body => {},
     }
 }
@@ -194,6 +204,7 @@ test "INS-14 entry text prints every fact of every Activity row" {
             const expected = switch (comptime leaf(Payload, name, @FieldType(Payload, name))) {
                 .presentation => " code=",
                 .hosted => " action.kind=",
+                .report => " report=",
                 else => std.fmt.bufPrint(&needle, " {s}=", .{name}) catch unreachable,
             };
             if (std.mem.indexOf(u8, text, expected) == null) {

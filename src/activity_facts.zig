@@ -7,6 +7,7 @@ const change_ring = @import("change_ring.zig");
 const idempotency_key = @import("idempotency_key.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const outcome_code = @import("outcome_code.zig");
+const failure_report = @import("failure_report.zig");
 const session_id = @import("session_id.zig");
 const session_settings = @import("session_settings.zig");
 const session_work = @import("session_work.zig");
@@ -41,6 +42,8 @@ pub const Item = struct {
         call: struct { name: activity_read.ProposalFieldReference, arguments: activity_read.ProposalFieldReference },
         /// A hosted call's text is its served targets, then its pattern, joined by newlines.
         hosted: HostedBody,
+        /// A failed Turn's text is the provider's words as one line, `Report.joined`; they are saved inline, not as content.
+        report: *const failure_report.Report,
     };
 
     /// The exact strings of a hosted call in reading order: the field a reader names is an index into `refs()`.
@@ -62,7 +65,7 @@ pub const Item = struct {
             .skill => |skill| .{ .value = .{ .text = skill.content } },
             .call => |call| .{ .call = .{ .name = call.fields[@backingInt(tool_proposal.Field.name)], .arguments = call.fields[@backingInt(tool_proposal.Field.arguments)] } },
             .tool_result => |result| .{ .value = result.content },
-            .turn_ended => |ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else .none,
+            .turn_ended => |*ended| if (ended.content) |reference| .{ .value = .{ .text = reference } } else if (!ended.report.isEmpty()) .{ .report = &ended.report } else .none,
             .hosted_call => |hosted| blk: {
                 // A search that saved nothing to open (a Store older than its facts) has no text, like any row without one.
                 const text = hosted.action.body();
@@ -156,7 +159,7 @@ pub const Item = struct {
     };
     /// Model text, never parts.
     pub const Assistant = struct { content: content_value.Reference, final: bool = false };
-    pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?content_value.Reference };
+    pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?content_value.Reference, report: failure_report.Report = .empty };
     pub const Stop = struct { key: Bounded(idempotency_key.max_bytes), turn: ?u64, cutoff: u64, completion: mutation_answer.SessionStopCompletion };
     pub const ApprovalRequested = struct {
         session: Bounded(session_id.bytes),

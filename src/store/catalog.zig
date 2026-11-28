@@ -492,6 +492,10 @@ pub const tables = blk: {
                 .{ .name = "outcome_position", .type = .int, .nullable = true, .check = r.compare(.gt, r.field("outcome_position"), r.literal(0)) },
                 .{ .name = "outcome_at", .type = .int, .nullable = true, .range = .{ .min = 1 } },
                 .{ .name = "continuation_operation_id", .type = .int, .nullable = true, .check = r.any(&.{ r.isNull(r.field("continuation_operation_id")), r.compare(.le, r.field("continuation_operation_id"), r.field("operation_id")) }) },
+                .{ .name = "outcome_report_code", .type = .{ .text = .{ .min = 1, .max = @import("../outcome_code.zig").max_report_part_bytes } }, .nullable = true, .sqlite_added = true },
+                .{ .name = "outcome_report_message", .type = .{ .text = .{ .min = 1, .max = @import("../outcome_code.zig").max_report_bytes } }, .nullable = true, .sqlite_added = true },
+                .{ .name = "outcome_report_code_cut", .type = .flag, .default = "0", .sqlite_added = true },
+                .{ .name = "outcome_report_message_cut", .type = .flag, .default = "0", .sqlite_added = true },
             },
             .primary_key = &.{"turn_id"},
             .foreign_keys = &.{

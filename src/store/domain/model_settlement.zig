@@ -337,40 +337,21 @@ fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, oper
     a.write(invalidate_effort_prefix, .{ .session = session });
 }
 
+/// The provider's diagnostic as the content row it is saved in. The provider's report is not content: the Turn keeps it as its own columns.
 const FailureContent = struct {
     diagnostic: ?content_domain.Import,
-    report: ?content_domain.Import,
-    pair: content_domain.Pair = undefined,
 
     fn of(failure: *const ModelFailure) FailureContent {
-        var out: [outcome_code.max_report_bytes]u8 = undefined;
-        const report = failure.report().joined(&out);
-        return .{
-            .diagnostic = if (failure.diagnostic()) |detail| .ofBytes(detail, false) else null,
-            .report = if (report.len == 0) null else .ofBytes(report, false),
-        };
+        return .{ .diagnostic = if (failure.diagnostic()) |detail| .ofBytes(detail, false) else null };
     }
 
     fn lookup(content: *FailureContent, a: anytype) void {
-        if (content.diagnostic != null and content.report != null) {
-            content_domain.lookupPair(a, &content.diagnostic.?, &content.report.?, &content.pair);
-        } else if (content.diagnostic) |*value| {
-            content_domain.lookup(a, value);
-        } else if (content.report) |*value| content_domain.lookup(a, value);
-    }
-
-    fn found(content: *FailureContent) void {
-        if (content.diagnostic != null and content.report != null) content_domain.foundPair(&content.pair, &content.diagnostic.?, &content.report.?);
+        if (content.diagnostic) |*value| content_domain.lookup(a, value);
     }
 
     fn importDiagnostic(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
         const value = if (content.diagnostic) |*value| value else return null;
         return try content_domain.importBytes(a, value, failure.diagnostic().?);
-    }
-
-    fn importReport(content: *FailureContent, a: anytype, bytes: []const u8) !?u64 {
-        const value = if (content.report) |*value| value else return null;
-        return try content_domain.importBytes(a, value, bytes);
     }
 };
 
@@ -405,7 +386,7 @@ pub const SettleFailure = struct {
     exhausted_refusal: ?u64 = null,
     retry_random: u64 = 0,
     facts: attempt_facts.Result = undefined,
-    content: FailureContent = .{ .diagnostic = null, .report = null },
+    content: FailureContent = .{ .diagnostic = null },
     reads: union { source: refused_effort_source.Result, floor: *history_floor_domain.FloorSearch, context: context_changed.Result } = undefined,
     fn reportBytes(t: *const SettleFailure) []const u8 {
         return t.input.failure.report().joined(t.input.report_line);
@@ -447,7 +428,6 @@ pub const SettleFailure = struct {
                 return .commit;
             },
             .facts => {
-                t.content.found();
                 const row = try currentAttempt(&t.facts, binding);
                 if (t.disposition() != .context_overflow) return t.settle(r, false);
                 if (row.compaction) {
@@ -512,14 +492,9 @@ pub const SettleFailure = struct {
                     turn_domain.queueContinuation(r, binding.turn_id, session);
                 } else {
                     if (!row.turn_open) return error.StaleAttemptBinding;
-                    if (t.content.report != null and faults.content_import) return error.InjectedContentImportFailure;
-                    const report = try t.content.importReport(r, t.reportBytes());
-                    const outcome: TurnOutcome = if (overflow) .{ .resource_exceeded = optionalId(report) } else .{ .failed = .{
-                        .code = code,
-                        .report = optionalId(report),
-                    } };
+                    const outcome: TurnOutcome = if (overflow) .resource_exceeded else .{ .failed = code };
                     const positions = try r.positions(session);
-                    try turn_domain.queueCloseOr(r, positions, binding.turn_id, outcome, error.StaleAttemptBinding);
+                    try turn_domain.queueCloseOr(r, positions, binding.turn_id, outcome, failure.report(), error.StaleAttemptBinding);
                     if (outcome.ending(false) == .context_full) turn_domain.queueOwedStops(r, &row.session.ref, positions.head.next_position.get() + positions.taken - 1, row.unowed_children);
                 }
             },
@@ -554,9 +529,7 @@ pub const SettleFailure = struct {
                         .session = session,
                     });
                     if (!row.turn_open) return error.StaleAttemptBinding;
-                    if (t.content.report != null and faults.content_import) return error.InjectedContentImportFailure;
-                    const report = try t.content.importReport(r, t.reportBytes());
-                    try turn_domain.queueCloseOr(r, try r.positions(session), binding.turn_id, .{ .retry_exhausted = optionalId(report) }, error.StaleAttemptBinding);
+                    try turn_domain.queueCloseOr(r, try r.positions(session), binding.turn_id, .retry_exhausted, failure.report(), error.StaleAttemptBinding);
                 },
             },
         }
@@ -570,10 +543,6 @@ pub const SettleFailure = struct {
 
 fn optionalText(text: []const u8) ?[]const u8 {
     return if (text.len == 0) null else text;
-}
-
-fn optionalId(id: ?u64) ?i64 {
-    return if (id) |value| @intCast(value) else null;
 }
 
 const exhausted_attempts = rsql.Read(.{
@@ -629,7 +598,7 @@ pub const RecoverExhausted = struct {
         const chosen = t.choice.chosen orelse return .{ .done = false };
         if (!chosen.turn_open) return error.SelectionChanged;
         resolve_exhausted.queue(r, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
-        try turn_domain.queueCloseOr(r, try r.positions(chosen.session), chosen.turn_id.get(), .{ .retry_exhausted = null }, error.SelectionChanged);
+        try turn_domain.queueCloseOr(r, try r.positions(chosen.session), chosen.turn_id.get(), .retry_exhausted, &failure_report.Report.empty, error.SelectionChanged);
         return .commit;
     }
 
@@ -1391,7 +1360,7 @@ pub const SettleSuccess = struct {
         if (turn_policy.completesTurn(output_fact, t.pending.pending)) {
             if (!row.turn_open) return error.StaleAttemptBinding;
             const answer = s.answer_id orelse return error.CorruptOutputMetadata;
-            try turn_domain.queueCloseOr(r, s.positions, binding.turn_id, .{ .completed = @intCast(answer) }, error.StaleAttemptBinding);
+            try turn_domain.queueCloseOr(r, s.positions, binding.turn_id, .{ .completed = @intCast(answer) }, &failure_report.Report.empty, error.StaleAttemptBinding);
         } else turn_domain.queueContinuation(r, binding.turn_id, row.session);
         if (s.faults.output_commit) return error.InjectedOutputCommitFailure;
         return .commit;
