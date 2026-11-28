@@ -783,6 +783,12 @@ test "a failure keeps its report in the Turn and only its diagnostic as content"
             try std.testing.expectEqual(before + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN turn t ON t.operation_id=o.operation_id " ++
                 "WHERE o.resolution_content_id IS NOT NULL AND t.outcome_content_id IS NULL AND t.outcome_report_code IS NULL AND t.outcome_report_message_cut=0", .{}));
+            errdefer std.debug.print("turns {d} closed {d} messages {d} codes {d}\n", .{
+                store_testing.queryU64(&storage, "SELECT count(*) FROM turn", .{}) catch 99,
+                store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_code IS NOT NULL", .{}) catch 99,
+                store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_report_message IS NOT NULL", .{}) catch 99,
+                store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE outcome_report_code IS NOT NULL", .{}) catch 99,
+            });
             try std.testing.expectEqual(@as(u64, words.len), try store_testing.queryU64(&storage, "SELECT @octets(outcome_report_message) FROM turn", .{}));
         }
     }.run);
