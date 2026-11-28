@@ -9,7 +9,7 @@ const model_admission_domain = @import("model_admission.zig");
 const continues_without_input_sql = model_admission_domain.continues_without_input_sql;
 const failure_class = @import("../../failure_class.zig");
 const failure_report = @import("../../failure_report.zig");
-const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
 
 /// How a Turn ended. A completed Turn saved its answer as content; a Turn that ended in a provider failure saved the provider's
 /// words as its Report (see `report_columns`), never as content.
@@ -103,8 +103,8 @@ pub const report_columns = "t.outcome_report_code,t.outcome_report_message,t.out
 
 /// A Turn row's Report columns as a Row carries them.
 pub const SavedReport = struct {
-    code: ?protocol.Bounded(failure_report.max_part_bytes),
-    message: ?protocol.Bounded(failure_report.max_stored_bytes),
+    code: ?Bounded(failure_report.max_part_bytes),
+    message: ?Bounded(failure_report.max_stored_bytes),
     code_cut: bool,
     message_cut: bool,
 };
