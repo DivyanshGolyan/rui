@@ -145,8 +145,8 @@ pub const AllowanceObservation = struct {
     }
 };
 
-/// What a reply's allowance reading is attributed to: the connection, and the owner (a sign-in's account, or the key) whose request it answers.
-pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: connection.Name, owner: RoutingOwner = @splat(0) };
+/// What a reply's allowance reading is attributed to: the connection, and the owner epoch of its routing table (`TurnStates`) when the request started.
+pub const AllowanceSource = struct { binding: attempt.AttemptBinding, provider: connection.Name, epoch: u64 = 0 };
 
 /// The Reactor-wide observation. Header names belong to each Transfer's codec (its manifest).
 pub const HeaderObservation = struct {
