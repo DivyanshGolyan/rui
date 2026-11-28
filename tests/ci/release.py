@@ -20,7 +20,7 @@ from release_numbers import digest_rows, drifted_row_fix
 TAG = re.compile(r"v0\.([0-9]+)\.([0-9]+)")
 SCHEMA = re.compile(r"^pub const schema_version: u32 = ([0-9]+);$", re.MULTILINE)
 PUBLISH = re.compile(r"^@PUBLISH@\n", re.MULTILINE)
-PLATFORMS = ("darwin-arm64", "linux-x86_64")
+PLATFORMS = ("darwin-arm64", "linux-x86_64", "linux-arm64")
 
 
 def contains(sha, ancestor):

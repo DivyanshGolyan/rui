@@ -418,11 +418,12 @@ exit "$TEST_CODE"
             self.assertFalse((home / ".local/bin/rui").exists())
 
     def test_fills_every_placeholder_with_checked_digests(self):
-        digests = {"darwin-arm64": "a" * 64, "linux-x86_64": "b" * 64}
+        digests = {"darwin-arm64": "a" * 64, "linux-x86_64": "b" * 64, "linux-arm64": "c" * 64}
         text = release.installer(TEMPLATE, "0.35.2", digests, PUBLISH, POLICY)
         self.assertIn("version='0.35.2'", text)
         self.assertIn("digest_darwin_arm64='" + "a" * 64 + "'", text)
         self.assertIn("digest_linux_x86_64='" + "b" * 64 + "'", text)
+        self.assertIn("digest_linux_arm64='" + "c" * 64 + "'", text)
         self.assertIn("rui_publish() {", text)
         self.assertNotRegex(text, r"@[A-Z0-9_]+@")
         with self.assertRaisesRegex(SystemExit, "SHA-256"):
@@ -442,7 +443,8 @@ exit "$TEST_CODE"
             (target / "release").mkdir(parents=True)
             template = ("#!/bin/sh\nversion='@VERSION@'\n"
                         "digest_darwin_arm64='@SHA256_DARWIN_ARM64@'\n"
-                        "digest_linux_x86_64='@SHA256_LINUX_X86_64@'\n@PUBLISH@\n"
+                        "digest_linux_x86_64='@SHA256_LINUX_X86_64@'\n"
+                        "digest_linux_arm64='@SHA256_LINUX_ARM64@'\n@PUBLISH@\n"
                         'rui_publish "$HOME/.local" "$release" 40\n')
             publisher = ('rui_publish() {\n'
                          '    ln -s "$2/bin/rui" "$1/bin/rui.next" && mv -f "$1/bin/rui.next" "$1/bin/rui"\n'
@@ -451,7 +453,7 @@ exit "$TEST_CODE"
             (target / "release/publish.sh").write_text(publisher)
             sums = root / "SHA256SUMS"
             digests = {platform: character * 64 for platform, character in
-                       zip(release.PLATFORMS, ("a", "b"))}
+                       zip(release.PLATFORMS, ("a", "b", "c"))}
             sums.write_text("".join(f"{digest}  rui-0.40.0-{platform}.tar.gz\n"
                                     for platform, digest in digests.items()))
             output = root / "install.sh"
