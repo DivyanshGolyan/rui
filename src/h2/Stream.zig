@@ -133,6 +133,100 @@ pub fn releaseFields(self: *Record, allocator: std.mem.Allocator) void {
     self.fields_len = 0;
 }
 
+pub const Body = union(enum) {
+    file: struct { handle: usize, length: u64 },
+    bytes: []const u8,
+};
+
+pub const Sink = union(enum) {
+    file: usize,
+    buffer: []u8,
+};
+
+pub const Prepared = struct {
+    fields: ?[*]u8,
+    fields_len: u32,
+    endpoint: u8,
+    get: bool,
+    body: Body,
+    sink: Sink,
+};
+
+pub const Event = union(enum) {
+    prepare: Prepared,
+    launch: u64,
+    open: struct { stream_id: i32, connection: u32, first: bool },
+    requeue: struct { replay: bool },
+    finish: policy.Cause,
+    collect,
+    cancel,
+};
+
+/// The one decision table for the lifecycle: each event asserts the state it leaves and writes the next state and its fields.
+pub fn apply(self: *Record, event: Event) void {
+    switch (event) {
+        .prepare => |with| {
+            std.debug.assert(self.state == .idle);
+            self.* = std.mem.zeroes(Record);
+            self.fields = with.fields;
+            self.fields_len = with.fields_len;
+            self.endpoint = with.endpoint;
+            self.flags.get = with.get;
+            switch (with.body) {
+                .file => |file| {
+                    self.body_source = file.handle;
+                    self.body_length = file.length;
+                },
+                .bytes => |bytes| {
+                    self.flags.body_is_bytes = true;
+                    self.body_source = @intFromPtr(bytes.ptr);
+                    self.body_length = bytes.len;
+                },
+            }
+            switch (with.sink) {
+                .file => |fd| self.sink_target = fd,
+                .buffer => |buffer| {
+                    self.flags.sink_is_buffer = true;
+                    self.sink_target = @intFromPtr(buffer.ptr);
+                    self.sink_capacity = @intCast(buffer.len);
+                },
+            }
+            self.state = .prepared;
+        },
+        .launch => |now_ns| {
+            std.debug.assert(self.state == .prepared);
+            self.state = .pending;
+            self.last_activity_ns = now_ns;
+        },
+        .open => |opened| {
+            std.debug.assert(self.state == .pending);
+            self.route = .{ .open = .{ .stream_id = opened.stream_id, .connection = opened.connection } };
+            self.state = .open;
+            if (opened.first) self.flags.opened_connection = true;
+        },
+        .requeue => |requeued| {
+            std.debug.assert(self.state == .open and !self.flags.response_started);
+            if (requeued.replay) self.flags.replays += 1;
+            self.state = .pending;
+            self.body_offset = 0;
+            self.flags.body_done = false;
+        },
+        .finish => |cause| {
+            std.debug.assert(self.state == .pending or self.state == .open);
+            self.cause = cause;
+            self.state = .finished;
+        },
+        .collect => {
+            std.debug.assert(self.state == .finished);
+            self.state = .collected;
+        },
+        .cancel => {
+            std.debug.assert(self.state != .idle and self.state != .collected and self.state != .cancelled);
+            self.state = .cancelled;
+        },
+    }
+}
+
 pub const List = struct {
     head: ?*Record = null,
     tail: ?*Record = null,
