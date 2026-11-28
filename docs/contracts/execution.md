@@ -422,9 +422,9 @@ Missing, null, invalid or duplicate reset metadata stays absent without making t
 Provider prose is not copied into the diagnostic.
 Other HTTP 429 responses retain their temporary status classification unless their code is a known refusal.
 
-A terminal model failure, context overflow that compaction cannot help, and retry exhaustion also keep the settling Attempt's **report**: the provider's own words, `code: message`, from its error event or HTTP error body (`code`, else an error object's `type`; `message`, else a bare `detail`).
-Each part keeps at most its first 256 bytes, cut at a whole UTF-8 scalar and marked `…`; control bytes read as spaces.
-The report is the failed Turn outcome's public content, shown by the conversation view beside a reason and one next step for the failure's class.
+A terminal model failure, context overflow that compaction cannot help, and retry exhaustion also keep the settling Attempt's **report**: the provider's own words, a code and a message, from its error event or HTTP error body (`code`, else an error object's `type`; `message`, else a bare `detail`).
+Each part keeps at most its first 256 bytes, cut at a whole UTF-8 scalar, with a flag that says it was cut; control bytes read as spaces, and no cut mark is saved.
+The report is the failed Turn's own columns, carried by its `turn_ended` row as `report`; a screen writes "code: message" with a mark after a cut part beside a reason and one next step for the failure's class.
 It is display text only: classification, retries and continuation never read it, and an absent or malformed field leaves it out.
 Two settlements have no response body in hand and keep none: a 401 whose credential generation advanced during its forced refresh, and exhaustion recovered after a restart.
 The view's next step comes from `failure_class`, one functional core that the overview's provider band also reads.

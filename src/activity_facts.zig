@@ -7,6 +7,7 @@ const change_ring = @import("change_ring.zig");
 const idempotency_key = @import("idempotency_key.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const outcome_code = @import("outcome_code.zig");
+const failure_report = @import("failure_report.zig");
 const session_id = @import("session_id.zig");
 const session_settings = @import("session_settings.zig");
 const session_work = @import("session_work.zig");
@@ -156,7 +157,7 @@ pub const Item = struct {
     };
     /// Model text, never parts.
     pub const Assistant = struct { content: content_value.Reference, final: bool = false };
-    pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?content_value.Reference };
+    pub const TurnEnded = struct { session: Bounded(session_id.bytes), turn: u64, operation: u64, ending: turn_ending.TurnEnding, code: Bounded(outcome_code.max_bytes), content: ?content_value.Reference, report: failure_report.Report = .empty };
     pub const Stop = struct { key: Bounded(idempotency_key.max_bytes), turn: ?u64, cutoff: u64, completion: mutation_answer.SessionStopCompletion };
     pub const ApprovalRequested = struct {
         session: Bounded(session_id.bytes),

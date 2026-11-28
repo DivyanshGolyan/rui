@@ -1148,7 +1148,7 @@ pub const migrations = [_]Migration{
     },
     // A Turn that ended in a provider failure keeps the failure as a code and a message, each with a flag that says it was cut,
     // in the Turn's own row; `outcome_content_id` is the answer of a completed Turn and nothing else. The line saved before
-    // format 99 ("code: message", and "…" where a part was cut) becomes the message, cut when it ends in "…" and with no code,
+    // format 99 ("code: message", and "…" where a part was cut) becomes the message with no code, and a "…" at its end becomes the cut flag instead,
     // because a saved line cannot be split back into its parts (Divyansh, 2026-11-28, #2282 W6).
     .{
         .from = 98,
@@ -1157,12 +1157,12 @@ pub const migrations = [_]Migration{
             "ALTER TABLE turn ADD COLUMN outcome_report_message TEXT CHECK(outcome_report_message IS NULL OR length(CAST(outcome_report_message AS BLOB)) BETWEEN 1 AND 520)",
             "ALTER TABLE turn ADD COLUMN outcome_report_code_cut INTEGER NOT NULL DEFAULT 0 CHECK(outcome_report_code_cut IN (0,1))",
             "ALTER TABLE turn ADD COLUMN outcome_report_message_cut INTEGER NOT NULL DEFAULT 0 CHECK(outcome_report_message_cut IN (0,1))",
-            "UPDATE turn SET outcome_report_message=(SELECT CAST(c.payload AS TEXT) FROM content c WHERE c.content_id=turn.outcome_content_id AND c.byte_length BETWEEN 1 AND 520),outcome_report_message_cut=COALESCE((SELECT substr(c.payload,-3)=x'e280a6' FROM content c WHERE c.content_id=turn.outcome_content_id AND c.byte_length BETWEEN 1 AND 520),0) WHERE outcome_code<>'completed' AND outcome_content_id IS NOT NULL",
+            "UPDATE turn SET outcome_report_message=(SELECT CAST(CASE WHEN c.byte_length>3 AND substr(c.payload,-3)=x'e280a6' THEN substr(c.payload,1,c.byte_length-3) ELSE c.payload END AS TEXT) FROM content c WHERE c.content_id=turn.outcome_content_id AND c.byte_length BETWEEN 1 AND 520),outcome_report_message_cut=COALESCE((SELECT c.byte_length>3 AND substr(c.payload,-3)=x'e280a6' FROM content c WHERE c.content_id=turn.outcome_content_id AND c.byte_length BETWEEN 1 AND 520),0) WHERE outcome_code<>'completed' AND outcome_content_id IS NOT NULL",
             "UPDATE turn SET outcome_content_id=NULL WHERE outcome_code<>'completed' AND outcome_content_id IS NOT NULL",
         },
         .mysql = &.{
             "ALTER TABLE turn ADD COLUMN outcome_report_code TEXT AFTER continuation_operation_id, ADD COLUMN outcome_report_message TEXT AFTER outcome_report_code, ADD COLUMN outcome_report_code_cut TINYINT NOT NULL DEFAULT 0 AFTER outcome_report_message, ADD COLUMN outcome_report_message_cut TINYINT NOT NULL DEFAULT 0 AFTER outcome_report_code_cut, ADD CHECK(outcome_report_code IS NULL OR OCTET_LENGTH(outcome_report_code) BETWEEN 1 AND 256), ADD CHECK(outcome_report_message IS NULL OR OCTET_LENGTH(outcome_report_message) BETWEEN 1 AND 520), ADD CHECK(outcome_report_code_cut IN (0,1)), ADD CHECK(outcome_report_message_cut IN (0,1))",
-            "UPDATE turn t JOIN content_chunk ch ON ch.content_id=t.outcome_content_id AND ch.chunk_index=0 SET t.outcome_report_message=CONVERT(ch.bytes USING utf8mb4),t.outcome_report_message_cut=(RIGHT(CAST(ch.bytes AS BINARY),3)=0xE280A6) WHERE t.outcome_code<>'completed' AND t.outcome_content_id IS NOT NULL AND OCTET_LENGTH(ch.bytes) BETWEEN 1 AND 520",
+            "UPDATE turn t JOIN content_chunk ch ON ch.content_id=t.outcome_content_id AND ch.chunk_index=0 SET t.outcome_report_message=CONVERT(CASE WHEN OCTET_LENGTH(ch.bytes)>3 AND RIGHT(CAST(ch.bytes AS BINARY),3)=0xE280A6 THEN SUBSTRING(CAST(ch.bytes AS BINARY),1,OCTET_LENGTH(ch.bytes)-3) ELSE CAST(ch.bytes AS BINARY) END USING utf8mb4),t.outcome_report_message_cut=(OCTET_LENGTH(ch.bytes)>3 AND RIGHT(CAST(ch.bytes AS BINARY),3)=0xE280A6) WHERE t.outcome_code<>'completed' AND t.outcome_content_id IS NOT NULL AND OCTET_LENGTH(ch.bytes) BETWEEN 1 AND 520",
             "UPDATE turn SET outcome_content_id=NULL WHERE outcome_code<>'completed' AND outcome_content_id IS NOT NULL",
         },
     },

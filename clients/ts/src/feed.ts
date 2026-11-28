@@ -123,8 +123,8 @@ function contentOf(payload: Record<string, unknown>): ContentValue | undefined {
 function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ContentValue"] | undefined } {
 	const [kind, payload] = Object.entries(row.value)[0] as [FeedKind, Record<string, unknown>];
 	const reference = contentOf(payload);
-	// A failed Turn's report is the entry's text; a finished Turn's answer is its assistant entry and a stopped one has none.
-	const wanted = kind !== "turn_ended" || ENDING_SIGN[payload.ending as WireEnding] === "failed";
+	// A failed Turn's words are its `report`, carried by the row; a finished Turn's answer is its assistant entry and a stopped one has none.
+	const wanted = kind !== "turn_ended";
 	const entry = {
 		kind,
 		cursor: encodeCursor(row.position, row.ordinal),

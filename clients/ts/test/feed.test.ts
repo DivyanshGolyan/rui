@@ -126,14 +126,15 @@ function narrowed(entry: FeedEntry): void {
 
 test("feed entry types narrow to each generated kind", () => { void narrowed; });
 
-test("TS-17 a failed Turn ending carries its report text inline and no other ending does", async () => {
+test("TS-17 a failed Turn ending carries its report as the wire gave it and no other ending does", async () => {
 	const content = { type: "text", bytes: "6", sha256: "hash" } as const;
+	const report = { code: "provider_error", message: "words", code_cut: false, message_cut: true } as const;
 	const endings = Object.keys(ENDING_SIGN) as (keyof typeof ENDING_SIGN)[];
 	const rows = endings.map((ending, index) => ({
 		position: String(index + 1), ordinal: "0", at: "1",
-		value: { turn_ended: { session: "s", turn: "1", operation: "1", ending, code: ending, content } },
+		value: { turn_ended: { session: "s", turn: "1", operation: "1", ending, code: ending, content: ending === "done" ? content : null, report: ENDING_SIGN[ending] === "failed" ? report : null } },
 	}));
-	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("report") : Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: rows, more: false, end: String(rows.length) })) };
+	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("unread") : Buffer.from(JSON.stringify({ work: { actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: rows, more: false, end: String(rows.length) })) };
 	const entries: FeedEntry[] = [];
 	for await (const entry of listActivity(link, "s")) entries.push(entry);
 	assert.equal(entries.length, endings.length);
@@ -141,8 +142,8 @@ test("TS-17 a failed Turn ending carries its report text inline and no other end
 		const entry = entries[index];
 		assert.ok(entry?.kind === "turn_ended");
 		const failed = ENDING_SIGN[ending] === "failed";
-		assert.equal(entry.text, failed ? "report" : undefined, ending);
-		assert.equal(entry.contentBytes, failed ? "6" : undefined, ending);
+		assert.deepEqual(entry.report, failed ? report : null, ending);
+		assert.equal(entry.text, undefined, ending);
 	}
 	// The failed endings include the two the client once left without text.
 	assert.deepEqual(endings.filter((ending) => ENDING_SIGN[ending] === "failed"),

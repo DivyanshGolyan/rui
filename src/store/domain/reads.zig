@@ -49,6 +49,7 @@ const ContentLocation = content_domain.ContentLocation;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const TurnOutcome = turn_domain.TurnOutcome;
+const failure_report = @import("../../failure_report.zig");
 const accepted_resolutions = store_schema.accepted_resolutions;
 const content_metadata = content_domain.content_metadata;
 
@@ -1399,7 +1400,7 @@ fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_
 }
 
 const turn_outcome = rsql.Read(.{
-    .sql = "SELECT t.session_ref,t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
+    .sql = "SELECT t.session_ref,t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id," ++ turn_domain.report_columns ++ ",o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
         "AND o.resolution_code IS NOT NULL AS consistent,o.resolution_content_id,t.outcome_at," ++
         "EXISTS(SELECT 1 FROM session_stop stop @index(session_stop_turn) WHERE stop.selected_turn_id=t.turn_id) AS stopped " ++
         "FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
@@ -1411,6 +1412,10 @@ const turn_outcome = rsql.Read(.{
         operation_id: rsql.Positive,
         outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
+        outcome_report_code: ?Bounded(failure_report.max_part_bytes),
+        outcome_report_message: ?Bounded(failure_report.max_stored_bytes),
+        outcome_report_code_cut: bool,
+        outcome_report_message_cut: bool,
         consistent: bool,
         resolution_content_id: ?rsql.Positive,
         outcome_at: rsql.Positive,
@@ -1495,6 +1500,8 @@ const OutcomeRead = struct {
     content_id: ?u64 = null,
     at: u64 = 0,
     count: RowCount = .{},
+    /// The Row carries a Report, so it is decoded here and not on the stack.
+    decoded: turn_outcome.Row = undefined,
 
     fn queue(read: *OutcomeRead, a: *ReadAccess, session: []const u8) void {
         readFirst(a, turn_outcome, .{ .session = session, .position = read.position, .turn = read.turn }, read);
@@ -1512,7 +1519,8 @@ const OutcomeRead = struct {
             .completed => |answer| if (row.resolution_content_id == null or row.resolution_content_id.?.get() != answer) return error.CorruptStore,
             .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
         }
-        read.outcome.* = .{ .session = .{}, .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = row.outcome_code, .content = null };
+        const report = try outcome.decodeReport(&.{ .code = row.outcome_report_code, .message = row.outcome_report_message, .code_cut = row.outcome_report_code_cut, .message_cut = row.outcome_report_message_cut });
+        read.outcome.* = .{ .session = .{}, .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = row.outcome_code, .content = null, .report = report };
         read.outcome.session.set(row.session_ref.slice()) catch return error.CorruptStore;
         read.at = row.outcome_at.get();
     }

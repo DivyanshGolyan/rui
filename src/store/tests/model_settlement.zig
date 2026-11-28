@@ -768,7 +768,7 @@ test "a failed Turn's activity outcome references the provider's report" {
     }.run);
 }
 
-test "a failure whose report equals its new diagnostic saves one content row for both" {
+test "a failure keeps its report in the Turn and only its diagnostic as content" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -785,7 +785,8 @@ test "a failure whose report equals its new diagnostic saves one content row for
             try std.testing.expect(!storage.isFenced());
             try std.testing.expectEqual(before + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN turn t ON t.operation_id=o.operation_id " ++
-                "WHERE o.resolution_content_id IS NOT NULL AND o.resolution_content_id=t.outcome_content_id", .{}));
+                "WHERE o.resolution_content_id IS NOT NULL AND t.outcome_content_id IS NULL AND t.outcome_report_code IS NULL AND t.outcome_report_message_cut=0", .{}));
+            try std.testing.expectEqual(@as(u64, words.len), try store_testing.queryU64(&storage, "SELECT @octets(outcome_report_message) FROM turn", .{}));
         }
     }.run);
 }
