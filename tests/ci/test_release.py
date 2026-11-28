@@ -417,6 +417,37 @@ exit "$TEST_CODE"
                             self.assertIn("--ipv4", calls[1])
             self.assertFalse((home / ".local/bin/rui").exists())
 
+    def test_selects_the_archive_for_every_supported_machine(self):
+        digests = {"darwin-arm64": "a" * 64, "linux-x86_64": "b" * 64, "linux-arm64": "c" * 64}
+        cases = (("Darwin", "arm64", "darwin-arm64"), ("Linux", "x86_64", "linux-x86_64"),
+                 ("Linux", "aarch64", "linux-arm64"), ("Linux", "arm64", "linux-arm64"),
+                 ("Linux", "armv7l", None), ("Darwin", "x86_64", None))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "tools"
+            tools.mkdir()
+            (tools / "uname").write_text('#!/bin/sh\nif [ "$1" = -s ]; then echo "$TEST_SYSTEM"; else echo "$TEST_MACHINE"; fi\n')
+            (tools / "curl").write_text('#!/bin/sh\nfor argument; do case $argument in https://*) echo "$argument" > "$TEST_URL" ;; esac; done\nexit 99\n')
+            for tool in tools.iterdir():
+                tool.chmod(0o755)
+            installer = root / "install.sh"
+            installer.write_text(release.installer(TEMPLATE, "0.35.2", digests, PUBLISH, POLICY))
+            for system, machine, platform in cases:
+                url = root / "url"
+                url.unlink(missing_ok=True)
+                home = root / "home"
+                home.mkdir(exist_ok=True)
+                env = {**os.environ, "HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin",
+                       "TEST_SYSTEM": system, "TEST_MACHINE": machine, "TEST_URL": str(url)}
+                result = subprocess.run(["sh", str(installer)], env=env, capture_output=True, text=True, timeout=10)
+                if platform is None:
+                    self.assertEqual(result.returncode, 1, (system, machine))
+                    self.assertIn("Supported platforms", result.stderr)
+                    self.assertFalse(url.exists())
+                else:
+                    self.assertEqual(result.returncode, 99, (system, machine, result.stderr))
+                    self.assertTrue(url.read_text().strip().endswith(f"/rui-0.35.2-{platform}.tar.gz"))
+
     def test_fills_every_placeholder_with_checked_digests(self):
         digests = {"darwin-arm64": "a" * 64, "linux-x86_64": "b" * 64, "linux-arm64": "c" * 64}
         text = release.installer(TEMPLATE, "0.35.2", digests, PUBLISH, POLICY)
