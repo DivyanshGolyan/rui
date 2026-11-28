@@ -547,19 +547,11 @@ fn expectTruncatedAtEveryCut(stream: []const u8) !void {
     }
 }
 
-/// A propagated parser error prints no line, so a failing check names its call site.
-fn expectOk(source: std.builtin.SourceLocation, result: anyerror!void) !void {
-    result catch |err| {
-        std.debug.print("EXR-106 check failed at {s}:{d} with {s}\n", .{ source.file, source.line, @errorName(err) });
-        return err;
-    };
-}
-
 test "EXR-106 the parser moves through every state x transition as its framing rules say" {
     for (complete_streams) |case| {
-        try expectOk(@src(), expectEverySplit(case.stream, case.status, case.body));
-        try expectOk(@src(), expectEndsWhole(case.stream, case.closes));
-        if (!case.closes) try expectOk(@src(), expectTruncatedAtEveryCut(case.stream));
+        try expectEverySplit(case.stream, case.status, case.body);
+        try expectEndsWhole(case.stream, case.closes);
+        if (!case.closes) try expectTruncatedAtEveryCut(case.stream);
     }
 
     // Supporting table: the same transitions named one by one, including ones
