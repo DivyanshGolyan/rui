@@ -1359,7 +1359,7 @@ test "SUI-111 FeedView drag excludes message chrome from highlight and clipboard
     };
 }
 
-test "SUI-195 FeedView quote gesture latches press intent and preserves authored text" {
+test "SUI-198 FeedView quote gesture latches press intent and preserves authored text" {
     try quoteIntentWitness();
     try wrappedQuoteWitness();
 }
@@ -1405,7 +1405,7 @@ fn quoteIntentWitness() !void {
     try std.testing.expectEqual(@as(usize, 2), fixture.inserted);
 }
 
-test "SUI-196 FeedView quote gesture discards invalid releases without side effects" {
+test "SUI-199 FeedView quote gesture discards invalid releases without side effects" {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
