@@ -1402,15 +1402,20 @@ test "SUI-187 a change of connection draws one quiet line naming it and no other
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try switched(&sink, .{ .revision = 2, .field = .provider, .provider = work }, false);
-    try std.testing.expectEqualStrings("→ Switched to work\n", row_text.visible(out.buffered()));
-    out.end = 0;
-    try switched(&sink, .{ .revision = 3, .field = .provider, .provider = work }, true);
-    try std.testing.expectEqualStrings("\x1b[90m→\x1b[39m\x1b[90m Switched to work\x1b[39m\n", row_text.visible(out.buffered()));
+    for ([_]struct { bool, []const u8 }{
+        .{ false, "→ Switched to work\n" },
+        .{ true, "\x1b[90m→\x1b[39m\x1b[90m Switched to work\x1b[39m\n" },
+    }) |case| {
+        out.end = 0;
+        const item: protocol.ActivityItem = .{ .position = 3, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = .provider, .provider = work } } };
+        try std.testing.expect(!try render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, case[0], "", .{ .viewport = .wcwidth }, .none));
+        try std.testing.expectEqualStrings(case[1], row_text.visible(out.buffered()));
+    }
     out.end = 0;
     inline for (comptime std.enums.values(protocol.SessionField)) |field| {
         if (field == .provider) continue;
-        try switched(&sink, .{ .revision = 2, .field = field }, true);
+        const item: protocol.ActivityItem = .{ .position = 3, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = field } } };
+        for ([_]bool{ false, true }) |colour| try std.testing.expect(!try render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none));
     }
     try std.testing.expectEqual(@as(usize, 0), out.end);
 }
