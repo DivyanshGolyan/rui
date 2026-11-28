@@ -1380,6 +1380,47 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
     try sink.feed("\n");
 }
 
+/// The quiet line for a change of connection. Only that change has a row: its `provider` fact is set for that field alone.
+fn switched(sink: anytype, change: protocol.ActivityItem.SessionChanged, colour: bool) !void {
+    const name = change.provider orelse return;
+    try leader(sink, .sent, marks.marks.get(.sent).unicode, colour);
+    try sink.feed(Style.quiet.code(colour));
+    try sink.feed(" Switched to ");
+    try sink.feed(name.slice());
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed("\n");
+}
+
+test "SUI-187 a change of connection draws one quiet line naming it and no other change draws a row" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+        pub fn excluding(_: *@This(), _: u64) void {}
+    };
+    const work = @import("connection.zig").Name.parse("work").?;
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    for ([_]struct { bool, []const u8 }{
+        .{ false, "→ Switched to work\n" },
+        .{ true, "\x1b[90m→\x1b[39m\x1b[90m Switched to work\x1b[39m\n" },
+    }) |case| {
+        out.end = 0;
+        const item: protocol.ActivityItem = .{ .position = 3, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = .provider, .provider = work } } };
+        try std.testing.expect(!try render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, case[0], "", .{ .viewport = .wcwidth }, .none));
+        try std.testing.expectEqualStrings(case[1], row_text.visible(out.buffered()));
+    }
+    out.end = 0;
+    inline for (comptime std.enums.values(protocol.SessionField)) |field| {
+        if (field == .provider) continue;
+        const item: protocol.ActivityItem = .{ .position = 3, .at = 1, .value = .{ .session_changed = .{ .revision = 2, .field = field } } };
+        for ([_]bool{ false, true }) |colour| try std.testing.expect(!try render(undefined, "unused", "k7m2qx", undefined, null, item, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none));
+    }
+    try std.testing.expectEqual(@as(usize, 0), out.end);
+}
+
 fn workEnded(sink: anytype, ended: protocol.TurnEnding, code: []const u8, provider: ?@import("connection.zig").Name, colour: bool) !void {
     const cause = marks.cause(code, provider);
     try ending(sink, .{ .mark = if (ended.sign() == .stopped) .stopped else .failed, .words = ended.words() orelse cause.words, .place = cause.place }, colour);
@@ -1560,8 +1601,9 @@ pub fn renderWith(reads: client.SessionReads, scratch: std.Io.File, provider: ?@
                 try ending(sink, .{ .mark = .stopped, .words = protocol.TurnEnding.stopped.words().? }, colour);
             }
         },
+        .session_changed => |change| try switched(sink, change, colour),
         // A kind whose role is `detail` draws nothing in the conversation; a kind that gains the conversation role fails to compile here.
-        inline .call, .approval_requested, .session_changed, .compacted, .model_call, .instruction, .skill => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
+        inline .call, .approval_requested, .compacted, .model_call, .instruction, .skill => |_, kind| comptime std.debug.assert(activity_read.roleOf(kind) == .detail),
     }
     return false;
 }

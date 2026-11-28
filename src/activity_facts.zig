@@ -1,6 +1,7 @@
 const std = @import("std");
 const session_list = @import("session_list.zig");
 const Bounded = @import("bounded.zig").Bounded;
+const connection = @import("connection.zig");
 const activity_read = @import("activity_read.zig");
 const change_ring = @import("change_ring.zig");
 const idempotency_key = @import("idempotency_key.zig");
@@ -166,7 +167,8 @@ pub const Item = struct {
         tool: ?activity_read.CallText.Tool = null,
         server: ?activity_read.CallText.Server = null,
     };
-    pub const SessionChanged = struct { revision: u64, field: session_settings.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null };
+    /// `provider` is the connection the Session's own provider became: set exactly for a `provider` change, null for every other field.
+    pub const SessionChanged = struct { revision: u64, field: session_settings.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null, provider: ?connection.Name = null };
     /// Instruction text the model was given. `turn` and `revision` are both null exactly for the skill-catalog instruction,
     /// which no Turn and no authored revision owns. The text is public; a private value never becomes a row.
     pub const Instruction = struct { turn: ?u64, revision: ?u64, content: content_value.Reference };

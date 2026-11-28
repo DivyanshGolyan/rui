@@ -191,6 +191,8 @@ Typing filters by account: `chatgpt` and `codex` both keep a ChatGPT sign-in's r
 Typing filters, Up and Down move, and Enter picks a model through app settings' typed backend.
 
 When the connection a Model choice lists for is at a usage limit, each of its rows ends with a quiet note: `limit reached on <name>` and, if another connection serves that model and is not limited, `· try <other>`. A connection is limited only while a window of its latest reading is at 100% and has not reset (`connection_limits.zig`, read when the Host is read); picking still uses the listed connection, and the other is reached through the chat's Account row. The note is cut at the row's edge like the rest of the row.
+
+When a Session's connection changes (the chat's Account row, or another client), the conversation shows one quiet line where it happened, `→ Switched to <name>`, drawn from the Activity `session_changed` row's `provider` fact (the connection the revision names, SUI-187); every other settings change still draws nothing. Earlier Turns keep the connection they ran on, and the line is a record, not a prompt.
 An empty match keeps the field's choice open with feedback rather than saving an invalid model.
 Every successful pick saves the default for future Sessions through the same preferences writer as `rui defaults configure`; existing Sessions keep their settings.
 Esc closes the choice before app settings, and leaving without a pick writes nothing.
