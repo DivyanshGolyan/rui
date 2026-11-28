@@ -245,7 +245,7 @@ test "SUI-167 the stream filter agrees with the whole-text definition over gener
     }
 }
 
-test "SUI-200 the marker filter removes complete markers, byte by byte, and passes every other byte" {
+test "SUI-201 the marker filter removes complete markers, byte by byte, and passes every other byte" {
     // Fixed inputs through the public `Filter`: each marker is removed whole, and each unfinished or
     // malformed one is text, including when it is split across `feed` calls and cut short by `finish`.
     const cases = [_]struct { input: []const u8, expected: []const u8 }{
