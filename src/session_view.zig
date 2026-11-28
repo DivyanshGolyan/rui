@@ -1397,6 +1397,7 @@ test "SUI-187 a change of connection draws one quiet line naming it and no other
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
+        pub fn excluding(_: *@This(), _: u64) void {}
     };
     const work = @import("connection.zig").Name.parse("work").?;
     var buffer: [256]u8 = undefined;
