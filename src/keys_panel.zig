@@ -3,8 +3,8 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
 const keymap = @import("keymap.zig");
-const widget_style = @import("widget_style.zig");
 const view = @import("overview_view.zig");
+const Dialog = @import("Dialog.zig");
 
 const fields = blk: {
     var rows: [keymap.list.len]Panel.Field = undefined;
@@ -12,11 +12,13 @@ const fields = blk: {
     break :blk rows;
 };
 
+/// The keys list in the dialog's full palette, so its selection, hover and quiet tints are the dialog's at every depth.
 pub fn panel(caps: view.Caps) Panel.KeyList {
+    const look: Dialog.Look = .of(caps);
     return .{
         .fields = &fields,
-        .ground = widget_style.of(caps, .{ .background = .raised }),
-        .strong = widget_style.of(caps, .{ .background = .raised, .colour = .strong, .bold = true }),
+        .style = .{ .ground = look.ground, .quiet = look.quiet, .selection = look.selection, .hover = look.hover, .title = look.title },
+        .strong = look.title,
     };
 }
 
@@ -114,5 +116,46 @@ test "Keys panel aligns strong keys and plain meanings over every width through 
             try std.testing.expectEqualStrings(" ", cell.char.grapheme);
             try std.testing.expect(!cell.style.bold);
         };
+    };
+}
+
+test "SUI-206 the keys panel takes the dialog palette at every colour depth, and a highlight keeps the ground's reverse and underline" {
+    var blocks = [_]Panel.Block{ .{ .first = 0, .end = 1 }, .{ .first = 1, .end = 3 } };
+    for (std.enums.values(view.Caps.Depth)) |depth| for ([_]bool{ true, false }) |unicode| {
+        const caps: view.Caps = .{ .depth = depth, .unicode = unicode };
+        const look: Dialog.Look = .of(caps);
+        var list = panel(caps);
+        try std.testing.expect(std.meta.eql(look.ground, list.style.ground));
+        try std.testing.expect(std.meta.eql(look.quiet, list.style.quiet));
+        try std.testing.expect(std.meta.eql(look.selection, list.style.selection));
+        try std.testing.expect(std.meta.eql(look.hover, list.style.hover));
+        try std.testing.expect(std.meta.eql(look.title, list.style.title));
+        try std.testing.expect(std.meta.eql(look.title, list.strong));
+
+        list.blocks = &blocks;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = keymap.list.len }, .cell_size = .{} };
+        _ = try list.widget().draw(context);
+        try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
+        try list.widget().handleEvent(&events, .{ .mouse = .{ .button = .none, .type = .motion, .mods = .{}, .row = 0, .col = 5 } });
+        const surface = try list.widget().draw(context);
+        try std.testing.expectEqual(@as(usize, 1), list.selected);
+
+        const selected = surface.readCell(0, 1).style;
+        try std.testing.expect(std.meta.eql(look.selection.bg, selected.bg));
+        try std.testing.expectEqual(look.ground.reverse or look.selection.reverse, selected.reverse);
+        if (depth == .none) try std.testing.expect(selected.reverse);
+
+        const hovered = surface.readCell(0, 0).style;
+        try std.testing.expect(std.meta.eql(look.hover.bg, hovered.bg));
+        try std.testing.expectEqual(look.hover.ul_style, hovered.ul_style);
+        if (depth == .none) try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.ul_style);
+
+        const plain = surface.readCell(0, 3).style;
+        try std.testing.expect(std.meta.eql(look.ground.bg, plain.bg));
+        try std.testing.expectEqual(look.ground.reverse, plain.reverse);
+        try std.testing.expectEqual(look.ground.ul_style, plain.ul_style);
     };
 }

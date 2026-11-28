@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
 const Hover = @import("Hover.zig");
+const key_list_step = @import("key_list_step.zig");
 const cell_line = @import("cell_line.zig");
 const RowInset = @import("RowInset.zig");
 
@@ -17,7 +18,7 @@ pub fn valueWidth(width: u16) u16 {
     return valueEnd(width) -| value_column;
 }
 
-pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true, visible: bool = true };
+pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, right: ?[]const u8 = null, selectable: bool = true, visible: bool = true };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
 pub const CustomChoice = struct {
     field: usize,
@@ -872,26 +873,124 @@ test "Panel natural custom choice measures once shrinks and keeps cursor and mou
     };
 }
 
+/// The target of `block` in the viewport from row `offset`: only its visible rows, and zero high when it is scrolled out of view,
+/// so a target's index is its block's index.
+fn blockRect(block: Block, offset: usize, width: u16, height: usize) Hover.Rect {
+    const top = @max(block.first, offset);
+    const bottom = @min(block.end, offset + height);
+    if (top >= bottom) return .{ .row = 0, .width = width, .height = 0 };
+    return .{ .row = @intCast(top - offset), .width = width, .height = @intCast(bottom - top) };
+}
+
+/// `base` with the tint's background, and the tint's reverse and underline added to `base`'s: a highlight never removes an
+/// attribute the text already has.
+fn tinted(base: vaxis.Style, tint: ?vaxis.Style) vaxis.Style {
+    const colour = tint orelse return base;
+    var out = base;
+    out.bg = colour.bg;
+    out.reverse = base.reverse or colour.reverse;
+    if (colour.ul_style != .off) {
+        out.ul_style = colour.ul_style;
+        out.ul = colour.ul;
+    }
+    return out;
+}
+
+/// Consecutive rows the user selects as one, such as a Connections block. Blocks index the fields of a single-column KeyList.
+pub const Block = key_list_step.Block;
+
 pub const KeyList = struct {
-    fields: []const Field,
-    ground: vaxis.Style = .{},
+    fields: []const Field = &.{},
+    style: Style = .{},
     strong: vaxis.Style = .{ .bold = true },
     /// Draw one field per row, never in pairs, and start each value right after its own label (at the margin when it has none),
     /// so a row costs only its own width: for a list whose rows read down the page (the Connections reference).
     single_column: bool = false,
+    /// Non-empty for a list of selectable blocks: Up and Down move the selection (scrolling within a block taller than the viewport
+    /// first), a left press selects the block under the pointer, and the selected block takes the selection tint (a pointed-at one the
+    /// hover tint). Empty for a plain list, which Up and Down scroll. The selection and scroll policy is `key_list_step`'s.
+    blocks: []const Block = &.{},
+    selected: usize = 0,
+    hover: Hover = .{},
     row_offset: usize = 0,
     total_rows: usize = 0,
     viewport_height: usize = 0,
 
     pub fn widget(self: *KeyList) vxfw.Widget {
-        return .{ .userdata = self, .drawFn = drawReference };
+        return .{ .userdata = self, .eventHandler = KeyList.event, .drawFn = drawReference };
+    }
+
+    /// Stores the caller's content for the next draw. The position (scroll, selection) stays with the list, so the caller
+    /// never resets it by rebuilding its content.
+    pub fn present(self: *KeyList, next: KeyList) void {
+        self.fields = next.fields;
+        self.style = next.style;
+        self.strong = next.strong;
+        self.single_column = next.single_column;
+        self.blocks = next.blocks;
+    }
+
+    /// Puts the position back at the top: the first row, and the first block when the list has blocks.
+    pub fn rewind(self: *KeyList) void {
+        self.row_offset = 0;
+        self.selected = 0;
+    }
+
+    fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+        const self: *KeyList = @ptrCast(@alignCast(raw));
+        try self.hover.handleEvent(ctx, input);
+        switch (input) {
+            .key_press => |key| {
+                if (key.matches(vaxis.Key.up, .{})) {
+                    self.apply(.{ .step = -1 });
+                } else if (key.matches(vaxis.Key.down, .{})) {
+                    self.apply(.{ .step = 1 });
+                } else if (key.matches(vaxis.Key.page_up, .{})) {
+                    self.apply(.{ .page = -1 });
+                } else if (key.matches(vaxis.Key.page_down, .{})) {
+                    self.apply(.{ .page = 1 });
+                } else return;
+            },
+            .mouse => |mouse| {
+                if (mouse.button != .left or mouse.type != .press) return;
+                for (self.hover.targets, 0..) |rect, at| {
+                    if (!rect.contains(mouse.col, mouse.row)) continue;
+                    self.apply(.{ .press = at });
+                    break;
+                } else return;
+            },
+            else => return,
+        }
+        ctx.consumeAndRedraw();
+    }
+
+    fn shape(self: *const KeyList) key_list_step.Shape {
+        return .{ .blocks = self.blocks, .total_rows = self.total_rows, .viewport_height = self.viewport_height };
+    }
+
+    /// Stores the position `key_list_step` gives for `event` from the stored position.
+    fn apply(self: *KeyList, step: key_list_step.Event) void {
+        const at = key_list_step.next(self.shape(), .{ .selected = self.selected, .row_offset = self.row_offset }, step);
+        self.selected = at.selected;
+        self.row_offset = at.row_offset;
+    }
+
+    /// The tint of the row holding field `index`: the selection for the selected block, the hover for a pointed-at one, else none.
+    /// Called after `drawReference` has settled `selected`.
+    fn tintAt(self: *const KeyList, index: usize, targets: []const Hover.Rect) ?vaxis.Style {
+        for (self.blocks, 0..) |block, at| {
+            if (index < block.first or index >= block.end) continue;
+            if (at == self.selected) return self.style.selection;
+            return if (self.hover.contains(targets[at])) self.style.hover else null;
+        }
+        return null;
     }
 
     fn drawReference(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const self: *KeyList = @ptrCast(@alignCast(raw));
         const size = ctx.max.size();
         const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
-        @memset(surface.buffer, .{ .style = self.ground });
+        @memset(surface.buffer, .{ .style = self.style.ground });
         var key_widths = [_]usize{ 0, 0 };
         var value_widths = [_]usize{ 0, 0 };
         for (self.fields, 0..) |field, index| {
@@ -904,31 +1003,132 @@ pub const KeyList = struct {
         const column_gap = 2;
         const left_width = margin + key_widths[0] + key_gap + value_widths[0];
         const right_width = margin + key_widths[1] + key_gap + value_widths[1];
-        const columns: usize = if (!self.single_column and self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
+        const columns: usize = if (!self.single_column and self.blocks.len == 0 and self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
         if (columns == 1) key_widths[0] = @max(key_widths[0], key_widths[1]);
         if (self.single_column) key_widths = .{ 0, 0 };
         self.total_rows = (self.fields.len + columns - 1) / columns;
         self.viewport_height = size.height;
-        self.row_offset = @min(self.row_offset, self.total_rows -| self.viewport_height);
+        const at = key_list_step.settle(self.shape(), .{ .selected = self.selected, .row_offset = self.row_offset });
+        self.selected = at.selected;
+        self.row_offset = at.row_offset;
+        const targets = try ctx.arena.alloc(Hover.Rect, self.blocks.len);
+        for (self.blocks, targets) |block, *rect| rect.* = blockRect(block, self.row_offset, size.width, size.height);
+        self.hover.targets = targets;
         for (self.fields, 0..) |field, index| {
             const logical_row = index / columns;
             if (logical_row < self.row_offset) continue;
-            const row = logical_row - self.row_offset;
+            const row: u16 = @intCast(logical_row - self.row_offset);
             if (row >= size.height) break;
+            const tint = self.tintAt(index, targets);
+            if (tint != null) fillRow(surface, row, tinted(self.style.ground, tint));
             const column = index % columns;
             const start = if (column == 0) 0 else left_width + column_gap;
             const column_width = if (column == 0) left_width else right_width;
-            const limit: u16 = if (columns == 1) size.width else @intCast(start + column_width);
+            var limit: u16 = if (columns == 1) size.width else @intCast(start + column_width);
+            if (field.right) |right| {
+                const right_start = size.width -| @as(u16, @intCast(ctx.stringWidth(right)));
+                _ = paintTo(ctx, surface, right, right_start, row, tinted(self.style.quiet, tint), size.width);
+                limit = @min(limit, right_start -| 2);
+            }
             const label: u16 = @intCast(@min(start + margin, limit));
             const own_key = if (self.single_column) ctx.stringWidth(field.label) else key_widths[column];
             const gap: usize = if (self.single_column and field.label.len == 0) 0 else key_gap;
             const value: u16 = @intCast(@min(start + margin + own_key + gap, limit));
-            _ = paintTo(ctx, surface, field.label, label, @intCast(row), self.strong, limit);
-            _ = paintTo(ctx, surface, field.value, value, @intCast(row), self.ground, limit);
+            _ = paintTo(ctx, surface, field.label, label, row, tinted(self.strong, tint), limit);
+            _ = paintTo(ctx, surface, field.value, value, row, tinted(self.style.ground, tint), limit);
         }
         return surface;
     }
 };
+
+/// Fields for `count` two-row blocks, each block followed by one blank row except the last; returns the field count.
+fn testBlockFields(fields: []Field, blocks: []Block, count: usize) usize {
+    var rows: usize = 0;
+    for (0..count) |index| {
+        if (index > 0) {
+            fields[rows] = .{ .label = "", .value = "" };
+            rows += 1;
+        }
+        blocks[index] = .{ .first = rows, .end = rows + 2 };
+        fields[rows] = .{ .label = "name", .value = "" };
+        fields[rows + 1] = .{ .label = "", .value = "status" };
+        rows += 2;
+    }
+    return rows;
+}
+
+fn testContext(arena: *std.heap.ArenaAllocator, height: u16) vxfw.DrawContext {
+    return .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = height }, .cell_size = .{} };
+}
+
+test "SUI-208 Up and Down move the selected block through zero, one, many and sixteen blocks" {
+    for ([_]usize{ 0, 1, 3, 16 }) |count| {
+        var fields: [48]Field = undefined;
+        var blocks: [16]Block = undefined;
+        const rows = testBlockFields(&fields, &blocks, count);
+        var list: KeyList = .{ .fields = fields[0..rows], .blocks = blocks[0..count], .style = .{ .selection = .{ .bg = .{ .index = 2 } } } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try list.widget().draw(testContext(&arena, 60));
+        for (0..count + 2) |step| {
+            try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
+            try std.testing.expectEqual(@min(step + 1, count -| 1), list.selected);
+            if (count == 0) continue;
+            const surface = try list.widget().draw(testContext(&arena, 60));
+            const selected = blocks[list.selected];
+            for (selected.first..selected.end) |row| {
+                try std.testing.expectEqual(list.style.selection.bg, surface.readCell(0, @intCast(row)).style.bg);
+            }
+        }
+        for (0..count + 2) |_| try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.up } });
+        try std.testing.expectEqual(@as(usize, 0), list.selected);
+    }
+}
+
+test "SUI-201 a left press selects the block under the pointer through zero, one, many and sixteen blocks" {
+    for ([_]usize{ 0, 1, 3, 16 }) |count| {
+        var fields: [48]Field = undefined;
+        var blocks: [16]Block = undefined;
+        const rows = testBlockFields(&fields, &blocks, count);
+        var list: KeyList = .{ .fields = fields[0..rows], .blocks = blocks[0..count] };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try list.widget().draw(testContext(&arena, 60));
+        for (blocks[0..count], 0..) |block, index| {
+            list.selected = 0;
+            try list.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(block.end - 1), .col = 5 } });
+            try std.testing.expectEqual(index, list.selected);
+            list.selected = 0;
+            try list.widget().handleEvent(&events, .{ .mouse = .{ .button = .right, .type = .press, .mods = .{}, .row = @intCast(block.first), .col = 5 } });
+            try std.testing.expectEqual(@as(usize, 0), list.selected);
+            if (index + 1 < count) {
+                try list.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(block.end), .col = 5 } });
+                try std.testing.expectEqual(@as(usize, 0), list.selected);
+            }
+        }
+    }
+}
+
+test "SUI-207 Down scrolls a block taller than the viewport until its last row shows" {
+    const labels = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    var fields: [6]Field = undefined;
+    for (&fields, labels) |*field, label| field.* = .{ .label = label, .value = "" };
+    var blocks = [_]Block{.{ .first = 0, .end = 6 }};
+    var list: KeyList = .{ .fields = &fields, .blocks = &blocks };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    _ = try list.widget().draw(testContext(&arena, 4));
+    try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
+    try list.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
+    const surface = try list.widget().draw(testContext(&arena, 4));
+    try std.testing.expectEqual(@as(usize, 2), list.row_offset);
+    try std.testing.expectEqual(@as(usize, 0), list.selected);
+    try std.testing.expectEqualStrings("c", surface.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings("f", surface.readCell(1, 3).char.grapheme);
+}
 
 test "Panel KeyList fits measured columns and aligns values after the widest key in cells" {
     var reference: KeyList = .{ .fields = &.{

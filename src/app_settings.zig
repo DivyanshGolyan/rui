@@ -58,9 +58,7 @@ reference: Reference = .keys,
 connection_rows: connections_panel.Rows = .{},
 connection_facts: ?ConnectionsSnapshot = null,
 refresh_state: connections_refresh.State = .{},
-reference_offset: usize = 0,
-reference_rows: usize = 0,
-reference_height: usize = 0,
+reference_list: Panel.KeyList = .{},
 values: preferences.Values = .{},
 read_failed: bool = false,
 panel: Panel = .{},
@@ -248,7 +246,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             self.refreshStep(.{ .opened = self.clock() });
         }
         self.reference_open = true;
-        self.reference_offset = 0;
+        self.reference_list.rewind();
         ctx.consumeAndRedraw();
         return;
     }
@@ -396,22 +394,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         }
         return;
     }
-    if (self.reference_open) {
-        if (input == .key_press) {
-            const name = @import("keypress.zig").named(input.key_press) orelse return;
-            const maximum = self.reference_rows -| self.reference_height;
-            const page = @max(self.reference_height, 1);
-            switch (name) {
-                .up => self.reference_offset -|= 1,
-                .down => self.reference_offset = @min(self.reference_offset + 1, maximum),
-                .page_up => self.reference_offset -|= page,
-                .page_down => self.reference_offset = @min(self.reference_offset + page, maximum),
-                else => return,
-            }
-            ctx.consumeAndRedraw();
-        }
-        return;
-    }
+    if (self.reference_open) return self.reference_list.widget().handleEvent(ctx, input);
     self.bind();
     if (!self.model_choice.active and input == .key_press) {
         if (@import("keypress.zig").named(input.key_press)) |name| if (@import("app_input.zig").keys.get(name)) |direction| {
@@ -425,19 +408,21 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.reference_open) {
         const caps = if (self.backend) |backend| backend.caps(backend.context) else view.Caps{};
-        var reference = keys_panel.panel(caps);
-        if (self.reference == .connections) {
-            reference.single_column = true;
-            reference.fields = if (self.connection_facts) |snapshot|
-                self.connection_rows.build(snapshot.facts.slice(), snapshot.now, caps.unicode)
-            else
-                &unavailable_rows;
-        }
-        reference.row_offset = self.reference_offset;
-        var surface = try reference.widget().draw(ctx);
-        self.reference_offset = reference.row_offset;
-        self.reference_rows = reference.total_rows;
-        self.reference_height = reference.viewport_height;
+        const keys = keys_panel.panel(caps);
+        const next: Panel.KeyList = if (self.reference != .connections) keys else if (self.connection_facts) |snapshot| .{
+            .fields = self.connection_rows.build(snapshot.facts.slice(), snapshot.now, caps.unicode),
+            .blocks = self.connection_rows.blocks(),
+            .single_column = true,
+            .style = keys.style,
+            .strong = keys.strong,
+        } else .{
+            .fields = &unavailable_rows,
+            .single_column = true,
+            .style = keys.style,
+            .strong = keys.strong,
+        };
+        self.reference_list.present(next);
+        var surface = try self.reference_list.widget().draw(ctx);
         surface.widget = self.widget();
         return surface;
     }
@@ -1191,13 +1176,13 @@ test "Keys scrolls every shortcut within the retained draft viewport" {
         while (true) {
             const shown = try input.widget().draw(draw_ctx);
             const surface = shown.children[0].surface.children[0].surface;
-            try std.testing.expect(page.reference_height > 0);
-            const columns: usize = if (page.reference_rows == keymap.list.len) 1 else 2;
-            for (0..page.reference_height) |row| {
+            try std.testing.expect(page.reference_list.viewport_height > 0);
+            const columns: usize = if (page.reference_list.total_rows == keymap.list.len) 1 else 2;
+            for (0..page.reference_list.viewport_height) |row| {
                 var line: std.Io.Writer.Allocating = .init(arena.allocator());
                 for (0..surface.size.width) |col| try line.writer.writeAll(surface.readCell(@intCast(col), @intCast(row)).char.grapheme);
                 for (0..columns) |column| {
-                    const index = (page.reference_offset + row) * columns + column;
+                    const index = (page.reference_list.row_offset + row) * columns + column;
                     if (index >= keymap.list.len) continue;
                     try std.testing.expect(std.mem.indexOf(u8, line.written(), keymap.list[index].key) != null);
                     try std.testing.expect(std.mem.indexOf(u8, line.written(), keymap.list[index].meaning) != null);
@@ -1206,24 +1191,24 @@ test "Keys scrolls every shortcut within the retained draft viewport" {
             }
             try std.testing.expectEqualStrings(draft, editor.text());
             try std.testing.expectEqual(draft.len, editor.cursor());
-            if (page.reference_offset == page.reference_rows -| page.reference_height) break;
+            if (page.reference_list.row_offset == page.reference_list.total_rows -| page.reference_list.viewport_height) break;
             try press(&page, &events, vaxis.Key.down);
             try std.testing.expect(events.consume_event);
         }
         for (seen) |visible| try std.testing.expect(visible);
-        const bottom = page.reference_offset;
+        const bottom = page.reference_list.row_offset;
         try press(&page, &events, vaxis.Key.down);
-        try std.testing.expectEqual(bottom, page.reference_offset);
+        try std.testing.expectEqual(bottom, page.reference_list.row_offset);
         try press(&page, &events, vaxis.Key.page_up);
-        try std.testing.expectEqual(bottom -| page.reference_height, page.reference_offset);
+        try std.testing.expectEqual(bottom -| page.reference_list.viewport_height, page.reference_list.row_offset);
         try press(&page, &events, vaxis.Key.page_down);
-        try std.testing.expectEqual(bottom, page.reference_offset);
+        try std.testing.expectEqual(bottom, page.reference_list.row_offset);
         try press(&page, &events, vaxis.Key.up);
-        try std.testing.expectEqual(bottom -| 1, page.reference_offset);
+        try std.testing.expectEqual(bottom -| 1, page.reference_list.row_offset);
         try press(&page, &events, vaxis.Key.page_up);
-        while (page.reference_offset != 0) try press(&page, &events, vaxis.Key.page_up);
+        while (page.reference_list.row_offset != 0) try press(&page, &events, vaxis.Key.page_up);
         try press(&page, &events, vaxis.Key.up);
-        try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
+        try std.testing.expectEqual(@as(usize, 0), page.reference_list.row_offset);
         try std.testing.expectEqualStrings(draft, editor.text());
         try std.testing.expectEqual(draft.len, editor.cursor());
     };
@@ -1242,22 +1227,22 @@ test "Keys reclamps on resize and starts at the top when reopened" {
     const wide: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
     const tall: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 20 }, .cell_size = .{} };
     _ = try page.widget().draw(narrow);
-    while (page.reference_offset < page.reference_rows -| page.reference_height) try press(&page, &events, vaxis.Key.page_down);
-    const narrow_bottom = page.reference_offset;
+    while (page.reference_list.row_offset < page.reference_list.total_rows -| page.reference_list.viewport_height) try press(&page, &events, vaxis.Key.page_down);
+    const narrow_bottom = page.reference_list.row_offset;
     try std.testing.expect(narrow_bottom > 0);
     _ = try page.widget().draw(wide);
-    try std.testing.expect(page.reference_rows -| page.reference_height < narrow_bottom);
-    try std.testing.expectEqual(page.reference_rows -| page.reference_height, page.reference_offset);
+    try std.testing.expect(page.reference_list.total_rows -| page.reference_list.viewport_height < narrow_bottom);
+    try std.testing.expectEqual(page.reference_list.total_rows -| page.reference_list.viewport_height, page.reference_list.row_offset);
     _ = try page.widget().draw(tall);
-    try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
+    try std.testing.expectEqual(@as(usize, 0), page.reference_list.row_offset);
     _ = try page.widget().draw(narrow);
     try press(&page, &events, vaxis.Key.down);
-    try std.testing.expectEqual(@as(usize, 1), page.reference_offset);
+    try std.testing.expectEqual(@as(usize, 1), page.reference_list.row_offset);
     page.reference_open = false;
     page.select(.keys);
     try press(&page, &events, vaxis.Key.enter);
     try std.testing.expect(page.reference_open);
-    try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
+    try std.testing.expectEqual(@as(usize, 0), page.reference_list.row_offset);
 }
 
 test "SUI-193 an open Connections reference asks its owner for a newer reading once its own is five seconds old, and the other screens never do" {
