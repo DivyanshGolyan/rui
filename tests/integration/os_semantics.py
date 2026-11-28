@@ -169,7 +169,8 @@ def processes_executing(executable):
 
 def native_release_target():
     return {("Darwin", "arm64"): "darwin-arm64",
-            ("Linux", "x86_64"): "linux-x86_64"}.get((_module.SYSTEM, platform.machine()))
+            ("Linux", "x86_64"): "linux-x86_64",
+            ("Linux", "aarch64"): "linux-arm64"}.get((_module.SYSTEM, platform.machine()))
 
 
 def socket_peer_pid(connection):

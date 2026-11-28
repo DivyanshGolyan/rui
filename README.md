@@ -57,7 +57,7 @@ If Rui stops in the middle of a command, it reports that the command may have ru
 curl -fsSL https://ruicode.com/install | sh
 ```
 
-Supports Apple Silicon macOS 15+ and x86-64 Linux with glibc 2.34+.
+Supports Apple Silicon macOS 15+, and x86-64 and ARM64 Linux with glibc 2.34+.
 The installer adds `~/.local/bin` to your `PATH` unless you set `RUI_NO_MODIFY_PATH=1`.
 
 <a id="start-a-conversation"></a>

@@ -9,7 +9,7 @@
 
 #### Platform capabilities
 
-Support Linux x86-64 and macOS Apple Silicon through capabilities, not distribution allowlists.
+Support Linux x86-64, Linux ARM64 and macOS Apple Silicon through capabilities, not distribution allowlists.
 Minimum OS/kernel/libc follows build/API requirements; incompatibility rejects.
 Platform-sensitive changes require affected native checks on both supported systems before merge.
 Optional cross-compilation of Linux ARM64 and Intel macOS is experimental and does not extend support.
