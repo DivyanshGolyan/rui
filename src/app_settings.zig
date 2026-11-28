@@ -57,7 +57,7 @@ reference_open: bool = false,
 reference: Reference = .keys,
 connection_rows: connections_panel.Rows = .{},
 connection_facts: ?ConnectionsSnapshot = null,
-connections_refresh: connections_refresh.State = .{},
+refresh_state: connections_refresh.State = .{},
 reference_offset: usize = 0,
 reference_rows: usize = 0,
 reference_height: usize = 0,
@@ -353,8 +353,8 @@ fn readConnections(self: *Self) void {
 
 /// Applies one refresh event: the core says whether to ask the owner for a newer reading.
 fn refreshStep(self: *Self, event: connections_refresh.Event) void {
-    const next = connections_refresh.step(self.connections_refresh, event);
-    self.connections_refresh = next.state;
+    const next = connections_refresh.step(self.refresh_state, event);
+    self.refresh_state = next.state;
     if (!next.ask) return;
     const backend = self.backend orelse return;
     if (backend.ask_connections) |ask| ask(backend.context);
