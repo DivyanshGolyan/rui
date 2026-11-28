@@ -199,8 +199,38 @@ pub const Spill = struct {
     token: Token,
     file: ?std.Io.File,
     charged: u64 = 0,
-    state: enum { writing, closed, yielded, published } = .writing,
+    state: Phase = .writing,
     kept: bool = false,
+
+    const Phase = enum { writing, closed, yielded, published };
+    const Transition = enum { close, keep, yield };
+
+    /// The one decision table for a spill's state. A pair not listed stays put:
+    /// a closed spill does not close again, and a yielded or published spill
+    /// takes no further transition.
+    fn next(state: Phase, transition: Transition) Phase {
+        return switch (state) {
+            .writing => switch (transition) {
+                .close => .closed,
+                .yield => .yielded,
+                .keep => .writing,
+            },
+            .closed => switch (transition) {
+                .keep => .published,
+                .yield => .yielded,
+                .close => .closed,
+            },
+            .yielded, .published => state,
+        };
+    }
+
+    /// Store the next state, running the effect that state needs first.
+    fn advance(self: *Spill, transition: Transition) void {
+        const next_state = next(self.state, transition);
+        if (next_state == self.state) return;
+        if (next_state == .published) self.publishEntry();
+        self.state = next_state;
+    }
 
     pub fn open(queue: *Queue, output_name: []const u8) ?Spill {
         const tokens = (queue.reserveEntries(1, .{output_name}, .{0}) catch return null) orelse return null;
@@ -262,7 +292,7 @@ pub const Spill = struct {
     /// Remove optional output to give required capture first claim on its budget.
     /// Failed removals transfer the charge to a retryable queue entry.
     pub fn yield(self: *Spill) u64 {
-        if (self.state == .yielded or self.state == .published) return 0;
+        if (next(self.state, .yield) == self.state) return 0;
         if (self.file) |file| file.close(self.queue.io);
         self.file = null;
         const queue = self.queue;
@@ -286,22 +316,21 @@ pub const Spill = struct {
         }
         queue.mutex.unlock(queue.io);
         self.charged = 0;
-        self.state = .yielded;
+        self.advance(.yield);
         return if (removed) |_| charged else |_| 0;
     }
 
     pub fn close(self: *Spill) void {
-        if (self.state != .writing) return;
+        if (next(self.state, .close) == self.state) return;
         self.file.?.close(self.queue.io);
         self.file = null;
-        self.state = .closed;
-        self.publishIfReady();
+        self.advance(.close);
+        if (self.kept) self.advance(.keep);
     }
 
     pub fn keep(self: *Spill) void {
-        if (self.state == .yielded or self.state == .published) return;
         self.kept = true;
-        self.publishIfReady();
+        self.advance(.keep);
     }
 
     pub fn release(self: *Spill) void {
@@ -318,8 +347,9 @@ pub const Spill = struct {
         return self.queue.entries[self.token.index].name.slice();
     }
 
-    fn publishIfReady(self: *Spill) void {
-        if (!self.kept or self.state != .closed) return;
+    /// Hand the live charge to the reserved queue entry; the spill's state is
+    /// set by `advance` once this returns.
+    fn publishEntry(self: *Spill) void {
         const queue = self.queue;
         queue.mutex.lockUncancelable(queue.io);
         defer queue.mutex.unlock(queue.io);
@@ -328,13 +358,33 @@ pub const Spill = struct {
         entry.charged = self.charged;
         entry.state = .retained;
         self.charged = 0;
-        self.state = .published;
     }
 };
 
 fn adoptForTest(queue: *Queue, name: []const u8, charged: u64) !void {
     var spill = Spill.adopt(queue, name, charged) orelse return error.TestUnexpectedResult;
     spill.keep();
+}
+
+test "EXR-107 a spill moves through every state x transition as its rules say" {
+    const Row = struct { from: Spill.Phase, transition: Spill.Transition, want: Spill.Phase };
+    const rows = [_]Row{
+        .{ .from = .writing, .transition = .close, .want = .closed },
+        .{ .from = .writing, .transition = .keep, .want = .writing },
+        .{ .from = .writing, .transition = .yield, .want = .yielded },
+        .{ .from = .closed, .transition = .close, .want = .closed },
+        .{ .from = .closed, .transition = .keep, .want = .published },
+        .{ .from = .closed, .transition = .yield, .want = .yielded },
+        .{ .from = .yielded, .transition = .close, .want = .yielded },
+        .{ .from = .yielded, .transition = .keep, .want = .yielded },
+        .{ .from = .yielded, .transition = .yield, .want = .yielded },
+        .{ .from = .published, .transition = .close, .want = .published },
+        .{ .from = .published, .transition = .keep, .want = .published },
+        .{ .from = .published, .transition = .yield, .want = .published },
+    };
+    for (rows) |row| {
+        try std.testing.expectEqual(row.want, Spill.next(row.from, row.transition));
+    }
 }
 
 test "retention entry capacity derives from fixed orchestration memory" {

@@ -20,7 +20,26 @@ pub const Event = union(enum) {
     end,
 };
 
-const State = enum { connecting, open, done };
+const State = enum {
+    connecting,
+    open,
+    done,
+
+    const Transition = enum { connected, finished };
+
+    /// The one decision table for `State`: a completed connect opens a
+    /// connecting exchange and changes nothing else; finishing, from any
+    /// state, makes it done.
+    fn next(state: State, transition: Transition) State {
+        return switch (transition) {
+            .connected => switch (state) {
+                .connecting => .open,
+                .open, .done => state,
+            },
+            .finished => .done,
+        };
+    }
+};
 
 fd: std.posix.fd_t,
 state: State,
@@ -61,7 +80,7 @@ pub fn init(self: *Exchange, target: request.Target, bytes: []const u8) error{ L
     if (!socket_os.configure(fd, true)) return error.LocalFailure;
     while (true) switch (std.posix.errno(std.c.connect(fd, @ptrCast(&storage), length))) {
         .SUCCESS => {
-            self.state = .open;
+            self.state = self.state.next(.connected);
             return;
         },
         .INTR => continue,
@@ -74,7 +93,7 @@ pub fn init(self: *Exchange, target: request.Target, bytes: []const u8) error{ L
 pub fn deinit(self: *Exchange) void {
     if (self.fd >= 0) _ = std.c.close(self.fd);
     self.fd = -1;
-    self.state = .done;
+    self.state = self.state.next(.finished);
 }
 
 pub fn events(self: *const Exchange) i16 {
@@ -93,7 +112,7 @@ pub fn advance(self: *Exchange) Error!Event {
     while (true) switch (self.state) {
         .connecting => {
             switch (socket_os.connectStatus(self.fd)) {
-                .connected => self.state = .open,
+                .connected => self.state = self.state.next(.connected),
                 .pending => return .waiting,
                 .refused => return error.ConnectFailed,
                 .failed => return error.LocalFailure,
@@ -352,4 +371,22 @@ test "a malformed response is refused, not read as a body" {
     defer server.stop();
     var out: Outcome = .{};
     try std.testing.expectError(error.InvalidFraming, post(&server, "{}", &out));
+}
+
+test "EXR-105 an exchange moves through every state x transition as its rules say" {
+    const Row = struct { from: State, transition: State.Transition, to: State };
+    // A completed connect opens only a connecting exchange; finishing makes
+    // any exchange done, and a done exchange stays done.
+    const rows = [_]Row{
+        .{ .from = .connecting, .transition = .connected, .to = .open },
+        .{ .from = .connecting, .transition = .finished, .to = .done },
+        .{ .from = .open, .transition = .connected, .to = .open },
+        .{ .from = .open, .transition = .finished, .to = .done },
+        .{ .from = .done, .transition = .connected, .to = .done },
+        .{ .from = .done, .transition = .finished, .to = .done },
+    };
+    for (rows) |row| {
+        errdefer std.debug.print("from {s} transition {s}\n", .{ @tagName(row.from), @tagName(row.transition) });
+        try std.testing.expectEqual(row.to, row.from.next(row.transition));
+    }
 }

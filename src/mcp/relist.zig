@@ -56,31 +56,50 @@ pub const Slot = struct {
         };
     }
 
+    /// What happened to a slot: a list began, or the list that began ended with `outcome` at `now_ms`.
+    pub const Event = union(enum) {
+        begin,
+        end: struct { outcome: Outcome, now_ms: u64 },
+    };
+
     /// Marks a list as begun. Precondition: due().
     pub fn begin(self: *Slot) void {
-        self.state = .listing;
-        self.started = self.asked;
-        self.stale_at_ms = null;
+        self.apply(.begin);
     }
 
     /// Records how the list that began ended.
     pub fn end(self: *Slot, outcome: Outcome, now_ms: u64) void {
-        self.finished = self.started;
-        self.last = switch (outcome) {
-            .listed => .listed,
-            .failed => .failed,
-        };
-        switch (outcome) {
-            .listed => |listed| {
-                self.failures = 0;
-                self.state = .idle;
-                self.stale_at_ms = staleAt(now_ms, listed.ttl_ms, listed.seed);
-            },
-            .failed => {
-                self.failures +|= 1;
-                self.state = .waiting;
+        self.apply(.{ .end = .{ .outcome = outcome, .now_ms = now_ms } });
+    }
+
+    /// The one decision table for a slot: the next `state` and every field that moves with it.
+    /// Each event leads to the same state from every state, so no event is refused.
+    pub fn apply(self: *Slot, event: Event) void {
+        switch (event) {
+            .begin => {
+                self.state = .listing;
+                self.started = self.asked;
                 self.stale_at_ms = null;
-                self.retry_at_ms = now_ms +| retryDelay(self.failures);
+            },
+            .end => |ending| {
+                self.finished = self.started;
+                self.last = switch (ending.outcome) {
+                    .listed => .listed,
+                    .failed => .failed,
+                };
+                switch (ending.outcome) {
+                    .listed => |listed| {
+                        self.failures = 0;
+                        self.state = .idle;
+                        self.stale_at_ms = staleAt(ending.now_ms, listed.ttl_ms, listed.seed);
+                    },
+                    .failed => {
+                        self.failures +|= 1;
+                        self.state = .waiting;
+                        self.stale_at_ms = null;
+                        self.retry_at_ms = ending.now_ms +| retryDelay(self.failures);
+                    },
+                }
             },
         }
     }
@@ -168,6 +187,65 @@ fn expectSnap(slot: *const Slot, now_ms: u64, expected: Snap) !void {
 }
 
 const listed_plain: Outcome = .{ .listed = .{ .ttl_ms = null, .seed = 0 } };
+
+const Base = enum { fresh, listing, waiting };
+
+/// A slot with one ask (generation 1) in each base state, reached only through the public verbs.
+fn reach(base: Base) Slot {
+    var s: Slot = .{};
+    _ = s.want();
+    switch (base) {
+        .fresh => {},
+        .listing => s.begin(),
+        .waiting => {
+            s.begin();
+            s.end(.failed, 100);
+        },
+    }
+    return s;
+}
+
+test "EXR-104 a re-list slot moves through every state x event as its rules say" {
+    const now_ms: u64 = 5_000;
+    const Row = struct {
+        from: Base,
+        event: Slot.Event,
+        state: State,
+        last: Last,
+        started: u64,
+        finished: u64,
+        failures: u32,
+        retry_at_ms: u64,
+        stale_at_ms: ?u64,
+    };
+    // Every base has asked once (asked stays 1). A failed end at now_ms backs off by retryDelay(failures
+    // after the end); a listed end without a ttl sets no timer. `waiting` reaches failures 1 at 100 ms,
+    // so its retry_at_ms before any event is 1100.
+    const rows = [_]Row{
+        .{ .from = .fresh, .event = .begin, .state = .listing, .last = .never, .started = 1, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .fresh, .event = .{ .end = .{ .outcome = listed_plain, .now_ms = now_ms } }, .state = .idle, .last = .listed, .started = 0, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .fresh, .event = .{ .end = .{ .outcome = .failed, .now_ms = now_ms } }, .state = .waiting, .last = .failed, .started = 0, .finished = 0, .failures = 1, .retry_at_ms = 6_000, .stale_at_ms = null },
+        .{ .from = .listing, .event = .begin, .state = .listing, .last = .never, .started = 1, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .listing, .event = .{ .end = .{ .outcome = listed_plain, .now_ms = now_ms } }, .state = .idle, .last = .listed, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .listing, .event = .{ .end = .{ .outcome = .failed, .now_ms = now_ms } }, .state = .waiting, .last = .failed, .started = 1, .finished = 1, .failures = 1, .retry_at_ms = 6_000, .stale_at_ms = null },
+        .{ .from = .waiting, .event = .begin, .state = .listing, .last = .failed, .started = 1, .finished = 1, .failures = 1, .retry_at_ms = 1_100, .stale_at_ms = null },
+        .{ .from = .waiting, .event = .{ .end = .{ .outcome = listed_plain, .now_ms = now_ms } }, .state = .idle, .last = .listed, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 1_100, .stale_at_ms = null },
+        .{ .from = .waiting, .event = .{ .end = .{ .outcome = .failed, .now_ms = now_ms } }, .state = .waiting, .last = .failed, .started = 1, .finished = 1, .failures = 2, .retry_at_ms = 7_000, .stale_at_ms = null },
+    };
+    for (rows) |row| {
+        var s = reach(row.from);
+        s.apply(row.event);
+        errdefer std.debug.print("from {s} event {s}\n", .{ @tagName(row.from), @tagName(row.event) });
+        try std.testing.expectEqual(row.state, s.state);
+        try std.testing.expectEqual(row.last, s.last);
+        try std.testing.expectEqual(@as(u64, 1), s.asked);
+        try std.testing.expectEqual(row.started, s.started);
+        try std.testing.expectEqual(row.finished, s.finished);
+        try std.testing.expectEqual(row.failures, s.failures);
+        try std.testing.expectEqual(row.retry_at_ms, s.retry_at_ms);
+        try std.testing.expectEqual(row.stale_at_ms, s.stale_at_ms);
+    }
+}
 
 test "re-list slots fold asks, answer each ask once and back off failures" {
     var s: Slot = .{};

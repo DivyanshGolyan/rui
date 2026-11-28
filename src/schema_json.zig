@@ -4,11 +4,30 @@ const max_depth = @import("json_limits.zig").max_depth;
 /// The JSON value a captured document must be: a schema is an object, an app tools declaration an array.
 pub const Root = enum { object, array };
 
+/// The token run the encoder is inside: a string or a number split across input bytes, or neither.
+/// `next` is the one decision table for it; the encoder reads `fragment` and moves it only through `next`.
+pub const Fragment = enum {
+    none,
+    string,
+    number,
+
+    pub const Event = enum { text, string_end, number_part, number_end };
+
+    pub fn next(self: Fragment, event: Event) Fragment {
+        return switch (event) {
+            .text => if (self == .number) .number else .string,
+            .string_end => .none,
+            .number_part => .number,
+            .number_end => .none,
+        };
+    }
+};
+
 pub const Encoder = struct {
     scanner: std.json.Scanner,
     containers: [max_depth]Container = undefined,
     depth: usize = 0,
-    fragment: enum { none, string, number } = .none,
+    fragment: Fragment = .none,
     done: bool = false,
     root: Root = .object,
 
@@ -54,7 +73,7 @@ pub const Encoder = struct {
                     try self.string(bytes, sink);
                     if (token == .string) {
                         try sink.write("\"");
-                        self.fragment = .none;
+                        self.fragment = self.fragment.next(.string_end);
                     }
                 },
                 .partial_string_escaped_1 => |bytes| try self.string(&bytes, sink),
@@ -64,7 +83,7 @@ pub const Encoder = struct {
                 .partial_number, .number => |bytes| {
                     if (self.fragment == .none) try self.prefix(sink);
                     try sink.write(bytes);
-                    self.fragment = if (token == .number) .none else .number;
+                    self.fragment = self.fragment.next(if (token == .number) .number_end else .number_part);
                 },
                 .true, .false, .null => {
                     try self.prefix(sink);
@@ -89,8 +108,8 @@ pub const Encoder = struct {
         if (self.fragment == .none) {
             try self.prefix(sink);
             try sink.write("\"");
-            self.fragment = .string;
         }
+        self.fragment = self.fragment.next(.text);
         for (bytes) |byte| switch (byte) {
             '"' => try sink.write("\\\""),
             '\\' => try sink.write("\\\\"),
@@ -152,4 +171,29 @@ test "schema objects normalize incrementally like DOM serialization" {
         defer std.testing.allocator.free(expected);
         try std.testing.expectEqualStrings(expected, output.written());
     }
+}
+
+test "CM-75 the encoder's fragment moves only through its table over every state and event" {
+    const Cell = struct { from: Fragment, event: Fragment.Event, next: Fragment };
+    const cells = [_]Cell{
+        .{ .from = .none, .event = .text, .next = .string },
+        .{ .from = .string, .event = .text, .next = .string },
+        .{ .from = .number, .event = .text, .next = .number },
+        .{ .from = .none, .event = .string_end, .next = .none },
+        .{ .from = .string, .event = .string_end, .next = .none },
+        .{ .from = .number, .event = .string_end, .next = .none },
+        .{ .from = .none, .event = .number_part, .next = .number },
+        .{ .from = .string, .event = .number_part, .next = .number },
+        .{ .from = .number, .event = .number_part, .next = .number },
+        .{ .from = .none, .event = .number_end, .next = .none },
+        .{ .from = .string, .event = .number_end, .next = .none },
+        .{ .from = .number, .event = .number_end, .next = .none },
+    };
+    // Each (state, event) pair is listed exactly once.
+    var listed = std.mem.zeroes([std.enums.values(Fragment).len][std.enums.values(Fragment.Event).len]u8);
+    for (cells) |cell| {
+        try std.testing.expectEqual(cell.next, cell.from.next(cell.event));
+        listed[@backingInt(cell.from)][@backingInt(cell.event)] += 1;
+    }
+    for (listed) |row| for (row) |count| try std.testing.expectEqual(@as(u8, 1), count);
 }
