@@ -389,3 +389,68 @@ test "a borrowed field keeps only its addresses in the block" {
     try std.testing.expect(!second.borrowed);
     try std.testing.expectEqual(@as(?FieldBlock.Entry, null), entries.next());
 }
+
+test "CM-70 a stream record moves through its lifecycle only by applying events, and each event leaves the state it expects" {
+    var buffer: [8]u8 = undefined;
+    const bodies = [_]Body{ .{ .file = .{ .handle = 7, .length = 40 } }, .{ .bytes = "abc" } };
+    const sinks = [_]Sink{ .{ .file = 9 }, .{ .buffer = &buffer } };
+    for (bodies) |body| for (sinks) |sink| for ([_]bool{ false, true }) |get| {
+        var record = std.mem.zeroes(Record);
+        record.apply(.{ .prepare = .{ .fields = null, .fields_len = 0, .endpoint = 3, .get = get, .body = body, .sink = sink } });
+        try std.testing.expectEqual(State.prepared, record.state);
+        try std.testing.expectEqual(@as(u8, 3), record.endpoint);
+        try std.testing.expectEqual(get, record.flags.get);
+        try std.testing.expectEqual(body == .bytes, record.flags.body_is_bytes);
+        try std.testing.expectEqual(sink == .buffer, record.flags.sink_is_buffer);
+        switch (body) {
+            .file => |file| try std.testing.expectEqual(file.length, record.body_length),
+            .bytes => |bytes| try std.testing.expectEqual(@as(u64, bytes.len), record.body_length),
+        }
+        switch (sink) {
+            .file => |fd| try std.testing.expectEqual(fd, record.sink_target),
+            .buffer => |target| try std.testing.expectEqual(@as(u32, @intCast(target.len)), record.sink_capacity),
+        }
+
+        record.apply(.{ .launch = 500 });
+        try std.testing.expectEqual(State.pending, record.state);
+        try std.testing.expectEqual(@as(u64, 500), record.last_activity_ns);
+
+        // From pending, finish and cancel are both legal.
+        var from_pending = record;
+        from_pending.apply(.{ .finish = .body_failed });
+        try std.testing.expectEqual(State.finished, from_pending.state);
+        try std.testing.expectEqual(@as(?policy.Cause, .body_failed), from_pending.cause);
+        from_pending.apply(.collect);
+        try std.testing.expectEqual(State.collected, from_pending.state);
+        var cancelled = record;
+        cancelled.apply(.cancel);
+        try std.testing.expectEqual(State.cancelled, cancelled.state);
+
+        for ([_]bool{ false, true }) |first| {
+            var opened = record;
+            opened.apply(.{ .open = .{ .stream_id = 5, .connection = 2, .first = first } });
+            try std.testing.expectEqual(State.open, opened.state);
+            try std.testing.expectEqual(@as(i32, 5), opened.route.open.stream_id);
+            try std.testing.expectEqual(@as(u32, 2), opened.route.open.connection);
+            try std.testing.expectEqual(first, opened.flags.opened_connection);
+
+            for ([_]bool{ false, true }) |replay| {
+                var again = opened;
+                again.body_offset = 12;
+                again.flags.body_done = true;
+                again.apply(.{ .requeue = .{ .replay = replay } });
+                try std.testing.expectEqual(State.pending, again.state);
+                try std.testing.expectEqual(@as(u64, 0), again.body_offset);
+                try std.testing.expect(!again.flags.body_done);
+                try std.testing.expectEqual(@as(u3, if (replay) 1 else 0), again.flags.replays);
+            }
+
+            var finished = opened;
+            finished.apply(.{ .finish = .body_failed });
+            try std.testing.expectEqual(State.finished, finished.state);
+            var cancelled_open = opened;
+            cancelled_open.apply(.cancel);
+            try std.testing.expectEqual(State.cancelled, cancelled_open.state);
+        }
+    };
+}
