@@ -1314,7 +1314,7 @@ const approval_request = rsql.Read(.{
 });
 
 const session_change = rsql.Read(.{
-    .sql = "SELECT c.revision,c.field,c.changed_at,c.provider_text,CASE WHEN c.field='provider' THEN r.provider END FROM session_change c JOIN session_revision r ON r.session_ref=c.session_ref AND r.revision=c.revision WHERE c.session_ref=?1 AND c.position=?2 AND c.ordinal=?3",
+    .sql = "SELECT c.revision,c.field,c.changed_at,c.provider_text,CASE WHEN c.field='provider' THEN r.provider END AS provider FROM session_change c JOIN session_revision r ON r.session_ref=c.session_ref AND r.revision=c.revision WHERE c.session_ref=?1 AND c.position=?2 AND c.ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
     .Row = struct { revision: rsql.Positive, field: session_settings.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes), provider: *?connection.Name },
     .cardinality = .optional,
