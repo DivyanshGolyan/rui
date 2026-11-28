@@ -1260,7 +1260,7 @@ test "Keys reclamps on resize and starts at the top when reopened" {
     try std.testing.expectEqual(@as(usize, 0), page.reference_offset);
 }
 
-test "SUI-189 an open Connections reference asks its owner for a newer reading once its own is five seconds old, and the other screens never do" {
+test "SUI-192 an open Connections reference asks its owner for a newer reading once its own is five seconds old, and the other screens never do" {
     const start: u64 = 1_800_000_000;
     var snapshot: ConnectionsSnapshot = .{ .facts = .{}, .now = start };
     snapshot.facts.items[0] = .{ .name = connection.Name.parse("work").?, .label = provider_route.Label.parse("ChatGPT").?, .route = .chatgpt_plan, .usage = .{ .observed_at = start - 60, .primary = .{ .used_percent = 10, .minutes = 10080, .reset_at = start + 86400 }, .secondary = null } };

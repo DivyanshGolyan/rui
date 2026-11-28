@@ -248,10 +248,13 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return styled and foregroundIndex(self.styles[position]) == address_index;
         }
 
-        fn terminalLink(self: *const Self, position: usize) []const u8 {
-            if (!styled) return "";
+        fn cellLink(self: *const Self, position: usize) vaxis.Cell.Hyperlink {
+            if (!styled) return .{};
             const uri = self.address(position);
-            return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) "" else uri;
+            if (!std.mem.startsWith(u8, uri, TerminalText.session_link)) return .{ .uri = uri };
+            // The borrowed ID's address identifies this occurrence even on painted spaces.
+            // vaxis emits neither URI nor params for an internal link.
+            return .{ .params = session_id.fromLink(uri) orelse "" };
         }
 
         pub fn sessionAt(self: *const Self, position: usize) ?[]const u8 {
@@ -638,7 +641,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
                 if (shown) {
-                    segments[count] = linkedSegment(self.bytes[start..stop], self.segmentStyle(start, colour, plain, colours), self.terminalLink(start));
+                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain, colours), .link = self.cellLink(start) };
                     count += 1;
                 }
                 start = stop;
@@ -1761,7 +1764,7 @@ test "quote body extraction retains metadata through split controls normalizatio
         try std.testing.expect(document.bodyAt(body - "\u{301}".len));
         const label = std.mem.indexOf(u8, document.text(), "label").?;
         try std.testing.expect(document.bodyAt(label));
-        try std.testing.expectEqualStrings("https://example.test/", document.terminalLink(label));
+        try std.testing.expectEqualStrings("https://example.test/", document.cellLink(label).uri);
         try std.testing.expect(!document.bodyAt(std.mem.indexOf(u8, document.text(), "status").?));
         try std.testing.expect(seamStyle(document.styles[label]) & body_bit != 0);
         document.discardFront(document.origin + body);
