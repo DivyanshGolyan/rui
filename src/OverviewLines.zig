@@ -58,11 +58,13 @@ pub const SessionControls = struct {
         }
         projected[lines.len] = .{ .segments = &.{} };
         rows.* = projected;
-        self.row.rows = .of(rows);
-        self.row.selected = if (self.state.selected == .new_session) 0 else null;
-        self.row.caps = self.caps;
-        self.row.on_press = .{ .userdata = self.userdata, .pressed = self.on_click };
-        self.row.on_pointer = self.on_pointer;
+        self.row.present(.{
+            .rows = .of(rows),
+            .selected = if (self.state.selected == .new_session) 0 else null,
+            .caps = self.caps,
+            .on_press = .{ .userdata = self.userdata, .pressed = self.on_click },
+            .on_pointer = self.on_pointer,
+        });
         var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(3, ctx.max.height.?) }));
         surface.widget = self.widget();
         return surface;
