@@ -20,7 +20,7 @@ const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const testingStore = store_testing.testingSqliteStore;
 const busyStatements = shared_fixtures.busyStatements;
 
-test "public content SQL failure fences Store instead of reporting absence" {
+test "INS-5 an activity content read whose SQL fails fences the Store instead of reporting absence" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -29,7 +29,7 @@ test "public content SQL failure fences Store instead of reporting absence" {
     const session = try configureTestSession(&storage, "public-read-config");
     try submitTestMessage(&storage, &tmp, "public-read-text", "public-read-key", session.slice(), "text");
     _ = (try storage.admitNextModelAttempt(.{})).?;
-    var request: protocol.ConversationContent = .{ .position = 1 };
+    var request: protocol.ReadActivityContent = .{ .position = 1 };
     try request.session.set(session.slice());
     const Interrupt = struct {
         fn progress(_: ?*anyopaque) callconv(.c) c_int {
@@ -38,12 +38,12 @@ test "public content SQL failure fences Store instead of reporting absence" {
     };
     c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Interrupt.progress, null);
     defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
-    try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(&request));
+    try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&request));
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(&request));
+    try std.testing.expectError(error.StoreFenced, storage.openActivityContent(&request));
 }
 
-test "public content SQLite step failure fences after successful preparation" {
+test "INS-5 an activity content read whose SQLite step fails fences after a successful preparation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -52,9 +52,9 @@ test "public content SQLite step failure fences after successful preparation" {
     const session = try configureTestSession(&storage, "step-config");
     try submitTestMessage(&storage, &tmp, "step-input", "step-key", session.slice(), "step text");
     _ = (try storage.admitNextModelAttempt(.{})).?;
-    var request = protocol.ConversationContent{ .position = 1 };
+    var request = protocol.ReadActivityContent{ .position = 1 };
     try request.session.set(session.slice());
-    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = request.session, .position = 999 }));
+    try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = request.session, .position = 999 }));
     try std.testing.expect(!storage.isFenced());
     const Interrupt = struct {
         database: *c.sqlite3,
@@ -75,10 +75,10 @@ test "public content SQLite step failure fences after successful preparation" {
     var interrupt = Interrupt{ .database = storage.sqliteDatabase() };
     c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Interrupt.progress, &interrupt);
     defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
-    try std.testing.expectError(error.ConversationReadFailed, storage.openPublicConversationContent(&request));
+    try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&request));
     try std.testing.expect(interrupt.interrupted_step);
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.openPublicConversationContent(&request));
+    try std.testing.expectError(error.StoreFenced, storage.openActivityContent(&request));
 }
 
 const TestingPublicReadRoute = enum { page, content, cursor };
@@ -113,7 +113,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     request.end = valid.end;
     if (route == .cursor) request.before_position = valid.items[0].position;
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(&.{ .session = request.session, .position = valid.items[0].position })) |location| blk: {
+        if (storage.openActivityContent(&.{ .session = request.session, .position = valid.items[0].position })) |location| blk: {
             var reader: ContentReader = undefined;
             reader.open(location);
             reader.close();
@@ -168,7 +168,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try std.testing.expect(item.value == .tool_result and item.ordinal == (if (target_sibling) @as(u64, 2) else 1));
     {
         var reader: ContentReader = undefined;
-        reader.open(try storage.openPublicConversationContent(&.{ .session = request.session, .position = item.position, .ordinal = item.ordinal }));
+        reader.open(try storage.openActivityContent(&.{ .session = request.session, .position = item.position, .ordinal = item.ordinal }));
         defer reader.close();
         var bytes: [64]u8 = undefined;
         const count = try reader.read(0, &bytes);
@@ -190,7 +190,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
         request.before_ordinal = item.ordinal;
     }
     const result: anyerror!void = if (route == .content)
-        if (storage.openPublicConversationContent(&.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |location| blk: {
+        if (storage.openActivityContent(&.{ .session = request.session, .position = item.position, .ordinal = item.ordinal })) |location| blk: {
             var reader: ContentReader = undefined;
             reader.open(location);
             reader.close();
@@ -272,7 +272,7 @@ test "INS-4 a completed Action sibling's corruption fences the first conversatio
                 request.before_ordinal = 2;
             }
             const result: anyerror!void = if (route == .content)
-                if (storage.openPublicConversationContent(&.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
+                if (storage.openActivityContent(&.{ .session = request.session, .position = position, .ordinal = 2 })) |value| blk: {
                     var reader: ContentReader = undefined;
                     reader.open(value);
                     reader.close();
@@ -313,7 +313,7 @@ test "INS-4 an assistant row's provenance binds the exact accepted item" {
             try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
                 .page => if (store_testing.conversationRows(&storage, .{ .session = request.session })) |_| {} else |err| err,
-                .bytes => if (storage.openPublicConversationContent(&request)) |location| blk: {
+                .bytes => if (storage.openActivityContent(&request)) |location| blk: {
                     var owned: ContentReader = undefined;
                     owned.open(location);
                     owned.close();

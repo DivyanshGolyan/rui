@@ -131,7 +131,7 @@ test "retained readers allow checkpoints between committed windows" {
         const text = @as([32768]u8, @splat('x')) ++ "asymmetric-é-tail";
         const location = if (answer) blk: {
             const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = text, .decoded = text }});
-            break :blk try storage.openPublicConversationContent(&request);
+            break :blk try storage.openActivityContent(&request);
         } else blk: {
             try importCommittedForTesting(&storage, text);
             break :blk try storage.openContent(.{ .length = text.len, .digest = protocol.contentDigest(text) });

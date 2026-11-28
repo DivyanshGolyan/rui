@@ -717,7 +717,7 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
                 try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+1", .{});
                 const result: anyerror!void = switch (route) {
                     .activity => if (store_core.activityPageForTesting(&storage, .{ .session = session })) |_| {} else |err| err,
-                    .conversation_content => if (storage.openPublicConversationContent(&.{ .session = session, .position = position })) |value| blk: {
+                    .conversation_content => if (storage.openActivityContent(&.{ .session = session, .position = position })) |value| blk: {
                         var reader: ContentReader = undefined;
                         reader.open(value);
                         reader.close();

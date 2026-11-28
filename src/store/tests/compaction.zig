@@ -197,7 +197,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             for (parsed_report.value.object.get("full").?.object.get("conversation").?.array.items) |entry|
                 try std.testing.expect(!std.mem.eql(u8, "assistant", entry.object.get("kind").?.string));
             const compaction_message = try store_testing.queryU64(&storage, "SELECT session_position FROM model_output_item WHERE item_kind=2", .{});
-            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = session, .position = compaction_message }));
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = compaction_message }));
             try std.testing.expect(!storage.isFenced());
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(compact.turn_id, successor.turn_id);

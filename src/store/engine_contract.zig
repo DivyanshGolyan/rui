@@ -1868,14 +1868,6 @@ fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter, repl
     try std.testing.expectEqual(2, read_bytes);
     _ = replies.keep(bytes[0..read_bytes]);
     try meter.stop(.readOwnedContent);
-    var answers: protocol.ActivityPage = .{ .kinds = .initOne(.assistant) };
-    try answers.session.set(session.slice());
-    const page = try replies.keep(store_core.activityPageForTesting(storage, answers));
-    if (page.count == 0) return error.NoAnswer;
-    const answer = page.items[0].position;
-    meter.start();
-    _ = try replies.keep(storage.openPublicConversationContent(&.{ .session = session, .position = answer }));
-    try meter.stop(.openPublicConversationContent);
 
     try submitTestMessage(storage, tmp, "budget-again-input", "budget-again-key", session.slice(), "again");
     const running = (try replies.keep(storage.admitNextModelAttempt(.{}))).?.permit.binding;

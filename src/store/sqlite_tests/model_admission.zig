@@ -461,7 +461,7 @@ test "continued accepted output allows model revisions and keeps public text rea
     try std.testing.expectEqual(@as(usize, 2), public_page.count);
     try std.testing.expect(public_page.items[0].value == .assistant);
     var public_reader: ContentReader = undefined;
-    public_reader.open(try storage.openPublicConversationContent(&.{ .session = public_session.session, .position = public_page.items[0].position }));
+    public_reader.open(try storage.openActivityContent(&.{ .session = public_session.session, .position = public_page.items[0].position }));
     {
         const backing = try sqlite.prepare(storage.sqliteDatabase(), "SELECT text.private,bag.private FROM model_output_item item " ++
             "JOIN content text ON text.content_id=item.message_content_id " ++

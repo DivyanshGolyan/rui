@@ -1470,7 +1470,7 @@ pub fn testingPublicProjection(
     storage: *Store,
     tmp: *std.testing.TmpDir,
     parts: []const TestingAnswerPart,
-) !protocol.ConversationContent {
+) !protocol.ReadActivityContent {
     const session = try configureTestSession(storage, "projection-config");
     try answerTestTurn(storage, tmp, session.slice(), "projection", parts);
     const page = try store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.assistant) });
