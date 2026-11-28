@@ -1,5 +1,5 @@
 {
-  "revision": "972fd6b2a85f9ace45165fadef51d432260eac42",
+  "revision": "b08bf8db72da2ebde1537abae1951913847b01ac",
   "sources": {
     "Parser.zig": {
       "sha256": "9935e0eaf80c7b826465769a13b25837974d052a3038839901e16b2ac8bd5381",
@@ -14,9 +14,9 @@
       ]
     },
     "Loop.zig": {
-      "sha256": "24d427a5554e1964903af8123f067911671abdd980b3b63933e2d184cfb4d3d3",
+      "sha256": "08adbf5cc755a3880432801d8362a22a9ed056cb83725c507c595433d833b7a4",
       "tests": [
-        "SUI-194 OSC 5522 report-all Escape survives a delayed read without changing legacy input"
+        "SUI-196 OSC 5522 report-all Escape survives a delayed read without changing legacy input"
       ]
     }
   }
