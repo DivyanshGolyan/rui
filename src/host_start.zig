@@ -486,10 +486,7 @@ fn servedOpenAi(init: std.process.Init, settings: *const hs.Settings, entry: *hs
         try entry.endpoint.?.text.set(resolved.url);
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         switch (try connectionKeySource(init, served.name.slice(), &served.credential, &path_buffer)) {
-            .file => |path| {
-                entry.key.source = .{ .file = .{} };
-                try entry.key.source.file.text.set(path);
-            },
+            .file => |path| try entry.key.useFile(path),
             .env => |name| {
                 entry.key.source = .{ .env = .{} };
                 try entry.key.source.env.set(name);
