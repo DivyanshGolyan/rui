@@ -1,0 +1,45 @@
+{
+  "changed": [],
+  "new": [
+    {
+      "name": "settings-connections",
+      "size": "140x40",
+      "before": null,
+      "after": {
+        "name": "settings-connections",
+        "size": "140x40",
+        "files": {
+          "png": "settings-connections@140x40.png"
+        },
+        "status": "ok",
+        "ok": true,
+        "reason": null,
+        "sha": "af0629e6a880d0557d68c1d922b91b1648a3572b",
+        "note": "Settings Connections reference: each served connection, its sign-in and usage rows; the fixture's endpoint route has no readable usage so it reads no usage seen yet",
+        "cells_sha256": "1225ead5be7b5ad1b900739de113e74c86eae9ecbfa199080310d542df7161a4"
+      }
+    },
+    {
+      "name": "settings-connections",
+      "size": "46x30",
+      "before": null,
+      "after": {
+        "name": "settings-connections",
+        "size": "46x30",
+        "files": {
+          "png": "settings-connections@46x30.png"
+        },
+        "status": "ok",
+        "ok": true,
+        "reason": null,
+        "sha": "af0629e6a880d0557d68c1d922b91b1648a3572b",
+        "note": "Settings Connections reference: each served connection, its sign-in and usage rows; the fixture's endpoint route has no readable usage so it reads no usage seen yet",
+        "cells_sha256": "179cec5358a035a8fe926ee960ab3bbeb5510ff6a29edb23abad53016a616ab7"
+      }
+    }
+  ],
+  "removed": [],
+  "same_count": 0,
+  "same": [],
+  "failed": []
+}
