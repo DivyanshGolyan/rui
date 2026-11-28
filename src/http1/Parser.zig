@@ -498,7 +498,73 @@ test "a head arriving a byte at a time is scanned once" {
     try std.testing.expectEqual(Event.end, (try parser.next(response[step.used..])).event);
 }
 
+/// Streams that frame their own end, with the status and body each yields.
+/// `closes` marks a body with no framing, which ends only when the connection closes.
+const Complete = struct { stream: []const u8, status: u16, body: []const u8, closes: bool = false };
+const complete_streams = [_]Complete{
+    .{ .stream = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", .status = 200, .body = "hello" },
+    .{ .stream = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", .status = 200, .body = "" },
+    .{ .stream = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", .status = 200, .body = "hello" },
+    .{ .stream = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;x=y\r\na\r\n6\r\n bcdef\r\n0\r\nX-T: 1\r\n\r\n", .status = 200, .body = "a bcdef" },
+    .{ .stream = "HTTP/1.1 204 No Content\r\n\r\n", .status = 204, .body = "" },
+    .{ .stream = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", .status = 200, .body = "ok" },
+    .{ .stream = "HTTP/1.1 200 OK\r\n\r\nstream", .status = 200, .body = "stream", .closes = true },
+};
+
+/// Reads `stream` with the whole buffer in hand, one call at a time, as a
+/// caller does. A message that frames its end reaches `.end`, consumes nothing
+/// after it, and still finishes cleanly; a body with no framing has no `.end`
+/// until the connection closes.
+fn expectEndsWhole(stream: []const u8, closes: bool) !void {
+    var parser: Parser = .{};
+    var rest = stream;
+    var ended = false;
+    while (true) {
+        const step = try parser.next(rest);
+        rest = rest[step.used..];
+        if (step.event == .end) {
+            ended = true;
+            break;
+        }
+        if (step.used == 0) break;
+    }
+    if (!ended) {
+        try std.testing.expect(closes);
+        try std.testing.expectEqual(Event.end, try parser.finish());
+        return;
+    }
+    const after = try parser.next(rest);
+    try std.testing.expectEqual(@as(usize, 0), after.used);
+    try std.testing.expectEqual(Event.end, after.event);
+    try std.testing.expectEqual(Event.end, try parser.finish());
+}
+
+/// Every proper prefix of a message that frames its end is a response cut short.
+fn expectTruncatedAtEveryCut(stream: []const u8) !void {
+    for (0..stream.len) |cut| {
+        var out: Collected = .{};
+        try std.testing.expectError(error.TruncatedResponse, collect(stream[0..cut], cut, &out));
+    }
+}
+
+/// A propagated parser error prints no line, so a failing check names its call site.
+fn expectOk(source: std.builtin.SourceLocation, result: anyerror!void) !void {
+    result catch |err| {
+        std.debug.print("EXR-106 check failed at {s}:{d} with {s}\n", .{ source.file, source.line, @errorName(err) });
+        return err;
+    };
+}
+
 test "EXR-106 the parser moves through every state x transition as its framing rules say" {
+    for (complete_streams) |case| {
+        try expectOk(@src(), expectEverySplit(case.stream, case.status, case.body));
+        try expectOk(@src(), expectEndsWhole(case.stream, case.closes));
+        if (!case.closes) try expectOk(@src(), expectTruncatedAtEveryCut(case.stream));
+    }
+
+    // Supporting table: the same transitions named one by one, including ones
+    // `Parser.next` never drives (`body_end` with bytes left, body bytes from a
+    // non-body state), which the API checks above cannot reach.
     const Row = struct { from: State, transition: State.Transition, want: Error!State };
     const plain: Head = .{ .status = 200, .fields = "" };
     const sized: Head = .{ .status = 200, .fields = "Content-Length: 5\r\n" };

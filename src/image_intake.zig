@@ -297,7 +297,78 @@ test "intake can decline a ready image before beginning another" {
     intake.cancelReady();
 }
 
-test "ADM-36 image intake phases move only by the table's events" {
+test "ADM-36 image intake phases move only by the table's events, through its public calls" {
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A replayable image is validated, rewound, then copied into the capture.
+    {
+        var source: TestSource = .{ .bytes = png };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(true), .{}) == .pending);
+        try std.testing.expectEqual(Phase.scan, intake.phase);
+        try std.testing.expect(intake.step() == .ready);
+        try std.testing.expectEqual(Phase.ready, intake.phase);
+        try std.testing.expectEqual(@as(usize, 0), source.at);
+        var used: std.atomic.Value(u64) = .init(0);
+        var capture: InputCapture = undefined;
+        try testCapture(&capture, tmp.dir, &used, 4096);
+        defer capture.close();
+        try std.testing.expect(intake.attach(&capture) == .pending);
+        try std.testing.expectEqual(Phase.copy, intake.phase);
+        try std.testing.expect(intake.step() == .kept);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+        _ = try capture.seal();
+    }
+    // A replayable source that is not an image fails in its validation pass and ends done.
+    {
+        var source: TestSource = .{ .bytes = "not an image" };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(true), .{}) == .pending);
+        const invalid = intake.step();
+        try std.testing.expect(invalid == .failed and invalid.failed == .source);
+        try std.testing.expectEqual(error.UnsupportedImage, invalid.failed.source);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+    }
+    // A declared size over the limit is refused before any read, and ends done.
+    {
+        var source: TestSource = .{ .bytes = "not an image" };
+        var too_large = source.source(false);
+        too_large.length = 100;
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(too_large, .{ .max_bytes = 99 }) == .failed);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+        try std.testing.expectEqual(@as(usize, 0), source.calls);
+    }
+    // A streamed source is ready at once; layout may cancel it, and a later begin starts again.
+    {
+        var source: TestSource = .{ .bytes = png };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(false), .{}) == .ready);
+        try std.testing.expectEqual(Phase.ready, intake.phase);
+        intake.cancelReady();
+        try std.testing.expectEqual(Phase.done, intake.phase);
+        try std.testing.expect(intake.begin(source.source(true), .{}) == .pending);
+        try std.testing.expectEqual(Phase.scan, intake.phase);
+    }
+    // A streamed source that fails while it is copied ends done from the copy phase.
+    {
+        var source: TestSource = .{ .bytes = png };
+        var intake: Intake = .{};
+        try std.testing.expect(intake.begin(source.source(false), .{}) == .ready);
+        var used: std.atomic.Value(u64) = .init(0);
+        var capture: InputCapture = undefined;
+        try testCapture(&capture, tmp.dir, &used, 4096);
+        defer capture.close();
+        try std.testing.expect(intake.attach(&capture) == .pending);
+        source.failure = error.NoSpaceLeft;
+        const failed = intake.step();
+        try std.testing.expect(failed == .failed and failed.failed == .source);
+        try std.testing.expectEqual(error.NoSpaceLeft, failed.failed.source);
+        try std.testing.expectEqual(Phase.done, intake.phase);
+    }
+    // Supporting check: the table's legal pairs. The illegal pairs are table-only, because the
+    // public calls assert that an event is legal from the phase they are made in.
     const Event = Phase.Event;
     const cases = [_]struct { from: Phase, event: Event, to: ?Phase }{
         .{ .from = .idle, .event = .begin_streamed, .to = .ready },

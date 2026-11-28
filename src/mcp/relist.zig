@@ -205,11 +205,31 @@ fn reach(base: Base) Slot {
     return s;
 }
 
+/// The three public moves a list makes on a slot: an ask is `want`, the rest are these.
+const Action = enum { begin, end_listed, end_failed };
+
+fn drive(s: *Slot, action: Action, now_ms: u64) void {
+    switch (action) {
+        .begin => s.begin(),
+        .end_listed => s.end(listed_plain, now_ms),
+        .end_failed => s.end(.failed, now_ms),
+    }
+}
+
+/// The table event a verb sends: only the supporting check reads it.
+fn eventOf(action: Action, now_ms: u64) Slot.Event {
+    return switch (action) {
+        .begin => .begin,
+        .end_listed => .{ .end = .{ .outcome = listed_plain, .now_ms = now_ms } },
+        .end_failed => .{ .end = .{ .outcome = .failed, .now_ms = now_ms } },
+    };
+}
+
 test "EXR-104 a re-list slot moves through every state x event as its rules say" {
     const now_ms: u64 = 5_000;
     const Row = struct {
         from: Base,
-        event: Slot.Event,
+        action: Action,
         state: State,
         last: Last,
         started: u64,
@@ -222,20 +242,20 @@ test "EXR-104 a re-list slot moves through every state x event as its rules say"
     // after the end); a listed end without a ttl sets no timer. `waiting` reaches failures 1 at 100 ms,
     // so its retry_at_ms before any event is 1100.
     const rows = [_]Row{
-        .{ .from = .fresh, .event = .begin, .state = .listing, .last = .never, .started = 1, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
-        .{ .from = .fresh, .event = .{ .end = .{ .outcome = listed_plain, .now_ms = now_ms } }, .state = .idle, .last = .listed, .started = 0, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
-        .{ .from = .fresh, .event = .{ .end = .{ .outcome = .failed, .now_ms = now_ms } }, .state = .waiting, .last = .failed, .started = 0, .finished = 0, .failures = 1, .retry_at_ms = 6_000, .stale_at_ms = null },
-        .{ .from = .listing, .event = .begin, .state = .listing, .last = .never, .started = 1, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
-        .{ .from = .listing, .event = .{ .end = .{ .outcome = listed_plain, .now_ms = now_ms } }, .state = .idle, .last = .listed, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
-        .{ .from = .listing, .event = .{ .end = .{ .outcome = .failed, .now_ms = now_ms } }, .state = .waiting, .last = .failed, .started = 1, .finished = 1, .failures = 1, .retry_at_ms = 6_000, .stale_at_ms = null },
-        .{ .from = .waiting, .event = .begin, .state = .listing, .last = .failed, .started = 1, .finished = 1, .failures = 1, .retry_at_ms = 1_100, .stale_at_ms = null },
-        .{ .from = .waiting, .event = .{ .end = .{ .outcome = listed_plain, .now_ms = now_ms } }, .state = .idle, .last = .listed, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 1_100, .stale_at_ms = null },
-        .{ .from = .waiting, .event = .{ .end = .{ .outcome = .failed, .now_ms = now_ms } }, .state = .waiting, .last = .failed, .started = 1, .finished = 1, .failures = 2, .retry_at_ms = 7_000, .stale_at_ms = null },
+        .{ .from = .fresh, .action = .begin, .state = .listing, .last = .never, .started = 1, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .fresh, .action = .end_listed, .state = .idle, .last = .listed, .started = 0, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .fresh, .action = .end_failed, .state = .waiting, .last = .failed, .started = 0, .finished = 0, .failures = 1, .retry_at_ms = 6_000, .stale_at_ms = null },
+        .{ .from = .listing, .action = .begin, .state = .listing, .last = .never, .started = 1, .finished = 0, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .listing, .action = .end_listed, .state = .idle, .last = .listed, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 0, .stale_at_ms = null },
+        .{ .from = .listing, .action = .end_failed, .state = .waiting, .last = .failed, .started = 1, .finished = 1, .failures = 1, .retry_at_ms = 6_000, .stale_at_ms = null },
+        .{ .from = .waiting, .action = .begin, .state = .listing, .last = .failed, .started = 1, .finished = 1, .failures = 1, .retry_at_ms = 1_100, .stale_at_ms = null },
+        .{ .from = .waiting, .action = .end_listed, .state = .idle, .last = .listed, .started = 1, .finished = 1, .failures = 0, .retry_at_ms = 1_100, .stale_at_ms = null },
+        .{ .from = .waiting, .action = .end_failed, .state = .waiting, .last = .failed, .started = 1, .finished = 1, .failures = 2, .retry_at_ms = 7_000, .stale_at_ms = null },
     };
     for (rows) |row| {
         var s = reach(row.from);
-        s.apply(row.event);
-        errdefer std.debug.print("from {s} event {s}\n", .{ @tagName(row.from), @tagName(row.event) });
+        drive(&s, row.action, now_ms);
+        errdefer std.debug.print("from {s} action {s}\n", .{ @tagName(row.from), @tagName(row.action) });
         try std.testing.expectEqual(row.state, s.state);
         try std.testing.expectEqual(row.last, s.last);
         try std.testing.expectEqual(@as(u64, 1), s.asked);
@@ -244,6 +264,16 @@ test "EXR-104 a re-list slot moves through every state x event as its rules say"
         try std.testing.expectEqual(row.failures, s.failures);
         try std.testing.expectEqual(row.retry_at_ms, s.retry_at_ms);
         try std.testing.expectEqual(row.stale_at_ms, s.stale_at_ms);
+    }
+
+    // Supporting check: each verb sends one table event, so every base and action leaves the slot
+    // exactly as `apply` does. The table is the one decision; the verbs are the only public path to it.
+    for (rows) |row| {
+        var by_verb = reach(row.from);
+        drive(&by_verb, row.action, now_ms);
+        var by_table = reach(row.from);
+        by_table.apply(eventOf(row.action, now_ms));
+        try std.testing.expectEqual(by_table, by_verb);
     }
 }
 

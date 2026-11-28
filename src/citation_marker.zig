@@ -245,7 +245,33 @@ test "SUI-167 the stream filter agrees with the whole-text definition over gener
     }
 }
 
-test "SUI-200 the marker table takes each state to the state and step its bytes call for" {
+test "SUI-200 the marker filter removes complete markers, byte by byte, and passes every other byte" {
+    // Fixed inputs through the public `Filter`: each marker is removed whole, and each unfinished or
+    // malformed one is text, including when it is split across `feed` calls and cut short by `finish`.
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "plain text", .expected = "plain text" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\u{e201}b", .expected = "ab" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\u{e202}t2\u{e201}b", .expected = "ab" },
+        .{ .input = "a\u{e200}cx", .expected = "a\u{e200}cx" },
+        .{ .input = "a\u{e200}cite\u{e202}\u{e201}b", .expected = "a\u{e200}cite\u{e202}\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e202}x y\u{e201}b", .expected = "a\u{e200}cite\u{e202}x y\u{e201}b" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee\x89b", .expected = "a\u{e200}cite\u{e202}t1\xee\x89b" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee\x88x", .expected = "a\u{e200}cite\u{e202}t1\xee\x88x" },
+        .{ .input = "a\u{e200}cite", .expected = "a\u{e200}cite" },
+        .{ .input = "a\u{e200}cite\u{e202}", .expected = "a\u{e200}cite\u{e202}" },
+        .{ .input = "a\u{e200}cite\u{e202}turn0", .expected = "a\u{e200}cite\u{e202}turn0" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee", .expected = "a\u{e200}cite\u{e202}t1\xee" },
+        .{ .input = "a\u{e200}cite\u{e202}t1\xee\x88", .expected = "a\u{e200}cite\u{e202}t1\xee\x88" },
+    };
+    for (cases) |case| try expectFiltered(case.input, case.expected);
+    const ids: [max_held - lead.len - close.len]u8 = @splat('x');
+    try expectFiltered("a" ++ lead ++ ids ++ close ++ "b", "ab");
+    const too_long = "a" ++ lead ++ ids ++ "x" ++ close ++ "b";
+    try expectFiltered(too_long, too_long);
+
+    // Supporting check: the state table's rows agree with the stream's behavior above. Rows with
+    // an idle state holding bytes, or a lead at the hold bound, are table-only: the stream never
+    // reaches them, since an idle filter holds nothing and a lead is shorter than the hold bound.
     const Row = struct { from: State, byte: u8, held: usize, next: State, step: Step };
     const rows = [_]Row{
         // Idle: a byte that starts no marker passes; the marker's first byte starts one.

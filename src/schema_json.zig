@@ -173,7 +173,40 @@ test "schema objects normalize incrementally like DOM serialization" {
     }
 }
 
-test "CM-76 the encoder's fragment moves only through its table over every state and event" {
+test "CM-76 the encoder's fragment follows a string or number split across feed calls" {
+    // A fixed object fed one byte at a time: the fragment is `string` inside the split key and
+    // `number` inside the split value, and returns to `none` where each token ends.
+    const input = "{\"k\":12}";
+    const fragments = [_]Fragment{ .none, .none, .string, .none, .none, .number, .number, .none };
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    const Sink = struct {
+        writer: *std.Io.Writer,
+        pub fn write(self: @This(), bytes: []const u8) !void {
+            try self.writer.writeAll(bytes);
+        }
+    };
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+    for (input, 0..) |byte, index| {
+        try std.testing.expectEqual(index == input.len - 1, try encoder.feed(byte, Sink{ .writer = &output.writer }));
+        try std.testing.expectEqual(fragments[index], encoder.fragment);
+    }
+    try std.testing.expectEqualStrings(input, output.written());
+
+    // An array root split inside an escape and a fractional number normalizes to the same text.
+    const array = "[\"a\\n\",-2.5e1,true]";
+    var array_output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer array_output.deinit();
+    var array_encoder = Encoder.initRoot(std.testing.allocator, .array);
+    defer array_encoder.deinit();
+    for (array, 0..) |byte, index| {
+        try std.testing.expectEqual(index == array.len - 1, try array_encoder.feed(byte, Sink{ .writer = &array_output.writer }));
+    }
+    try std.testing.expectEqualStrings(array, array_output.written());
+
+    // Supporting check: the table's cell for each (state, event) pair. The cells the scanner never
+    // presents to the encoder, such as a string_end from none, are table-only.
     const Cell = struct { from: Fragment, event: Fragment.Event, next: Fragment };
     const cells = [_]Cell{
         .{ .from = .none, .event = .text, .next = .string },

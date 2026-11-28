@@ -373,7 +373,72 @@ test "a malformed response is refused, not read as a body" {
     try std.testing.expectError(error.InvalidFraming, post(&server, "{}", &out));
 }
 
+/// Writes a POST for `body` to `target` into `buffer` and returns the bytes.
+fn postBytes(buffer: []u8, target: request.Target, body: []const u8) ![]const u8 {
+    var writer: std.Io.Writer = .fixed(buffer);
+    try request.writePost(&writer, target, &.{}, body.len);
+    try writer.writeAll(body);
+    return writer.buffered();
+}
+
+/// Reports the call site of a failed check, so a red names its line.
+fn expectHere(source: std.builtin.SourceLocation, condition: bool) !void {
+    if (!condition) {
+        std.debug.print("EXR-105 assertion at {s}:{d}\n", .{ source.file, source.line });
+        return error.TestUnexpectedResult;
+    }
+}
+
 test "EXR-105 an exchange moves through every state x transition as its rules say" {
+    // Driven to its end over loopback: nothing is sent before the first
+    // advance, it wants events until it ends, and once done it wants none and
+    // keeps answering end.
+    var url_buffer: [64]u8 = undefined;
+    var bytes: [512]u8 = undefined;
+    var server: TestServer = .{ .listener = -1, .port = 0, .reply = &.{"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"} };
+    try server.start();
+    defer server.stop();
+    const target = try request.parseTarget(try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/mcp", .{server.port}));
+    var exchange: Exchange = undefined;
+    try exchange.init(target, try postBytes(&bytes, target, "{}"));
+    defer exchange.deinit();
+    try std.testing.expect(!exchange.requestSent());
+    try std.testing.expect(exchange.events() != 0);
+    var out: Outcome = .{};
+    try drive(&exchange, &out);
+    try std.testing.expectEqual(@as(u16, 200), out.status);
+    try std.testing.expectEqualStrings("ok", out.body[0..out.body_len]);
+    try std.testing.expect(exchange.requestSent());
+    try expectHere(@src(), exchange.events() == 0);
+    try std.testing.expectEqual(Event.end, try exchange.advance());
+
+    // Deinit before the exchange finishes makes it done, whatever state it was in.
+    var early: Exchange = undefined;
+    try early.init(target, try postBytes(&bytes, target, "{}"));
+    early.deinit();
+    try expectHere(@src(), early.events() == 0);
+    try std.testing.expectEqual(Event.end, try early.advance());
+
+    // A connect the kernel refuses ends the exchange, whether init reports it
+    // or the first advance does.
+    var refused_url: [64]u8 = undefined;
+    const refused_port = try @import("../socket_fixture.zig").refusedPort();
+    const refused_target = try request.parseTarget(try std.fmt.bufPrint(&refused_url, "http://127.0.0.1:{d}/mcp", .{refused_port}));
+    var refused: Exchange = undefined;
+    var refused_out: Outcome = .{};
+    if (refused.init(refused_target, try postBytes(&bytes, refused_target, "{}"))) |_| {
+        try std.testing.expectError(error.ConnectFailed, drive(&refused, &refused_out));
+    } else |err| {
+        try std.testing.expectEqual(error.ConnectFailed, err);
+    }
+    refused.deinit();
+    try expectHere(@src(), refused.events() == 0);
+    try std.testing.expectEqual(Event.end, try refused.advance());
+    try std.testing.expect(!refused_out.sent);
+
+    // Supporting table: the transitions named one by one. The `connecting`
+    // rows are not reachable through the API checks above, since whether
+    // `init` leaves the exchange connecting depends on the kernel.
     const Row = struct { from: State, transition: State.Transition, to: State };
     // A completed connect opens only a connecting exchange; finishing makes
     // any exchange done, and a done exchange stays done.
