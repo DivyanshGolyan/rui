@@ -156,6 +156,7 @@
 | SUI-190 | Surface | A FeedView Message summary with a detail target takes the hover background without selecting or opening anything. Aggregate summaries and prose outside actionable text stay inert. | FeedView renders mouse motion | `SUI-190 FeedView hovers actionable Message summaries` | docs/contracts/session-ui.md#accepted-contract |
 | SUI-191 | Surface | A DocumentView continuation takes the hover background across its painted row, opens the next document position on click and loses its hover on leave. With no click handler it offers no target. | DocumentView renders mouse events | `SUI-191 DocumentView continuation hovers and activates its painted row` | docs/contracts/session-ui.md#accepted-contract |
 | DIA-10 | Host | Host readiness is delivered even when optional diagnostics contend or fail. | Host startup wire with stderr fault injection | `readiness_before_diagnostics`: vary aliased output, diagnostic failure and backpressure; check readiness and later bounded notice. | docs/contracts/diagnostics.md:10 |
+| SUI-192 | Surface | Slash suggestion rows give names first use of the available width, retain two blank cells before any description, and keep ordinary descriptions aligned. | Palette rendered cells | `SUI-192 Palette keeps readable descriptions beside full names` | docs/contracts/session-ui.md:669; src/skill_palette_tests.zig |
 
 ## Seams the harness must provide
 
