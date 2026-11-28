@@ -349,7 +349,7 @@ test "App screens update layout state through exhausted resizes for every option
 
     for (0..8) |flags| for (1..11) |small_height| {
         var all: []const GroupedList.Row = rows[0..3];
-        var list: GroupedList = .{ .rows = .of(&all) };
+        var list: GroupedList = .{ .props = .{ .rows = .of(&all) } };
         var transcript: @import("DocumentView.zig") = .{ .document = document };
         var overview: Overview = .{ .content = &list, .input = input.widget(), .userdata = &list, .on_event = Row.event };
         var facade: Content = .{ .shown = transcript.widget() };
@@ -366,7 +366,7 @@ test "App screens update layout state through exhausted resizes for every option
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
                 all = rows[0..count];
-                list.rows = .of(&all);
+                list.props.rows = .of(&all);
                 const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = height }, .cell_size = .{} };
                 const input_height = (try input.widget().draw(ctx)).size.height;
                 const header_room = height - input_height;

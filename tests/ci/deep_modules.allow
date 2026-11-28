@@ -56,17 +56,6 @@ field-leak FeedView.FeedView.tail
 field-leak FeedView.FeedView.welcome
 field-leak FeedView.FeedView.welcome_quiet
 field-leak FeedView.FeedView.welcome_unicode
-field-leak GroupedList.GroupedList.anchor
-field-leak GroupedList.GroupedList.anchor_after_scroll
-field-leak GroupedList.GroupedList.caps
-field-leak GroupedList.GroupedList.edges
-field-leak GroupedList.GroupedList.on_pointer
-field-leak GroupedList.GroupedList.on_press
-field-leak GroupedList.GroupedList.pointer_row
-field-leak GroupedList.GroupedList.rows
-field-leak GroupedList.GroupedList.selected
-field-leak GroupedList.GroupedList.selection_background
-field-leak GroupedList.GroupedList.tail
 field-leak OverviewLines.SessionControls.caps
 field-leak OverviewLines.Settings.available
 field-leak OverviewLines.Settings.caps

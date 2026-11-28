@@ -44,16 +44,19 @@ pub const Press = struct {
 pub const Pointer = List.Pointer;
 pub const Held = List.Held;
 
-rows: Rows = .none,
-selected: ?u32 = null,
-selection_background: @import("overview_style.zig").Background = .selection,
-on_press: ?Press = null,
-on_pointer: ?Pointer = null,
+pub const Props = struct {
+    rows: Rows = .none,
+    selected: ?u32 = null,
+    selection_background: @import("overview_style.zig").Background = .selection,
+    edges: ?List.Edges = null,
+    caps: overview_view.Caps = .{},
+    tail: ?Tail = null,
+    on_press: ?Press = null,
+    on_pointer: ?Pointer = null,
+};
+props: Props = .{},
 on_presence: ?List.Presence = null,
-edges: ?List.Edges = null,
-caps: overview_view.Caps = .{},
 inner: List = .{},
-tail: ?Tail = null,
 aboveFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 belowFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 list: *vxfw.ListView = undefined,
@@ -65,18 +68,40 @@ pointer_row: ?i16 = null,
 
 pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
+/// Stores this frame's inputs; a selection past the last row becomes no selection.
+pub fn present(self: *Self, props: Props) void {
+    self.props = props;
+    if (self.props.selected) |index| {
+        if (index >= self.props.rows.count) self.props.selected = null;
+    }
+}
+
+/// Forgets where the pointer and the scroll anchor were, for when the list's content is replaced.
+pub fn forgetPosition(self: *Self) void {
+    self.anchor = null;
+    self.anchor_after_scroll = null;
+    self.pointer_row = null;
+}
+
+/// Drops the rows, edges and tail, which live in the frame's arena, so a later event cannot read them.
+pub fn endFrame(self: *Self) void {
+    self.props.rows = .none;
+    self.props.edges = null;
+    self.props.tail = null;
+}
+
 const Frame = struct {
     fn count(raw: *const anyopaque, first: u32) u32 {
         const owner: *const Self = @ptrCast(@alignCast(raw));
-        return owner.rows.countFromFn.?(owner.rows.userdata, first);
+        return owner.props.rows.countFromFn.?(owner.props.rows.userdata, first);
     }
 
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!List.Row {
         const owner: *const Self = @ptrCast(@alignCast(raw));
-        const built = try owner.rows.rowFn(owner.rows.userdata, index, arena);
-        const selected = owner.selected != null and owner.selected.? == index;
+        const built = try owner.props.rows.rowFn(owner.props.rows.userdata, index, arena);
+        const selected = owner.props.selected != null and owner.props.selected.? == index;
         std.debug.assert(!(selected and built.heading));
-        const segments = try widget_style.segments(arena, owner.caps, built.segments, if (selected) owner.selection_background else null);
+        const segments = try widget_style.segments(arena, owner.props.caps, built.segments, if (selected) owner.props.selection_background else null);
         if (selected) for (built.segments, segments) |segment, *dest| {
             if (segment.style.background == .hover) dest.style.bold = true;
         };
@@ -96,18 +121,14 @@ pub fn widget(self: *Self) vxfw.Widget {
 
 fn reportPress(raw: *anyopaque, ctx: *vxfw.EventContext, target: Target) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const press = self.on_press orelse return;
+    const press = self.props.on_press orelse return;
     return press.pressed(press.userdata, ctx, target);
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
-        .mouse_leave => {
-            self.anchor = null;
-            self.anchor_after_scroll = null;
-            self.pointer_row = null;
-        },
+        .mouse_leave => self.forgetPosition(),
         .mouse => |mouse| if (mouse.type == .motion or mouse.type == .press) {
             self.pointer_row = mouse.row;
             self.anchor = null;
@@ -163,8 +184,8 @@ pub fn followSelection(self: *Self) void {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.inner.anchor = null;
-    if (self.anchor) |*anchor| if (self.rows.findFn) |find| {
-        if (find(self.rows.userdata, anchor.target)) |index| {
+    if (self.anchor) |*anchor| if (self.props.rows.findFn) |find| {
+        if (find(self.props.rows.userdata, anchor.target)) |index| {
             const top: i64 = @as(i64, self.inner.list.scroll.top) + @as(i64, index) - @as(i64, anchor.index);
             self.inner.list.scroll.top = @intCast(@max(0, top));
             anchor.index = index;
@@ -172,23 +193,23 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         } else self.anchor = null;
     };
     self.inner.on_presence = self.on_presence;
-    self.inner.edges = self.edges;
+    self.inner.edges = self.props.edges;
     self.inner.inset_rows = true;
-    self.inner.rows = .{ .userdata = self, .count = self.rows.count, .rowFn = Frame.row, .countFromFn = if (self.rows.countFromFn != null) Frame.count else null };
+    self.inner.rows = .{ .userdata = self, .count = self.props.rows.count, .rowFn = Frame.row, .countFromFn = if (self.props.rows.countFromFn != null) Frame.count else null };
     self.inner.aboveFn = self.aboveFn;
     self.inner.belowFn = self.belowFn;
     self.inner.indicator_align = .center;
-    self.inner.indicator_style = widget_style.of(self.caps, .{ .colour = .quiet });
-    self.inner.selected = self.selected;
-    self.inner.on_press = if (self.on_press != null) .{ .userdata = self, .pressed = reportPress } else null;
-    self.inner.on_pointer = self.on_pointer;
-    self.inner.base_style = widget_style.of(self.caps, .{});
-    self.inner.selection_style = widget_style.of(self.caps, .{ .background = self.selection_background });
-    self.inner.hover_style = widget_style.of(self.caps, .{ .background = .hover });
+    self.inner.indicator_style = widget_style.of(self.props.caps, .{ .colour = .quiet });
+    self.inner.selected = self.props.selected;
+    self.inner.on_press = if (self.props.on_press != null) .{ .userdata = self, .pressed = reportPress } else null;
+    self.inner.on_pointer = self.props.on_pointer;
+    self.inner.base_style = widget_style.of(self.props.caps, .{});
+    self.inner.selection_style = widget_style.of(self.props.caps, .{ .background = self.props.selection_background });
+    self.inner.hover_style = widget_style.of(self.props.caps, .{ .background = .hover });
     const size = ctx.max.size();
-    const tail_rows = if (self.tail) |tail| @min(tail.rows, size.height) else 0;
+    const tail_rows = if (self.props.tail) |tail| @min(tail.rows, size.height) else 0;
     const room = size.height - tail_rows;
-    const tail = if (self.tail) |pinned| try pinned.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = tail_rows })) else null;
+    const tail = if (self.props.tail) |pinned| try pinned.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = tail_rows })) else null;
     var surface = try self.inner.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }));
     if (tail) |drawn| {
         const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
@@ -218,7 +239,7 @@ test "GroupedList selection preserves each segment foreground" {
         .{ .text = " task", .style = .{ .colour = .strong } },
     } }};
     const all: []const Row = &rows;
-    var list: Self = .{ .rows = .of(&all), .selected = 0 };
+    var list: Self = .{ .props = .{ .rows = .of(&all), .selected = 0 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 2 }, .cell_size = .{} };
@@ -229,9 +250,9 @@ test "GroupedList selection preserves each segment foreground" {
     try std.testing.expect(!cells.readCell(4, 0).style.bold);
     try std.testing.expect(!std.meta.eql(cells.readCell(2, 0).style.fg, cells.readCell(4, 0).style.fg));
     for ([_]u16{ 0, 2, 11 }) |column| {
-        try std.testing.expectEqual(widget_style.of(list.caps, .{ .background = .selection }).bg, cells.readCell(column, 0).style.bg);
+        try std.testing.expectEqual(widget_style.of(list.props.caps, .{ .background = .selection }).bg, cells.readCell(column, 0).style.bg);
     }
-    list.caps.depth = .none;
+    list.props.caps.depth = .none;
     const plain = try list.widget().draw(ctx);
     for ([_]u16{ 0, 2, 11 }) |column| {
         const cell = plain.children[0].surface.readCell(column, 0);
@@ -275,7 +296,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             .target = .{ .open = listed.reference },
         }};
         var presses: Pressed = .{};
-        var list: Self = .{ .rows = .of(&rows), .selected = if (selected) 0 else null, .caps = caps, .on_press = presses.press() };
+        var list: Self = .{ .props = .{ .rows = .of(&rows), .selected = if (selected) 0 else null, .caps = caps, .on_press = presses.press() } };
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
         _ = try list.widget().draw(ctx);
         if (hover_row) |row| {
@@ -330,7 +351,7 @@ test "GroupedList reports a left press as what the row under it drew with, after
         }
     };
     var presses: Pressed = .{};
-    var list: Self = .{ .rows = .{ .userdata = undefined, .count = 40, .rowFn = Numbered.row }, .selected = 25, .on_press = presses.press() };
+    var list: Self = .{ .props = .{ .rows = .{ .userdata = undefined, .count = 40, .rowFn = Numbered.row }, .selected = 25, .on_press = presses.press() } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const surface = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} });
@@ -368,7 +389,7 @@ test "GroupedList ignores a press below its last row" {
     };
     const all: []const Row = &rows;
     var presses: Pressed = .{};
-    var list: Self = .{ .rows = .of(&all), .on_press = presses.press() };
+    var list: Self = .{ .props = .{ .rows = .of(&all), .on_press = presses.press() } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
@@ -388,7 +409,7 @@ test "GroupedList reports what a row drew with, not what its index holds by the 
     };
     var all: []const Row = &rows;
     var presses: Pressed = .{};
-    var list: Self = .{ .rows = .of(&all), .on_press = presses.press() };
+    var list: Self = .{ .props = .{ .rows = .of(&all), .on_press = presses.press() } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
@@ -404,7 +425,7 @@ test "GroupedList without on_press only scrolls on the wheel" {
             return .{ .segments = try arena.dupe(Segment, &.{.{ .text = "task", .style = .{} }}) };
         }
     };
-    var list: Self = .{ .rows = .{ .userdata = undefined, .count = 40, .rowFn = Plain.row } };
+    var list: Self = .{ .props = .{ .rows = .{ .userdata = undefined, .count = 40, .rowFn = Plain.row } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} };
@@ -412,7 +433,7 @@ test "GroupedList without on_press only scrolls on the wheel" {
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try list.widget().handleEvent(&events, leftPress(0, 1));
     try std.testing.expect(!events.consume_event);
-    try std.testing.expectEqual(@as(?u32, null), list.selected);
+    try std.testing.expectEqual(@as(?u32, null), list.props.selected);
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
     _ = try list.widget().draw(ctx);
     try std.testing.expect(list.shown.first > 0);
@@ -422,7 +443,7 @@ test "GroupedList selects and presses a row with a pinned tail" {
     const rows: []const Row = &.{.{ .segments = &.{.{ .text = "first", .style = .{ .colour = .strong, .bold = true } }}, .target = .{ .open = numbered(1) } }};
     var presses: Pressed = .{};
     const tail: vxfw.Text = .{ .text = "rule\nSettings" };
-    var list: Self = .{ .rows = .of(&rows), .selected = 0, .on_press = presses.press(), .tail = .{ .widget = tail.widget(), .rows = 2 } };
+    var list: Self = .{ .props = .{ .rows = .of(&rows), .selected = 0, .on_press = presses.press(), .tail = .{ .widget = tail.widget(), .rows = 2 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
@@ -456,28 +477,28 @@ test "GroupedList markers count Sessions not the New Session entry and stay quie
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]overview_view.Caps.Depth{ .direct, .none }) |depth| for ([_]u32{ 0, 6 }) |selected| {
-        var list: Self = .{ .rows = .{ .userdata = undefined, .count = 7, .rowFn = Source.row, .countFromFn = Source.count }, .selected = selected, .aboveFn = Source.above, .belowFn = Source.below, .caps = .{ .depth = depth } };
+        var list: Self = .{ .props = .{ .rows = .{ .userdata = undefined, .count = 7, .rowFn = Source.row, .countFromFn = Source.count }, .selected = selected, .caps = .{ .depth = depth } }, .aboveFn = Source.above, .belowFn = Source.below };
         const surface = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 4 }, .cell_size = .{} });
         const indicator = surface.children[if (selected == 0) surface.children.len - 1 else 1];
         try std.testing.expectEqual(@as(i17, if (selected == 0) 3 else 0), indicator.origin.row);
         var text: std.ArrayList(u8) = .empty;
         for (0..30) |x| try text.appendSlice(arena.allocator(), indicator.surface.readCell(@intCast(x), 0).char.grapheme);
         try std.testing.expectEqualStrings(if (selected == 0) "           ↓ 4 more           " else "           ↑ 3 more           ", text.items);
-        try std.testing.expectEqual(widget_style.of(list.caps, .{ .colour = .quiet }).fg, indicator.surface.readCell(11, 0).style.fg);
+        try std.testing.expectEqual(widget_style.of(list.props.caps, .{ .colour = .quiet }).fg, indicator.surface.readCell(11, 0).style.fg);
     };
 }
 
 test "GroupedList selected row uses the owner's focused or inactive background" {
     const row = [_]Row{.{ .segments = &.{.{ .text = "Open chat", .style = .{} }} }};
     const rows: []const Row = &row;
-    var list: Self = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = .direct } };
+    var list: Self = .{ .props = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = .direct } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     for ([_]@import("overview_style.zig").Background{ .selection, .bar }) |background| {
-        list.selection_background = background;
+        list.props.selection_background = background;
         _ = try list.widget().draw(ctx);
-        try std.testing.expectEqual(widget_style.of(list.caps, .{ .background = background }).bg, list.inner.selection_style.bg);
+        try std.testing.expectEqual(widget_style.of(list.props.caps, .{ .background = background }).bg, list.inner.selection_style.bg);
     }
 }
 
@@ -492,7 +513,7 @@ test "Session pin gestures retain the drawn target and desired value without nor
     };
     const source: []const Row = &rows;
     var pressed: Pressed = .{};
-    var list: Self = .{ .rows = .of(&source), .on_press = pressed.press() };
+    var list: Self = .{ .props = .{ .rows = .of(&source), .on_press = pressed.press() } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     _ = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 8 }, .cell_size = .{} });
@@ -534,7 +555,7 @@ test "GroupedList row inset is stable for selection hover and plain rows" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var presses: Pressed = .{};
-        var list: Self = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = depth }, .on_press = presses.press() };
+        var list: Self = .{ .props = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = depth }, .on_press = presses.press() } };
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 3 }, .cell_size = .{} };
         _ = try list.widget().draw(ctx);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -553,7 +574,7 @@ test "GroupedList row inset is stable for selection hover and plain rows" {
                 try std.testing.expectEqualStrings(reference.readCell(@intCast(x), 0).char.grapheme, actual);
                 if (x < 2 or x >= width -| 2) try std.testing.expectEqualStrings(" ", actual);
                 const ground: overview_view.Background = if (y == 0) .selection else if (y == 1) .hover else .ground;
-                const style = widget_style.of(list.caps, .{ .background = ground });
+                const style = widget_style.of(list.props.caps, .{ .background = ground });
                 try std.testing.expectEqual(style.bg, line.readCell(@intCast(x), 0).style.bg);
                 try std.testing.expectEqual(style.reverse, line.readCell(@intCast(x), 0).style.reverse);
             }
@@ -595,10 +616,10 @@ fn anchorStationaryCase() !void {
         before[2],
     };
     var fixture: Fixture = .{ .rows = &before };
-    var list: Self = .{
+    var list: Self = .{ .props = .{
         .rows = .{ .userdata = &fixture, .count = before.len, .rowFn = Fixture.at, .findFn = Fixture.find },
         .edges = .{ .userdata = &fixture, .lineFn = Fixture.edge },
-    };
+    } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
@@ -607,7 +628,7 @@ fn anchorStationaryCase() !void {
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = @intCast(original), .button = .none, .type = .motion, .mods = .{} } });
     fixture.rows = &after;
-    list.rows.count = after.len;
+    list.props.rows.count = after.len;
     _ = try list.widget().draw(ctx);
     const physical = for (list.shown_at) |span| {
         if (span.target) |target| if (std.meta.eql(target, hovered)) break span.row;
@@ -621,7 +642,7 @@ fn flashStyleCase() !void {
     for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]bool{ false, true }) |selected| {
         var segments = [_]Segment{.{ .text = "task", .style = .{ .background = .hover } }};
         const rows: []const Row = &.{.{ .segments = &segments }};
-        var list: Self = .{ .rows = .of(&rows), .selected = if (selected) 0 else null, .caps = .{ .depth = depth } };
+        var list: Self = .{ .props = .{ .rows = .of(&rows), .selected = if (selected) 0 else null, .caps = .{ .depth = depth } } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 1 }, .cell_size = .{} };
@@ -659,7 +680,7 @@ fn anchorRecaptureCase() !void {
         after[0] = .{ .segments = &.{.{ .text = "new child", .style = .{} }}, .target = .{ .open = numbered(99) } };
         @memcpy(after[1..], &before);
         var fixture: Fixture = .{ .rows = &before };
-        var list: Self = .{ .rows = .{ .userdata = &fixture, .count = before.len, .rowFn = Fixture.at, .findFn = Fixture.find } };
+        var list: Self = .{ .props = .{ .rows = .{ .userdata = &fixture, .count = before.len, .rowFn = Fixture.at, .findFn = Fixture.find } } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
@@ -667,7 +688,7 @@ fn anchorRecaptureCase() !void {
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
         if (keyboard) {
-            list.selected = 7;
+            list.props.selected = 7;
             list.followSelection();
             _ = try list.widget().draw(ctx);
         } else {
@@ -680,8 +701,8 @@ fn anchorRecaptureCase() !void {
         const anchor = list.anchor orelse return error.TestExpectedEqual;
         try std.testing.expectEqual(@as(i17, 1), anchor.row);
         fixture.rows = &after;
-        list.rows.count = after.len;
-        list.selected = selection;
+        list.props.rows.count = after.len;
+        list.props.selected = selection;
         _ = try list.widget().draw(ctx);
         const physical = for (list.shown_at) |span| {
             if (span.target) |target| if (std.meta.eql(target, anchor.target)) break span.row;
@@ -721,7 +742,7 @@ fn anchorHeadingCase() !void {
     rows[0] = .{ .segments = &.{.{ .text = "heading", .style = .{} }} };
     for (rows[1..], 1..) |*row, index| row.* = .{ .segments = &.{.{ .text = "row", .style = .{} }}, .target = .{ .open = numbered(index) } };
     var fixture: Fixture = .{ .rows = &rows };
-    var list: Self = .{ .rows = .{ .userdata = &fixture, .count = rows.len, .rowFn = Fixture.at, .findFn = Fixture.find } };
+    var list: Self = .{ .props = .{ .rows = .{ .userdata = &fixture, .count = rows.len, .rowFn = Fixture.at, .findFn = Fixture.find } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
@@ -750,4 +771,85 @@ test "SUI-105 GroupedList preserves the pointer anchor across changes" {
 
 test "SUI-106 GroupedList shows release flash with selection" {
     try flashStyleCase();
+}
+
+test "SUI-194 a grouped list uses the inputs it was last given and drops a selection past its rows" {
+    const Fixture = struct {
+        rows: []const Row,
+        fn at(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            return self.rows[index];
+        }
+        fn find(raw: *const anyopaque, target: Target) ?u32 {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            for (self.rows, 0..) |row, index| {
+                if (row.target) |item| if (std.meta.eql(item, target)) return @intCast(index);
+            }
+            return null;
+        }
+    };
+    const plain_rows = [_]Row{
+        .{ .segments = &.{.{ .text = "first", .style = .{} }}, .target = .{ .open = "b4n8wd".* } },
+        .{ .segments = &.{.{ .text = "second", .style = .{} }}, .target = .{ .open = "c2d3f4".* } },
+    };
+    const rows: []const Row = &plain_rows;
+    var list: Self = .{};
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 4 }, .cell_size = .{} };
+    const selected_bg = widget_style.of(.{ .depth = .direct }, .{ .background = .selection }).bg;
+    const bar_bg = widget_style.of(.{ .depth = .direct }, .{ .background = .bar }).bg;
+    try std.testing.expect(!std.meta.eql(selected_bg, bar_bg));
+
+    // A selection past the last row draws no selected row.
+    list.present(.{ .rows = .of(&rows), .selected = 2, .caps = .{ .depth = .direct } });
+    const past = try list.widget().draw(ctx);
+    for ([_]u16{ 0, 1 }) |row| try std.testing.expect(!std.meta.eql(selected_bg, past.children[row].surface.readCell(0, 0).style.bg));
+
+    // A valid selection is drawn selected.
+    list.present(.{ .rows = .of(&rows), .selected = 1, .caps = .{ .depth = .direct } });
+    const valid = try list.widget().draw(ctx);
+    try std.testing.expectEqual(selected_bg, valid.children[1].surface.readCell(0, 0).style.bg);
+    try std.testing.expect(!std.meta.eql(selected_bg, valid.children[0].surface.readCell(0, 0).style.bg));
+
+    // Presenting again with another background, then other caps, changes the next draw.
+    list.present(.{ .rows = .of(&rows), .selected = 1, .selection_background = .bar, .caps = .{ .depth = .direct } });
+    const barred = try list.widget().draw(ctx);
+    try std.testing.expectEqual(bar_bg, barred.children[1].surface.readCell(0, 0).style.bg);
+    list.present(.{ .rows = .of(&rows), .selected = 1, .caps = .{ .depth = .none } });
+    const unstyled = try list.widget().draw(ctx);
+    const cell = unstyled.children[1].surface.readCell(0, 0);
+    try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
+    try std.testing.expect(cell.style.reverse);
+
+    // forgetPosition drops the pointer anchor: with it, a row stays under the pointer across a change; without it, the row moves.
+    const hovered: Target = .{ .open = "a1b2c3".* };
+    const before = [_]Row{
+        .{ .segments = &.{.{ .text = "first", .style = .{} }}, .target = .{ .open = "b4n8wd".* } },
+        .{ .segments = &.{.{ .text = "hovered", .style = .{} }}, .target = hovered },
+        .{ .segments = &.{.{ .text = "last", .style = .{} }}, .target = .{ .open = "c2d3f4".* } },
+    };
+    const after = [_]Row{
+        before[0],
+        .{ .segments = &.{.{ .text = "new child", .style = .{} }} },
+        before[1],
+        before[2],
+    };
+    const anchor_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
+    for ([_]bool{ false, true }) |forget| {
+        var fixture: Fixture = .{ .rows = &before };
+        var anchored: Self = .{ .props = .{ .rows = .{ .userdata = &fixture, .count = before.len, .rowFn = Fixture.at, .findFn = Fixture.find } } };
+        _ = try anchored.widget().draw(anchor_ctx);
+        const original = anchored.shown_at[1].row;
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try anchored.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = @intCast(original), .button = .none, .type = .motion, .mods = .{} } });
+        if (forget) anchored.forgetPosition();
+        fixture.rows = &after;
+        anchored.props.rows.count = after.len;
+        _ = try anchored.widget().draw(anchor_ctx);
+        const physical = for (anchored.shown_at) |span| {
+            if (span.target) |target| if (std.meta.eql(target, hovered)) break span.row;
+        } else return error.TestExpectedEqual;
+        if (forget) try std.testing.expect(physical != original) else try std.testing.expectEqual(original, physical);
+    }
 }

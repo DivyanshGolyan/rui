@@ -556,8 +556,8 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
                     return .{ .segments = built.segments, .heading = built.heading };
                 }
             };
-            list.rows = .{ .userdata = &state, .count = @intCast(overview_view.Lines.count(&state)), .rowFn = Source.row };
-            list.selected = if (overview_view.Lines.named(&state)) |at| @intCast(at) else null;
+            list.props.rows = .{ .userdata = &state, .count = @intCast(overview_view.Lines.count(&state)), .rowFn = Source.row };
+            list.props.selected = if (overview_view.Lines.named(&state)) |at| @intCast(at) else null;
             _ = try list.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
             const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = overview_view.footerRight(&state), .notice = if (overview_view.footerNotice(&state)) |said| said.words else null };
             _ = try footer.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 1 }, .cell_size = .{} });
