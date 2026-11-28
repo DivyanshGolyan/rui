@@ -15,7 +15,7 @@ const fields = blk: {
 pub fn panel(caps: view.Caps) Panel.KeyList {
     return .{
         .fields = &fields,
-        .ground = widget_style.of(caps, .{ .background = .raised }),
+        .style = .{ .ground = widget_style.of(caps, .{ .background = .raised }) },
         .strong = widget_style.of(caps, .{ .background = .raised, .colour = .strong, .bold = true }),
     };
 }
