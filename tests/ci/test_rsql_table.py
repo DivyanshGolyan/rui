@@ -59,6 +59,9 @@ class RsqlTableTest(unittest.TestCase):
             b"sqlite_objects": b"table\x1esqlite_object\x1eCREATE TABLE s",
             b"mysql_objects": b"table\x1emysql_object\x1eCREATE TABLE m",
             b"sqlite_ddl": b"sqlite ddl", b"mysql_ddl": b"mysql ddl",
+            b"sqlite_plain_objects": b"table\x1esqlite_plain\x1eCREATE TABLE sp",
+            b"mysql_plain_objects": b"table\x1emysql_plain\x1eCREATE TABLE mp",
+            b"sqlite_plain_ddl": b"sqlite plain ddl", b"mysql_plain_ddl": b"mysql plain ddl",
             b"mysql_migrations": b"first\x1dsecond\x1d", b"digest": b"42",
         }
         schema_records = [schema(name, value) for name, value in values.items()]

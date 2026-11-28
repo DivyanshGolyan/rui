@@ -245,7 +245,11 @@ def table_error(checked_in: str, rendered: str) -> tuple[str | None, int, int]:
 
 
 
-SCHEMA_VALUES = ("sqlite_objects", "mysql_objects", "sqlite_ddl", "mysql_ddl", "mysql_migrations", "digest")
+SCHEMA_VALUES = (
+    "sqlite_objects", "mysql_objects", "sqlite_ddl", "mysql_ddl",
+    "sqlite_plain_objects", "mysql_plain_objects", "sqlite_plain_ddl", "mysql_plain_ddl",
+    "mysql_migrations", "digest",
+)
 
 
 def schema_lines(schema):
@@ -269,6 +273,10 @@ def schema_lines(schema):
         f"    pub const mysql_objects: []const Object = {objects(schema['mysql_objects'])};",
         f"    pub const sqlite_ddl = {literal(schema['sqlite_ddl'])};",
         f"    pub const mysql_ddl = {literal(schema['mysql_ddl'])};",
+        f"    pub const sqlite_plain_objects: []const Object = {objects(schema['sqlite_plain_objects'])};",
+        f"    pub const mysql_plain_objects: []const Object = {objects(schema['mysql_plain_objects'])};",
+        f"    pub const sqlite_plain_ddl = {literal(schema['sqlite_plain_ddl'])};",
+        f"    pub const mysql_plain_ddl = {literal(schema['mysql_plain_ddl'])};",
         f"    pub const mysql_migrations = [_][:0]const u8{{ {texts} }};",
         f"    pub const digest: u64 = {int(schema['digest'])};",
         "};",
