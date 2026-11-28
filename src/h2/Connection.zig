@@ -511,9 +511,7 @@ pub fn submit(self: *Connection, record: *Record, origin: *const Origin, path: [
 }
 
 pub fn adopt(self: *Connection, record: *Record, stream_id: i32) void {
-    record.route = .{ .open = .{ .stream_id = stream_id, .connection = self.index + 1 } };
-    record.state = .open;
-    if (!self.carried_any) record.flags.opened_connection = true;
+    record.apply(.{ .open = .{ .stream_id = stream_id, .connection = self.index + 1, .first = !self.carried_any } });
     self.carried_any = true;
     self.streams += 1;
     self.idle_since_ns = null;
