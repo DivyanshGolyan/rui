@@ -1,4 +1,5 @@
 const std = @import("std");
+const interruption = @import("interruption.zig");
 const row_text = @import("testing/row_text.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -393,17 +394,25 @@ fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.Retry
     return self.window.retryAt(position, cells, @intCast(at.col), self.presentation());
 }
 
+fn heldKind(purpose: Purpose) interruption.Held {
+    return switch (purpose) {
+        .copy => .feed_copy,
+        .quote => .feed_quote,
+    };
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.hover.handleEvent(ctx, input);
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
         .focus_out => {
-            if (self.cancelSelection()) ctx.redraw = true;
+            const ends = if (self.selection) |held| interruption.cancels(.focus_lost, heldKind(held.purpose)) else true;
+            if (ends and self.cancelSelection()) ctx.redraw = true;
         },
         .mouse_leave => {
             self.retry_press = null;
-            if (self.selection) |held| if (held.purpose == .quote) {
+            if (self.selection) |held| if (interruption.cancels(.pointer_left, heldKind(held.purpose))) {
                 self.selection = null;
                 ctx.redraw = true;
             };

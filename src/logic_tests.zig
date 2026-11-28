@@ -96,6 +96,7 @@ const cores = .{
     .{ "idempotency_key.zig", @import("idempotency_key.zig") },
     .{ "input_media.zig", @import("input_media.zig") },
     .{ "input_parts.zig", @import("input_parts.zig") },
+    .{ "interruption.zig", @import("interruption.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_limits.zig", @import("json_limits.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
