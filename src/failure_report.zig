@@ -6,7 +6,7 @@ const outcome_code = @import("outcome_code.zig");
 const protocol = @import("protocol.zig");
 const utf8_validation = @import("utf8_validation.zig");
 
-pub const max_part_bytes = 256;
+pub const max_part_bytes = outcome_code.max_report_part_bytes;
 /// The mark a one-line rendering shows after a cut part. Stored parts never contain it.
 pub const cut_mark = "…";
 
