@@ -822,6 +822,43 @@ test "SUI-194 a grouped list uses the inputs it was last given and drops a selec
     try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
     try std.testing.expect(cell.style.reverse);
 
+    // Presenting another row source and other press recipients replaces them: the new rows are drawn and a press reaches the latest recipient only.
+    const other_rows = [_]Row{
+        .{ .segments = &.{.{ .text = "other", .style = .{} }}, .target = .{ .open = "e5f6a7".* } },
+    };
+    const Recorder = struct {
+        count: usize = 0,
+        last: ?Target = null,
+        fn press(raw: *anyopaque, _: *vxfw.EventContext, target: Target) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.count += 1;
+            self.last = target;
+        }
+    };
+    var first: Recorder = .{};
+    var second: Recorder = .{};
+    var press_events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const press_at_top: vaxis.Mouse = .{ .col = 1, .row = 0, .button = .left, .type = .press, .mods = .{} };
+    const other: []const Row = &other_rows;
+    list.present(.{ .rows = .of(&rows), .caps = .{ .depth = .direct }, .on_press = .{ .userdata = &first, .pressed = Recorder.press } });
+    _ = try list.widget().draw(ctx);
+    try list.widget().handleEvent(&press_events, .{ .mouse = press_at_top });
+    try std.testing.expectEqual(@as(usize, 1), first.count);
+    try std.testing.expectEqualDeep(plain_rows[0].target.?, first.last.?);
+    list.present(.{ .rows = .of(&other), .caps = .{ .depth = .direct }, .on_press = .{ .userdata = &second, .pressed = Recorder.press } });
+    const replaced = try list.widget().draw(ctx);
+    try std.testing.expectEqual(@as(usize, 1), replaced.children.len);
+    try list.widget().handleEvent(&press_events, .{ .mouse = press_at_top });
+    try std.testing.expectEqual(@as(usize, 1), first.count);
+    try std.testing.expectEqual(@as(usize, 1), second.count);
+    try std.testing.expectEqualDeep(other_rows[0].target.?, second.last.?);
+    // Presenting no callback removes it: a press reaches nobody.
+    list.present(.{ .rows = .of(&other), .caps = .{ .depth = .direct } });
+    _ = try list.widget().draw(ctx);
+    try list.widget().handleEvent(&press_events, .{ .mouse = press_at_top });
+    try std.testing.expectEqual(@as(usize, 1), first.count);
+    try std.testing.expectEqual(@as(usize, 1), second.count);
+
     // forgetPosition drops the pointer anchor: with it, a row stays under the pointer across a change; without it, the row moves.
     const hovered: Target = .{ .open = "a1b2c3".* };
     const before = [_]Row{
@@ -838,14 +875,15 @@ test "SUI-194 a grouped list uses the inputs it was last given and drops a selec
     const anchor_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
     for ([_]bool{ false, true }) |forget| {
         var fixture: Fixture = .{ .rows = &before };
-        var anchored: Self = .{ .props = .{ .rows = .{ .userdata = &fixture, .count = before.len, .rowFn = Fixture.at, .findFn = Fixture.find } } };
+        var anchored: Self = .{};
+        anchored.present(.{ .rows = .{ .userdata = &fixture, .count = before.len, .rowFn = Fixture.at, .findFn = Fixture.find } });
         _ = try anchored.widget().draw(anchor_ctx);
         const original = anchored.shown_at[1].row;
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try anchored.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = @intCast(original), .button = .none, .type = .motion, .mods = .{} } });
         if (forget) anchored.forgetPosition();
         fixture.rows = &after;
-        anchored.props.rows.count = after.len;
+        anchored.present(.{ .rows = .{ .userdata = &fixture, .count = after.len, .rowFn = Fixture.at, .findFn = Fixture.find } });
         _ = try anchored.widget().draw(anchor_ctx);
         const physical = for (anchored.shown_at) |span| {
             if (span.target) |target| if (std.meta.eql(target, hovered)) break span.row;
