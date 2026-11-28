@@ -511,7 +511,7 @@ pub fn submit(self: *Connection, record: *Record, origin: *const Origin, path: [
 }
 
 pub fn adopt(self: *Connection, record: *Record, stream_id: i32) void {
-    record.apply(.{ .open = .{ .stream_id = stream_id, .connection = self.index + 1, .first = !self.carried_any } });
+    _ = record.apply(.{ .open = .{ .stream_id = stream_id, .connection = self.index + 1, .first = !self.carried_any } });
     self.carried_any = true;
     self.streams += 1;
     self.idle_since_ns = null;
@@ -832,7 +832,7 @@ fn beforeFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, use
     const self = of(user_data);
     if (frame.*.hd.type != c.NGHTTP2_HEADERS) return 0;
     const record = self.recordOf(frame.*.hd.stream_id) orelse return 0;
-    record.flags.request_sent = true;
+    _ = record.apply(.request_sent);
     return 0;
 }
 
@@ -842,8 +842,7 @@ fn onFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
         c.NGHTTP2_HEADERS, c.NGHTTP2_DATA => {
             if (frame.*.hd.flags & c.NGHTTP2_FLAG_END_STREAM == 0) return 0;
             const record = self.recordOf(frame.*.hd.stream_id) orelse return 0;
-            record.flags.body_done = true;
-            if (record.flags.response_started) self.retireBody(record);
+            if (record.apply(.body_done).retire_body) self.retireBody(record);
         },
         c.NGHTTP2_GOAWAY => if (frame.*.goaway.error_code != c.NGHTTP2_NO_ERROR) {
             self.protocol_failure = true;
@@ -854,10 +853,10 @@ fn onFrameSend(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
 }
 
 fn responseStarted(self: *Connection, record: *Record) void {
-    if (record.flags.response_started) return;
-    record.flags.response_started = true;
+    const effect = record.apply(.response_started);
+    if (!effect.changed) return;
     record.releaseFields(self.env.allocator);
-    if (record.flags.body_done) self.retireBody(record);
+    if (effect.retire_body) self.retireBody(record);
 }
 
 fn retireBody(self: *Connection, record: *Record) void {
@@ -941,12 +940,12 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
         },
         c.NGHTTP2_HEADERS => {
             const record = self.recordOf(frame.*.hd.stream_id) orelse return 0;
-            if (frame.*.hd.flags & c.NGHTTP2_FLAG_END_STREAM != 0) record.flags.end_stream_seen = true;
+            if (frame.*.hd.flags & c.NGHTTP2_FLAG_END_STREAM != 0) _ = record.apply(.end_stream);
             if (self.head.record == record) self.emitHead(record);
         },
         c.NGHTTP2_DATA => {
             const record = self.recordOf(frame.*.hd.stream_id) orelse return 0;
-            if (frame.*.hd.flags & c.NGHTTP2_FLAG_END_STREAM != 0) record.flags.end_stream_seen = true;
+            if (frame.*.hd.flags & c.NGHTTP2_FLAG_END_STREAM != 0) _ = record.apply(.end_stream);
         },
         else => {},
     }
@@ -956,15 +955,8 @@ fn onFrameRecv(_: ?*c.nghttp2_session, frame: [*c]const c.nghttp2_frame, user_da
 fn emitHead(self: *Connection, record: *Record) void {
     defer self.releaseHead();
     const status = self.head.status;
-    const kind: @FieldType(h2.Head, "kind") = if (record.flags.final_seen)
-        .trailers
-    else if (status >= 100 and status < 200)
-        .interim
-    else
-        .final;
+    const kind = record.apply(.{ .status = status }).head.?;
     if (kind == .final) {
-        record.status = status;
-        record.flags.final_seen = true;
         for (self.head.fields.items) |field| {
             if (std.mem.eql(u8, field.name, "content-encoding") and !policy.identityOnly(field.value))
                 return self.endOpen(record, .encoded_response);
@@ -1026,13 +1018,13 @@ fn readBody(
             const read = std.c.pread(@intCast(record.body_source), buffer + filled, wanted - filled, @intCast(record.body_offset + filled));
             if (read < 0 and std.posix.errno(read) == .INTR) continue;
             if (read <= 0) {
-                record.cause = .body_failed;
+                _ = record.apply(.body_failed);
                 return c.NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
             }
             filled += @intCast(read);
         }
     }
-    record.body_offset += wanted;
+    _ = record.apply(.{ .body_advanced = wanted });
     if (record.body_offset == record.body_length) data_flags.* |= c.NGHTTP2_DATA_FLAG_EOF;
     return @intCast(wanted);
 }

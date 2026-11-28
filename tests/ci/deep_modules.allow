@@ -127,12 +127,6 @@ field-leak feed_window.Window.low
 field-leak feed_window.Window.opened
 field-leak feed_window.Window.tail_rows
 field-leak find_tools.Call.words
-field-leak h2/Stream.Stream.body_offset
-field-leak h2/Stream.Stream.cause
-field-leak h2/Stream.Stream.flags
-field-leak h2/Stream.Stream.last_activity_ns
-field-leak h2/Stream.Stream.sink_written
-field-leak h2/Stream.Stream.status
 field-leak history_memo.Table.Entry.memo
 field-leak history_memo.Table.entries
 field-leak host_drain.Watch.until_ns
